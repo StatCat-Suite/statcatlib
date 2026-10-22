@@ -6,7 +6,9 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from sdmxlib import InternationalString
+from sdmxlib import InternationalString, Ref
+from sdmxlib.model.concept import Concept
+from sdmxlib.model.urn import SdmxUrn
 
 import statcatlib as sc
 
@@ -59,6 +61,26 @@ def require_table(index: LanceIndex, lang: str = "en") -> lancedb.table.Table:
     table = index.table_for(lang)
     assert table is not None, f"no search table for {lang!r}"
     return table
+
+
+def concept_of(component_id: str) -> Ref[Concept]:
+    """A concept identity for a fixture's DSD component or MSD attribute.
+
+    sdmxlib 0.68 refuses a component without one as it is built. The
+    reference is left unresolved and its scheme is never stored, so
+    `sdmx.concept` holds no row for it and a dimension's name still falls
+    back to its id, as it did before a concept was required.
+    """
+    urn = SdmxUrn.make(
+        Concept,
+        package="conceptscheme",
+        artefact_class="Concept",
+        agency="TEST",
+        id="CS_TEST",
+        version="1.0",
+        item_id=component_id,
+    )
+    return Ref[Concept].unresolved(urn)
 
 
 def _i(en: str) -> InternationalString:

@@ -17,6 +17,7 @@ from sdmxlib.model.istring import InternationalString
 
 from statcatlib.sources.sdmx import ingest_sdmx
 from statcatlib.store.store import Catalog
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.integration
 
@@ -50,8 +51,8 @@ def _make_registry() -> InMemoryRegistry:
         maintainer="TEST",
         name=_i("Test DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_cl),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_cl),
         ],
     )
     flow = Dataflow(

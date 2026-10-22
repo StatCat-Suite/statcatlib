@@ -16,6 +16,7 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 from sdmxlib.model.istring import InternationalString
 
 import statcatlib as sc
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.integration
 
@@ -62,8 +63,8 @@ def _make_two_flow_registry() -> tuple[InMemoryRegistry, sc.Catalog]:
         maintainer="TEST",
         name=_i("Exchange Rate DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_a),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_a),
         ],
     )
     dsd2 = DataStructure(
@@ -71,8 +72,8 @@ def _make_two_flow_registry() -> tuple[InMemoryRegistry, sc.Catalog]:
         maintainer="TEST",
         name=_i("GDP DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_q),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_q),
         ],
     )
     flow1 = Dataflow(id="DF_EXR", maintainer="TEST", name=_i("Exchange Rate"), structure=dsd1)
@@ -312,7 +313,7 @@ class TestDatasetRelated:
             id="DSD_UNIQUE",
             maintainer="TEST",
             name=_i("Unique DSD"),
-            dimensions=[Dimension(id="DIM", representation=unique_cl)],
+            dimensions=[Dimension(id="DIM", concept=concept_of("DIM"), representation=unique_cl)],
         )
         flow = Dataflow(id="DF_UNIQUE", maintainer="TEST", name=_i("Unique Flow"), structure=dsd)
         registry = InMemoryRegistry()
