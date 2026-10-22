@@ -28,6 +28,7 @@ from statcatlib.store.store import (
     Hit,
     SEARCH_CONTEXT_ANNOTATION_TYPE,
     SEARCH_EXCLUDE_ANNOTATION_TYPE,
+    IncompatibleCatalogError,
     IncompatibleIndexError,
     QueryBuilder,
     ReferenceMetadataBlend,
