@@ -217,7 +217,7 @@ release-3-pr:
     git add CHANGELOG.md pyproject.toml
     git commit -m "chore(release): ${VER}"
     git push -u origin "${BRANCH}"
-    NOTES=$(git-cliff --unreleased --tag "${VER}" --strip all)
+    NOTES=$(just release-notes "${VER}")
     gh pr create --base main --head "${BRANCH}" --title "chore(release): ${VER}" --body "${NOTES}"
     echo "Run just ci on this branch; when it is green, run: just release-4-merge"
 
@@ -249,13 +249,28 @@ release-4-merge:
     git merge --ff-only origin/main
     git tag -a "${VER}" -m "${VER}" "${MERGE}"
     git push origin "${VER}"
-    NOTES=$(git-cliff --latest --strip all)
+    NOTES=$(just release-notes "${VER}")
     gh release create "${VER}" --verify-tag --title "${VER}" --notes "${NOTES}"
     git branch -D "${BRANCH}"
     git push origin --delete "${BRANCH}"
     git switch --detach "${VER}"
     echo "Released ${VER} on GitHub; checked out at the tag"
     echo "Next: just release-5-pypi"
+
+# Steps 3 and 4 take their text from here, not from git-cliff's regeneration
+# from commits, which would drop what was written by hand after step 2.
+# Print a version's CHANGELOG.md section, as edited
+[group('release')]
+release-notes VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VER="{{ VERSION }}"
+    NOTES=$(awk -v head="## [${VER#v}]" 'index($0, head) == 1 {f = 1; next} /^## \[/ {f = 0} f' CHANGELOG.md | sed '/./,$!d')
+    if [[ -z "${NOTES}" ]]; then
+        echo "error: CHANGELOG.md has no section for ${VER#v}" >&2
+        exit 1
+    fi
+    printf '%s\n' "${NOTES}"
 
 # Step 5 — Build and publish to PyPI (requires UV_PUBLISH_TOKEN env var)
 [group('release')]
