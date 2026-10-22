@@ -223,7 +223,7 @@ One DuckDB file, two schema owners:
   `dataset_standard`, `service_dataset`, `quality_annotation`, `provenance`,
   `variable`, `feature_type`, `author`, `dimension_name`,
   `codelist_dependency`, `lineage`, `_meta`
-- **`sdmx` schema** — SDMX structural tables owned by sdmxlib (schema 2.18).
+- **`sdmx` schema** — SDMX structural tables owned by sdmxlib (schema 2.48).
   Catalogue spine (`artefact`, `localized_text`, `annotation`,
   `annotation_text`, `artefact_ref`, `fetch_scope`); item tables (`code`,
   `concept`, `category`, `agency`, `organisation_contact`, `data_provider`,
@@ -246,6 +246,13 @@ One DuckDB file, two schema owners:
 
   An absent reference is `NULL`, not `''` — never compare against the
   empty string here.
+
+  sdmxlib treats this schema as a cache and migrates it by dropping it.
+  Here it is half the catalog, so `Catalog.open()` and `from_connection()`
+  refuse with `IncompatibleCatalogError` when the stored `sdmx._meta`
+  version differs from sdmxlib's and `sdmx.artefact` holds rows
+  (`_refuse_sdmx_schema_rebuild` in `store/store.py`). An sdmxlib that bumps
+  its store schema therefore means rebuilding every catalog.
 
 statcatlib creates its own tables via `store/schema.py:create_schema(conn)` which
 creates the `statcat` schema and returns a cursor with
