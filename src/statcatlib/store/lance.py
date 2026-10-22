@@ -1043,7 +1043,7 @@ class LanceIndex:
         """
         try:
             data = json.loads((self._path / _MANIFEST_FILE).read_text())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return None
         return data if isinstance(data, dict) else None
 

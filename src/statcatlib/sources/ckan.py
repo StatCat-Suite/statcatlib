@@ -206,7 +206,7 @@ def _parse_istring(
                 if fr_val2 := parsed.get(fr_key):
                     kw2["fr"] = fr_val2
                 return InternationalString(**kw2)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             pass
         return InternationalString(en=raw or fallback_en)
     return InternationalString(en=fallback_en)
@@ -231,7 +231,7 @@ def _parse_keywords(raw: object) -> list[InternationalString]:
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             return []
     if not isinstance(raw, dict):
         return []
@@ -255,7 +255,7 @@ def _parse_frequency(raw: object) -> Frequency | None:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
                 raw = parsed
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             pass
     if isinstance(raw, dict):
         en_label = (raw.get("en") or "").strip()
@@ -285,7 +285,7 @@ def _parse_subjects(raw: object) -> list[ConceptRef]:
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             raw = [raw]
     if not isinstance(raw, list):
         return []
@@ -302,7 +302,7 @@ def _parse_spatial(raw: object) -> list[SpatialCoverage]:
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             raw = [raw]
     if not isinstance(raw, list):
         return []
@@ -427,7 +427,7 @@ def _ckan_package_to_dataset(raw: dict[str, object]) -> OpenDataset:
     if isinstance(lang_raw, str):
         try:
             lang_raw = json.loads(lang_raw)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             lang_raw = [lang_raw]
     language: list[str] = [str(lang) for lang in _seq(lang_raw) if lang]
 

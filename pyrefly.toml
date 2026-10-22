@@ -29,7 +29,7 @@
 #
 # Keep this at 0 findings. A new one is a real defect, not noise.
 
-python-version = "3.13"
+python-version = "3.14"
 
 # src-layout: make `import statcatlib` resolve. Checks `src` and `tests`, mirroring
 # `just typecheck`, which is `basedpyright src tests`. `tests` was added by
