@@ -1,0 +1,88 @@
+indent-width = 4
+line-length = 120
+target-version = "py313"
+
+[format]
+docstring-code-format = true
+docstring-code-line-length = 88
+indent-style = "space"
+line-ending = "auto"
+quote-style = "double"
+skip-magic-trailing-comma = false
+
+[lint]
+select = ["ALL"]
+ignore = [
+  # ── Docstring style conflicts ─────────────────────────────────────────────
+  # Google convention uses D211 (no blank before class docstring) + D212 (summary on first line)
+  "D203", # one-blank-line-before-class — conflicts with D211
+  "D213", # multi-line-summary-second-line — conflicts with D212
+
+  # ── Formatter conflicts ───────────────────────────────────────────────────
+  "COM812", # missing-trailing-comma — handled by formatter
+  "ISC001", # single-line-implicit-string-concatenation — handled by formatter
+
+  # ── Type annotations ──────────────────────────────────────────────────────
+  # ANN401 is still ignored globally, and that is the one remaining piece of
+  # sdmxlib drift. 44 findings across 7 files — spread, not concentrated, so
+  # unlike S608 below there is no narrow scope to put it behind. Typing them
+  # is a job of its own rather than a config decision. sdmxlib runs it ON
+  # everywhere with a single scoped noqa.
+  "ANN401", # any-type — see above
+  "FA",     # flake8-future-annotations — Python 3.12+, no __future__ needed
+
+  # ── Docstring style ───────────────────────────────────────────────────────
+  "D105", # undocumented-magic-method — dunder methods are self-evident (__iter__, __len__, etc.)
+  "D107", # undocumented-public-init — Google style documents __init__ in class docstring
+
+  # ── Pylint noise ─────────────────────────────────────────────────────────
+  "PLR0911", # too-many-return-statements — dispatch functions are idiomatic with many returns
+  "PLR0913", # too-many-arguments — triggered by dataclasses with many fields
+  "PLR0917", # too-many-positional-arguments — newly enforced by ruff 0.16; same reasoning as PLR0913
+  "PLR2004", # magic-value-comparison — too noisy in practice
+
+  # ── Active development ────────────────────────────────────────────────────
+  "TD",  # flake8-todos — don't enforce TODO format during development
+  "FIX", # flake8-fixme — same
+
+  # ── Misc ──────────────────────────────────────────────────────────────────
+  "CPY001", # missing-copyright-notice — not used in this project
+  "SIM108", # sometimes you might want to use either style
+  "ERA001", # commented out code can be noisey for if it is actually dead code
+  "TC",     # flake8-type-checking — lazy imports in 3.14 will make this unnecessary
+]
+
+[lint.per-file-ignores]
+# Init files: allow re-exports and unordered imports
+"__init__.py" = ["E402", "F401", "I"]
+# ── Narrow scopes, replacing blanket ignores (#106) ────────────────────────
+# Each of these was a project-wide ignore. Measured, every finding sits in one
+# place, so the rule is now ON everywhere else and new code gets caught.
+#
+# S608 (hardcoded-sql-expression): 66 findings, all in the three query
+# compilers, which build SQL by joining validated clause fragments and bind
+# every value — the pattern CLAUDE.md "SQL style" prescribes. Same shape
+# sdmxlib scopes per-directory. Anything outside these three is now a finding.
+"src/statcatlib/store/store.py" = ["S608"]
+"src/statcatlib/store/scopes.py" = ["S608"]
+"src/statcatlib/query.py" = ["S608"]
+# B008 (7) and FBT (10): every one is Typer. `typer.Option(...)` in a default
+# is the framework's documented idiom, and a CLI boolean flag is a boolean
+# positional by construction. Neither is a defect here, and neither ignore
+# needs to reach past the CLI.
+"src/statcatlib/cli/**/*.py" = ["B008", "FBT"]
+# Tests: skip docstrings, annotations, security checks, and unused-arg checks
+"tests/**/*.py" = ["D", "ANN", "S101", "ARG", "DTZ001", "SLF001", "PLC0415"]
+"tests/test_public_api.py" = ["PLC0415"]  # imports inside test methods are the point
+# Examples: standalone scripts — allow print, missing docstrings, implicit namespace
+"examples/**/*.py" = ["T201", "D1", "INP001"]
+# tools/: developer scripts, run by `just`, not shipped — not an importable
+# package. T201 stays ON: the prints are scoped with `# noqa: T201` inline, as
+# they are in sdmxlib, so the two copies of count_any.py stay comparable.
+"tools/**/*.py" = ["INP001"]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.isort]
+known-first-party = ["statcatlib"]

@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# macOS
+.DS_Store
+
+# Scratch / temp files
+*.zip
+*.bak
+site/
+
+# Generated catalog folders (created by catalog build scripts)
+*_catalog/
+*.duckdb
+.env
+.envrc
+
+# DuckDB spill files (large queries page to disk here)
+.tmp/
+
+# uv lockfile — statcatlib is a published library; downstream consumers
+# resolve against pyproject.toml. Committing the lockfile would leak
+# whichever package index the local environment resolved against.
+uv.lock

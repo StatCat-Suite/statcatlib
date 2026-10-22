@@ -1,0 +1,115 @@
+# pyrefly.toml — second type-checker, run beside basedpyright (#107).
+#
+# basedpyright (`just typecheck`, configured in pyproject.toml) stays the
+# source of truth. pyrefly runs at full strength as an independent second
+# opinion, on the same governance model as ruff and sdmxlib's own pyrefly
+# config: turn EVERYTHING on, then subtract, with a written reason and a
+# measured count per subtraction. The upside over an allow-list is that a NEW
+# error kind in the next release arrives as a visible finding instead of
+# silently not running.
+#
+# Adopting it cost 60-odd code fixes and found five things basedpyright does
+# not see, four of them fixed at the cause:
+#
+#   * two projection guards that raised but returned `None`, so both call
+#     sites carried a `# pyright: ignore` to pass the value on — replaced by
+#     guards that return what they prove (`_require_select_cols`);
+#   * `_EDGE_MAP` discriminating on key presence, which basedpyright narrows
+#     and pyrefly does not — now an explicit tagged union, because two
+#     checkers disagreeing about whether a branch is safe is reason enough to
+#     say which branch it is;
+#   * two `field(default=[])` in `scopes.py` — attrs shares one list across
+#     every instance, so that is a live bug the first time anything appends;
+#   * 38 `str()` / `int()` / `float()` conversions that #109 made provably
+#     dead by typing the boundaries they were guarding.
+#
+# The fifth is not fixable and says so at the site: `_execute_query` cannot
+# narrow with `isinstance(ds, cls)` because `query(sc.Dataset)` passes a
+# `TypeAliasType`, not a class.
+#
+# Keep this at 0 findings. A new one is a real defect, not noise.
+
+python-version = "3.13"
+
+# src-layout: make `import statcatlib` resolve. Checks `src` and `tests`, mirroring
+# `just typecheck`, which is `basedpyright src tests`. `tests` was added by
+# #116: the gap let a wrong `tmp_path` annotation stand behind 25
+# suppressions, and hid three dead ignores from the rule that exists to catch
+# them.
+# `"."` so `from tests.conftest import …`, the suite's way of sharing
+# fixtures, resolves; `"src"` so `import statcatlib` does.
+search-path = ["src", "."]
+project-includes = ["src", "tests"]
+project-excludes = ["**/__pycache__", "**/.venv"]
+
+preset = "all"
+
+[errors]
+# ── Subtractions from `preset = "all"` ────────────────────────────────────
+# Everything below is off on purpose. The counts are from the run that
+# introduced this config; they are the argument, not decoration. Borrowed
+# from sdmxlib, which subtracts the same set for the same reasons — where a
+# reason does not hold here, the entry is not carried over.
+
+# House style we hold deliberately, or third-party boundary noise.
+implicit-bool = false          # 347 — `if not ids:` / `if rows:` is idiomatic Python
+unknown-argument-type = false  #  23 — duckdb / lancedb / pyarrow call sites
+unknown-variable-type = false  #   2 — the same boundary, on the receiving end
+unused-call-result = false     #  31 — mostly `conn.execute(...)`, whose return we do not want
+
+# `explicit-any` (14) flags every literal `Any` token, including the ones
+# #109 kept deliberately and documented: `make_unloaded`, whose sentinel is
+# assigned into fields of every declared type; the three kind-dispatched
+# construction locals; and `tuple[Any, ...]` for DuckDB rows, which is #110.
+# The check we actually want is a *degradation* to Any — `implicit-any` and
+# the `no-any-return` family — and those are on via the preset. The literal
+# count is guarded instead by `just check-any`, which ratchets it and, unlike
+# this rule, sees inside generic arguments.
+explicit-any = false
+
+# Re-exports through `statcatlib/__init__.py` are the public API surface;
+# `implicit-reexport` (32) wants an explicit `as` alias or `__all__` entry for
+# each. Worth revisiting as a deliberate API-surface pass, not as a side
+# effect of turning a checker on.
+implicit-reexport = false
+
+# pyrefly 1.2.0 regression: fires on every lambda whose parameter type came
+# from bidirectional inference, even where that inference succeeded. Python
+# has no lambda parameter annotation syntax, so the only "fix" is rewriting
+# sort keys as named functions to satisfy a diagnostic that is wrong.
+# Re-check on the next release and drop this line when it is fixed.
+implicit-any-lambda = false
+
+# ── tests/ ────────────────────────────────────────────────────────────────
+# Checked (#116), but not required to be annotated. `ruff.toml` already
+# exempts tests from `ANN`; demanding annotations here would contradict that
+# decision rather than extend it.
+#
+# The counts are the argument. Of pyrefly's 934 findings over `tests/`, 795
+# were these three rules — 510 of them `unannotated-return` alone, which
+# basedpyright does not ask for at all. Neither bug this gap hid was an
+# annotation-coverage finding, so the remaining ~139 are where the value is.
+[[sub_config]]
+matches = "tests/**"
+
+[sub_config.errors]
+implicit-any-parameter = false
+unannotated-return = false
+implicit-any-type-argument = false
+
+# pyrefly 1.4.0 added these two, and over `tests/` they are the price of the
+# annotation exemption above rather than findings of their own: a fixture
+# parameter left unannotated is an implicit Any, so every attribute read on
+# it (500) and every value returned from it (2) is "unknown" too. Measured on
+# the commit that moved to 1.4.0, every one of the 502 was on such a
+# parameter; the same rules stay on in `src`, where they found two real
+# leftovers on day one.
+unknown-attribute-access = false
+unknown-return-type = false
+
+# 48 — a test collects rows of one kind and reads that kind's keys.
+# `SearchRow` cannot express that: every extension key is `NotRequired`
+# because it belongs to one row kind, deliberately and per its docstring.
+# The rule is right in `src`, where the kind is not known locally; it cannot
+# see the narrowing a test performs by construction.
+not-required-key-access = false

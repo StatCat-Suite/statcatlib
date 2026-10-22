@@ -1,0 +1,160 @@
+[project]
+name = "statcatlib"
+version = "0.8.0"
+description = "Queryable open data catalog engine for DCAT-AP, StatDCAT-AP, CKAN, and SDMX"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+authors = [
+    { name = "gabrielgellner", email = "gabrielgellner@gmail.com" }
+]
+requires-python = ">=3.13"
+keywords = ["sdmx", "dcat", "open-data", "catalog", "duckdb", "statistical-data", "ckan"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+dependencies = [
+    "attrs>=26.1.0",
+    # Below 2: on Python 3.13 the newest sdmxlib that resolves is 0.67.1 (0.68+
+    # needs 3.14), and it does not cap DuckDB itself, but its lake writes fail
+    # under DuckDB 2.0 — sdmxlib 0.69.1 added the same cap for the same reason.
+    # Lift it with the move to an sdmxlib that supports DuckDB 2.
+    "duckdb>=1.1,<2",
+    "httpx>=0.28",
+    "sdmxlib>=0.67",
+]
+
+[project.optional-dependencies]
+search = ["lancedb>=0.39", "sentence-transformers>=3.0", "typer>=0.15", "rich>=15.0"]
+
+[project.scripts]
+statcat = "statcatlib.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/StatCat-Suite/statcatlib"
+Repository = "https://github.com/StatCat-Suite/statcatlib"
+Documentation = "https://statcat-suite.github.io/statcatlib"
+"Issue Tracker" = "https://github.com/StatCat-Suite/statcatlib/issues"
+Changelog = "https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "statcatlib"
+
+[tool.pydoclint]
+style = "google"
+# Signatures carry the types; Google style keeps them out of the prose, and
+# both type checkers read the annotations. Default `true` reports 45 findings
+# demanding docstring-side hints — a house-style disagreement, not defects.
+arg-type-hints-in-docstring = false
+check-style-mismatch = true
+# The annotation carries the return type too, for the same reason it carries
+# the argument types — see above.
+check-return-types = false
+check-yield-types = false
+# Google style documents __init__'s arguments in either the class docstring or
+# __init__'s own. `Catalog.__init__` takes nine, documented where they are
+# declared; hoisting them into the class docstring moves them away from the
+# signature for no gain.
+allow-init-docstring = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast, in-process tests with no network I/O",
+    "docs: doctests and example-script tests",
+    "integration: tests that use real DuckDB and sdmxlib but no network",
+    "live: tests that make real HTTP calls to external SDMX endpoints",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.38.4",
+    "lancedb>=0.39",
+    "mkdocs-material>=9.7.6",
+    "polars>=1.39.3",
+    "pydoclint>=0.9.1",
+    "pyrefly>=1.2.0",
+    "pytest>=9.0.3",
+    "pytest-httpx>=0.35",
+    "rich>=15.0",
+    "ruff>=0.15.8",
+    "sentence-transformers>=3.0",
+    "typer>=0.15",
+    "watchfiles>=1.1.1",
+]
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+exclude = ["scripts", ".venv"]
+# Strict-mode rules that are clean on this codebase (0 findings each, measured
+# on the commit that turned them on), enabled as regression guards rather than
+# as a cleanup. Borrowed from sdmxlib, which runs the same set — see #106.
+#
+# The first two are basedpyright's Any-degradation catchers: a bare generic
+# (`list` rather than `list[str]`) and an untyped parameter both silently
+# become Any.
+reportMissingTypeArgument = "error"
+reportMissingParameterType = "error"
+# Dead casts, getter/setter drift, __init__/__new__ disagreement, and
+# always-true/false `in` checks. Pure hardening.
+reportUnnecessaryCast = "error"
+reportInvalidCast = "error"
+reportPropertyTypeMismatch = "error"
+reportInconsistentConstructor = "error"
+reportUnnecessaryContains = "error"
+reportDeprecated = "error"
+reportUnsafeMultipleInheritance = "error"
+reportTypeCommentUsage = "error"
+reportSelfClsParameterName = "error"
+# Suppression hygiene, and the rule that keeps the .claude suppression guard
+# honest in the other direction: an ignore that outlived its defect is a lie
+# the next reader believes. Found 6 the day it went on, none of which were
+# hiding anything.
+reportUnnecessaryTypeIgnoreComment = "error"
+#
+# NOT enabled: reportCallInDefaultInitializer (23 findings). `ruff.toml`
+# already ignores B008, which is the same concern — turning this on would
+# contradict a decision the project has already made. Recorded here so the
+# next person diffing against sdmxlib's config does not re-litigate it.
+reportAny = "none"
+reportExplicitAny = "none"
+reportUnknownVariableType = "none"
+
+# `tests/` is type-checked too (#116) — the gap let a wrong `tmp_path`
+# annotation stand behind 25 suppressions, and hid three dead ignores from
+# `reportUnnecessaryTypeIgnoreComment`, which exists to catch exactly those.
+#
+# Annotation-completeness rules stay off there. `ruff.toml` already exempts
+# tests from `ANN`; demanding parameter types here would contradict that
+# decision rather than extend it. Measured: 285 of basedpyright's 416
+# findings over `tests/` were this one rule, and neither bug the gap hid was
+# an annotation-coverage finding.
+[[tool.basedpyright.executionEnvironments]]
+root = "tests"
+# `from tests.conftest import …` is how the suite shares fixtures; without the
+# repo root on the path the package does not resolve from inside `tests`.
+extraPaths = ["."]
+reportMissingParameterType = "none"
+# 48 — a test collects rows of one kind and reads that kind's keys, which
+# `SearchRow` cannot express: every extension key is `NotRequired` because it
+# belongs to one row kind, deliberately and per its docstring. The rule is
+# right in `src`, where the kind is not known locally, and cannot see the
+# narrowing a test performs by construction.
+reportTypedDictNotRequiredAccess = "none"
+
+[[tool.basedpyright.executionEnvironments]]
+root = "src"

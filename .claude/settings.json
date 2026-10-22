@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "ask": [
+      "Edit(./ruff.toml)",
+      "Edit(./pyrefly.toml)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '[.tool_input.new_string, .tool_input.content] | map(select(. != null)) | join(\"\\n\")' | grep -qE '#[[:space:]]*(noqa|type:[[:space:]]*ignore|pyright:[[:space:]]*ignore|pyrefly:[[:space:]]*ignore|ruff:[[:space:]]*(disable|enable|ignore|file-ignore))' && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"This edit adds a lint/type suppression (noqa / type: ignore / pyright: ignore / pyrefly: ignore / ruff: disable|enable|ignore|file-ignore). Project rule: suppressions are approved explicitly, never added as part of a normal coding loop. Fix the underlying defect, or show a minimal repro proving the checker is wrong.\"}}' || true",
+            "statusMessage": "Checking for lint/type suppressions"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-config-files.sh",
+            "statusMessage": "Checking for checker-config writes"
+          }
+        ]
+      }
+    ]
+  }
+}
