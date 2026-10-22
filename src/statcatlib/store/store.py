@@ -27,6 +27,7 @@ import sdmxlib.model.datastructure
 from attrs import Factory, define, field
 from sdmxlib import InternationalString
 from sdmxlib.model.registry import artefact_urn
+from sdmxlib.storage.schema import SCHEMA_VERSION as _SDMX_SCHEMA_VERSION
 
 from statcatlib.bundle import Embedded
 from statcatlib.model.agents import Agent, ContactPoint
@@ -143,6 +144,60 @@ class IncompatibleIndexError(ValueError):
     """
 
 
+class IncompatibleCatalogError(RuntimeError):
+    """Raised on open when the catalog's ``sdmx`` schema is another sdmxlib's.
+
+    sdmxlib treats its store as a cache: on a schema-version mismatch,
+    `LocalRegistry` drops the ``sdmx`` schema and rebuilds it empty. Here
+    that schema is not a cache. It is the structural half of the catalog,
+    which ``statcat.dataset`` links into by URN, so the rebuild would leave
+    every dataset pointing at nothing, and structural queries answering
+    empty rather than failing.
+    """
+
+
+def _refuse_sdmx_schema_rebuild(conn: duckdb.DuckDBPyConnection) -> None:
+    """Refuse to open a catalog whose SDMX structure sdmxlib would drop.
+
+    Runs before `LocalRegistry.from_connection`, which is where the drop
+    happens. A missing ``sdmx`` schema, or one at another version that holds
+    no artefacts, has nothing to lose, so sdmxlib is left to create or
+    rebuild it.
+
+    Read-only opens are refused here too. sdmxlib would refuse them itself,
+    but its message says to reopen read-write and rebuild in place, which
+    for a catalog is the data loss this guard exists to prevent.
+
+    Args:
+        conn: The catalog's connection, before sdmxlib has touched it.
+
+    Raises:
+        IncompatibleCatalogError: The stored ``sdmx`` schema is at another
+            version and holds artefacts.
+    """
+    try:
+        row = conn.execute("""
+            SELECT value FROM sdmx._meta WHERE key = 'schema_version'
+        """).fetchone()
+        stored = row[0] if row else None
+        artefacts = conn.execute("""
+            SELECT count(*) FROM sdmx.artefact
+        """).fetchone()
+    except duckdb.CatalogException:
+        return
+    n_artefacts = artefacts[0] if artefacts else 0
+    if stored == _SDMX_SCHEMA_VERSION or n_artefacts == 0:
+        return
+    msg = (
+        f"this catalog's SDMX structure is stored in sdmxlib schema {stored}, and this "
+        f"build of sdmxlib uses schema {_SDMX_SCHEMA_VERSION}. sdmxlib migrates by dropping "
+        f"the sdmx schema, which would delete the {n_artefacts} artefacts this catalog's "
+        f"datasets link to. Rebuild the catalog from its sources with this version, or "
+        f"open it with the statcatlib release that built it."
+    )
+    raise IncompatibleCatalogError(msg)
+
+
 @define(frozen=True)
 class EmbeddingMetadata:
     """Read-side view of a bundle's ``search/embeddings.json`` sidecar.
@@ -237,7 +292,7 @@ def _read_embeddings_meta(search_dir: Path) -> dict[str, object] | None:
         return None
     try:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return None
     if not isinstance(data, dict):
         return None
@@ -2677,6 +2732,16 @@ class Catalog:
 
             with Catalog("my_catalog").open() as cat:
                 ...
+
+        Raises `IncompatibleCatalogError` when the catalog's SDMX structure
+        was stored by an sdmxlib with another store schema, which this one
+        would drop on open. The connection is closed again first.
+
+        Returns:
+            This catalog, open.
+
+        Raises:
+            ValueError: ``embedding_model`` was given for an in-memory catalog.
         """
         if self._conn is not None:
             return self
@@ -2697,7 +2762,7 @@ class Catalog:
         # schema and the sdmx schema co-exist in one DuckDB file, so cross-
         # schema queries (e.g. join statcat.dataset to sdmx.codelist) work
         # natively without ATTACH plumbing.
-        self._registry = sdmxlib.LocalRegistry.from_connection(self._conn)
+        self._registry = self._open_registry(self._conn)
         # ATTACH the DuckLake sidecar (folder mode only — in-memory has no
         # lake). Sidecar layout because DuckDB rejects self-ATTACH; the
         # ducklake catalog file sits next to meta.duckdb so the bundle is
@@ -2736,6 +2801,28 @@ class Catalog:
                     if not self._query_prefix:
                         self._query_prefix = meta.query_prefix
         return self
+
+    def _open_registry(self, conn: duckdb.DuckDBPyConnection) -> sdmxlib.LocalRegistry:
+        """Compose the sdmxlib `LocalRegistry` on *conn*, once the guard allows it.
+
+        Args:
+            conn: The connection `open` just made, which this catalog owns.
+
+        Returns:
+            The registry sharing *conn*.
+
+        Raises:
+            IncompatibleCatalogError: sdmxlib would drop this catalog's SDMX
+                structure. *conn* is closed first, releasing the file so the
+                release that built it can reopen it from this process.
+        """
+        try:
+            _refuse_sdmx_schema_rebuild(conn)
+        except IncompatibleCatalogError:
+            conn.close()
+            self._conn = None
+            raise
+        return sdmxlib.LocalRegistry.from_connection(conn)
 
     def _open_connection(self) -> tuple[duckdb.DuckDBPyConnection, Path | None]:
         """Open the DuckDB connection and (for folder mode) prepare the bundle dir.
@@ -2825,6 +2912,24 @@ class Catalog:
 
         ``embedding_model`` is rejected here because shared-connection mode
         has no on-disk ``data/`` directory to host the Lance index.
+
+        As `open` does, this raises `IncompatibleCatalogError` when the
+        connection's SDMX structure was stored by an sdmxlib with another
+        store schema, which this one would drop. *conn* is left open then:
+        the caller owns it.
+
+        Args:
+            conn: The connection to wrap. Left open by `close`.
+            embedding_model: Must be ``None``; see above.
+            document_prefix: Prefix for documents embedded into the index.
+            query_prefix: Prefix for queries embedded against the index.
+            read_only: Open the catalog schema without creating it.
+
+        Returns:
+            A catalog over *conn*, already open.
+
+        Raises:
+            ValueError: ``embedding_model`` was given.
         """
         if embedding_model is not None:
             msg = "from_connection() does not support embedding_model — Lance needs a folder-mode catalog"
@@ -2848,6 +2953,7 @@ class Catalog:
             _ = _catalog_schema.open_schema_readonly(conn)
         else:
             _ = _catalog_schema.create_schema(conn)
+        _refuse_sdmx_schema_rebuild(conn)
         instance._registry = sdmxlib.LocalRegistry.from_connection(conn)  # noqa: SLF001
         # Shared-connection mode: the caller owns any ATTACH plumbing. The
         # DataStore wraps the same connection without applying its own

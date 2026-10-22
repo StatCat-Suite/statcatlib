@@ -27,7 +27,7 @@ from sdmxlib.model.istring import InternationalString
 
 from statcatlib.sources.sdmx import ingest_sdmx
 from statcatlib.store.store import Catalog, CodelistIndexPolicy
-from tests.conftest import search_table
+from tests.conftest import concept_of, search_table
 
 pytestmark = pytest.mark.integration
 
@@ -68,8 +68,8 @@ def _make_registry_with_big_geo() -> tuple[InMemoryRegistry, str]:
         maintainer="TEST",
         name=_i("Test DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_cl),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_cl),
         ],
     )
     flow = Dataflow(
@@ -123,7 +123,7 @@ def _make_registry_with_concepts() -> InMemoryRegistry:
         id="DSD_CONCEPT",
         maintainer="TEST",
         name=_i("Concept Test DSD"),
-        dimensions=[Dimension(id="FREQ", representation=cl)],
+        dimensions=[Dimension(id="FREQ", concept=concept_of("FREQ"), representation=cl)],
     )
     flow = Dataflow(
         id="DF_CONCEPT",

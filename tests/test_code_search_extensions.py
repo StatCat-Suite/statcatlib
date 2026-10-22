@@ -27,6 +27,7 @@ from sdmxlib.model.istring import InternationalString
 import statcatlib as sc
 from statcatlib.sources.sdmx import ingest_sdmx
 from statcatlib.store.store import SEARCH_CONTEXT_ANNOTATION_TYPE, SEARCH_EXCLUDE_ANNOTATION_TYPE, Catalog
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.integration
 
@@ -95,8 +96,8 @@ def _make_hierarchical_registry() -> InMemoryRegistry:
         maintainer="TEST",
         name=_i("Test DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_cl),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_cl),
         ],
     )
     flow = Dataflow(
@@ -441,7 +442,10 @@ def _store_with_excluded_leaf() -> Catalog:
         ],
     )
     dsd = DataStructure(
-        id="DSD_X", maintainer="TEST", name=_i("DSD"), dimensions=[Dimension(id="GEO", representation=geo_cl)]
+        id="DSD_X",
+        maintainer="TEST",
+        name=_i("DSD"),
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl)],
     )
     flow = Dataflow(id="DF_X", maintainer="TEST", name=_i("Flow", "Flux"), structure=dsd)
     registry = InMemoryRegistry()

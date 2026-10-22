@@ -16,6 +16,7 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 
 import statcatlib as sc
 import statcatlib.query as q
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.unit
 
@@ -56,8 +57,8 @@ def _make_store() -> sc.Catalog:
         maintainer="AGG",
         name=_i("Filter DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=cl_geo),
-            Dimension(id="SEX", representation=cl_sex),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=cl_geo),
+            Dimension(id="SEX", concept=concept_of("SEX"), representation=cl_sex),
         ],
     )
     flow = Dataflow(

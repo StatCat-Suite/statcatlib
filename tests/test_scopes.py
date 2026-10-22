@@ -9,6 +9,7 @@ from sdmxlib.model.datastructure import DataStructure, Dimension
 from sdmxlib.model.in_memory_registry import InMemoryRegistry
 
 import statcatlib as sc
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.unit
 
@@ -446,8 +447,8 @@ def _make_sdmx_store() -> sc.Catalog:
         maintainer="TEST",
         name=_i("Exchange Rate DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_a),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_a),
         ],
     )
     dsd2 = DataStructure(
@@ -455,8 +456,8 @@ def _make_sdmx_store() -> sc.Catalog:
         maintainer="TEST",
         name=_i("GDP DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_q),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_q),
         ],
     )
     flow1 = Dataflow(id="DF_EXR", maintainer="TEST", name=_i("Exchange Rate"), structure=dsd1)
@@ -553,7 +554,10 @@ class TestCodelistsScopeEnrich:
         matches a codelist named "Géographie"."""
         geo = Codelist(id="CL_GEO", maintainer="TEST", name=_i("Géographie"), codes=[Code(id="CA", name=_i("Canada"))])
         dsd = DataStructure(
-            id="DSD_G", maintainer="TEST", name=_i("D"), dimensions=[Dimension(id="GEO", representation=geo)]
+            id="DSD_G",
+            maintainer="TEST",
+            name=_i("D"),
+            dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=geo)],
         )
         flow = Dataflow(id="DF_G", maintainer="TEST", name=_i("F"), structure=dsd)
         registry = InMemoryRegistry()
@@ -569,7 +573,10 @@ class TestCodelistsScopeEnrich:
         matches a codelist named "Sub-area"."""
         cl = Codelist(id="CL_SA", maintainer="TEST", name=_i("Sub-area"), codes=[Code(id="X", name=_i("X"))])
         dsd = DataStructure(
-            id="DSD_SA", maintainer="TEST", name=_i("D"), dimensions=[Dimension(id="SA", representation=cl)]
+            id="DSD_SA",
+            maintainer="TEST",
+            name=_i("D"),
+            dimensions=[Dimension(id="SA", concept=concept_of("SA"), representation=cl)],
         )
         flow = Dataflow(id="DF_SA", maintainer="TEST", name=_i("F"), structure=dsd)
         registry = InMemoryRegistry()

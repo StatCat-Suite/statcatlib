@@ -16,6 +16,7 @@ from sdmxlib.model.istring import InternationalString
 import statcatlib as sc
 import statcatlib.query as q
 from statcatlib.sources.sdmx import dataset_from_dataflow
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.unit
 
@@ -48,8 +49,8 @@ def _make_minimal() -> tuple[Dataflow, DataStructure]:
         maintainer="TEST",
         name=_i("Test DSD"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_cl),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_cl),
         ],
     )
     flow = Dataflow(
@@ -165,7 +166,7 @@ class TestIngestSdmxBridge:
             id="DSD_TEST",
             maintainer="TEST",
             name=_i("Test DSD"),
-            dimensions=[Dimension(id="GEO", representation=geo_cl)],
+            dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl)],
         )
         flow = Dataflow(
             id="DF_TEST",

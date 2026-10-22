@@ -8,27 +8,28 @@ readme = "README.md"
 authors = [
     { name = "gabrielgellner", email = "gabrielgellner@gmail.com" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 keywords = ["sdmx", "dcat", "open-data", "catalog", "duckdb", "statistical-data", "ckan"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
 ]
 dependencies = [
     "attrs>=26.1.0",
-    # Below 2: on Python 3.13 the newest sdmxlib that resolves is 0.67.1 (0.68+
-    # needs 3.14), and it does not cap DuckDB itself, but its lake writes fail
-    # under DuckDB 2.0 — sdmxlib 0.69.1 added the same cap for the same reason.
-    # Lift it with the move to an sdmxlib that supports DuckDB 2.
-    "duckdb>=1.1,<2",
+    # >=2.0: sdmxlib 0.70 moved its store to DuckDB 2.0, and the catalog
+    # shares that store's connection. A catalog written here cannot be opened
+    # by DuckDB 1.x, so by statcatlib 0.8 or earlier.
+    "duckdb>=2.0.0",
     "httpx>=0.28",
-    "sdmxlib>=0.67",
+    # >=0.70: needs Python 3.14 and DuckDB 2.0; `reg.data()` is gone, and a
+    # component without a concept is refused as it is built.
+    "sdmxlib>=0.70.0",
 ]
 
 [project.optional-dependencies]
@@ -95,7 +96,7 @@ dev = [
 ]
 
 [tool.basedpyright]
-pythonVersion = "3.13"
+pythonVersion = "3.14"
 typeCheckingMode = "standard"
 venvPath = "."
 venv = ".venv"

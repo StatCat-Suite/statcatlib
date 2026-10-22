@@ -16,7 +16,7 @@ from sdmxlib import InternationalString as I18n
 
 import statcatlib as sc
 from statcatlib.store.lance import LanceIndex, SearchRow, _dedupe_by_id, _entity_type_clause, _prepare_query
-from tests.conftest import require_index, require_table, search_table
+from tests.conftest import concept_of, require_index, require_table, search_table
 
 pytestmark = pytest.mark.unit
 
@@ -995,7 +995,7 @@ def test_search_codes_fuzzy_preserves_exact(tmp_path):
         id="DSD_PROV",
         maintainer="TEST",
         name=InternationalString(en="DSD"),
-        dimensions=[Dimension(id="GEO", representation=cl)],
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=cl)],
     )
     flow = Dataflow(
         id="DF_PROV",

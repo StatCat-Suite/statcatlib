@@ -16,6 +16,7 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 import statcatlib as sc
 import statcatlib.query as q
 from statcatlib.store.store import _QueryContext
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.unit
 
@@ -51,7 +52,7 @@ def _store_with_agents() -> sc.Catalog:
         id="DSD_EXR",
         maintainer="ECB",
         name=_i("Exchange Rate DSD"),
-        dimensions=[Dimension(id="GEO", representation=cl_ecb)],
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=cl_ecb)],
     )
     flow_exr = Dataflow(
         id="DF_EXR",
@@ -72,7 +73,7 @@ def _store_with_agents() -> sc.Catalog:
         id="DSD_GDP",
         maintainer="ESTAT",
         name=_i("GDP DSD"),
-        dimensions=[Dimension(id="GEO", representation=cl_estat)],
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=cl_estat)],
     )
     flow_gdp = Dataflow(
         id="DF_GDP",
@@ -120,7 +121,7 @@ def _store_with_services() -> sc.Catalog:
         id="DSD_EXR",
         maintainer="TEST",
         name=_i("Exchange Rate DSD"),
-        dimensions=[Dimension(id="GEO", representation=cl_api)],
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=cl_api)],
     )
     flow_exr = Dataflow(
         id="DF_EXR",
@@ -141,7 +142,7 @@ def _store_with_services() -> sc.Catalog:
         id="DSD_GDP",
         maintainer="TEST",
         name=_i("GDP DSD"),
-        dimensions=[Dimension(id="GEO", representation=cl_bulk)],
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=cl_bulk)],
     )
     flow_gdp = Dataflow(
         id="DF_GDP",

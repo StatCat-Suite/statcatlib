@@ -14,6 +14,7 @@ import pathlib
 import sdmxlib as sl
 
 from statcatlib.store.store import Catalog
+from tests.conftest import concept_of
 
 _DQ_TEXT = (
     "The national non-response rate for income was 2.0 percent. As a result of "
@@ -42,8 +43,14 @@ def _catalog_with_refmeta(path: pathlib.Path) -> tuple[Catalog, sl.SdmxUrn[sl.Co
         version="1.0",
         name={"en": "RG"},
         attributes=[
-            sl.MetadataAttribute(id="DATA_QUALITY_TOPIC", representation=sl.Facet(type=sl.DataType.XHTML)),
-            sl.MetadataAttribute(id="CATALOGUE_ID", representation=sl.Facet(type=sl.DataType.String)),
+            sl.MetadataAttribute(
+                id="DATA_QUALITY_TOPIC",
+                concept=concept_of("DATA_QUALITY_TOPIC"),
+                representation=sl.Facet(type=sl.DataType.XHTML),
+            ),
+            sl.MetadataAttribute(
+                id="CATALOGUE_ID", concept=concept_of("CATALOGUE_ID"), representation=sl.Facet(type=sl.DataType.String)
+            ),
         ],
     )
     mdf = sl.Metadataflow(id="MDF_RG", maintainer="STC", version="1.0", name={"en": "RG"}, structure=msd)
@@ -107,7 +114,13 @@ def test_xhtml_section_is_down_converted_to_markdown(tmp_path: pathlib.Path) -> 
         maintainer="STC",
         version="1.0",
         name={"en": "X"},
-        attributes=[sl.MetadataAttribute(id="DATA_QUALITY_TOPIC", representation=sl.Facet(type=sl.DataType.XHTML))],
+        attributes=[
+            sl.MetadataAttribute(
+                id="DATA_QUALITY_TOPIC",
+                concept=concept_of("DATA_QUALITY_TOPIC"),
+                representation=sl.Facet(type=sl.DataType.XHTML),
+            )
+        ],
     )
     mdf = sl.Metadataflow(id="MDF_X", maintainer="STC", version="1.0", name={"en": "X"}, structure=msd)
     xhtml = (

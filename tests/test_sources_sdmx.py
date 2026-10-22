@@ -21,6 +21,7 @@ from sdmxlib.model.urn import SdmxUrn
 
 import statcatlib as sc
 import statcatlib.query as q
+from tests.conftest import concept_of
 
 pytestmark = pytest.mark.integration
 
@@ -66,8 +67,8 @@ def _make_registry() -> tuple[InMemoryRegistry, str]:
         maintainer="TEST",
         name=_i("Test Data Structure"),
         dimensions=[
-            Dimension(id="GEO", representation=geo_cl),
-            Dimension(id="FREQ", representation=freq_cl),
+            Dimension(id="GEO", concept=concept_of("GEO"), representation=geo_cl),
+            Dimension(id="FREQ", concept=concept_of("FREQ"), representation=freq_cl),
         ],
     )
     flow = Dataflow(
@@ -354,7 +355,7 @@ class TestPersistentStorage:
 #
 # The claim under test: statcatlib.ingest_sdmx() plumbs Hierarchy artefacts
 # from an InMemoryRegistry through sdmxlib's Registry.ingest() into
-# sdmx.hierarchy_node with populated parent_node_id / depth /
+# sdmx.hierarchy_node with populated parent_path / depth /
 # ancestor_ids. No statcatlib-side hierarchy code needed — this confirms that
 # item 1 of #93 ("codelist loader reads sibling Hierarchy
 # artefacts") is effectively a no-op because sdmxlib already does it.
@@ -383,7 +384,7 @@ def _make_multi_hierarchy_registry() -> tuple[InMemoryRegistry, str, str]:
         id="DSD_GEO",
         maintainer="TEST",
         name=InternationalString(en="Geo DSD"),
-        dimensions=[Dimension(id="REF_AREA", representation=cl_area)],
+        dimensions=[Dimension(id="REF_AREA", concept=concept_of("REF_AREA"), representation=cl_area)],
     )
     flow = Dataflow(
         id="DF_GEO",
@@ -399,12 +400,14 @@ def _make_multi_hierarchy_registry() -> tuple[InMemoryRegistry, str, str]:
         tree=[
             HierarchicalCode(
                 id="CA",
+                code=cl_area.ref_to("CA"),
                 children=[
                     HierarchicalCode(
                         id="ON",
-                        children=[HierarchicalCode(id="TOR")],
+                        code=cl_area.ref_to("ON"),
+                        children=[HierarchicalCode(id="TOR", code=cl_area.ref_to("TOR"))],
                     ),
-                    HierarchicalCode(id="QC"),
+                    HierarchicalCode(id="QC", code=cl_area.ref_to("QC")),
                 ],
             ),
         ],
@@ -417,10 +420,11 @@ def _make_multi_hierarchy_registry() -> tuple[InMemoryRegistry, str, str]:
         tree=[
             HierarchicalCode(
                 id="CA",
+                code=cl_area.ref_to("CA"),
                 children=[
-                    HierarchicalCode(id="ON"),
-                    HierarchicalCode(id="QC"),
-                    HierarchicalCode(id="TOR"),
+                    HierarchicalCode(id="ON", code=cl_area.ref_to("ON")),
+                    HierarchicalCode(id="QC", code=cl_area.ref_to("QC")),
+                    HierarchicalCode(id="TOR", code=cl_area.ref_to("TOR")),
                 ],
             ),
         ],
@@ -462,7 +466,7 @@ class TestHierarchyIngest:
 
         def _parent_of(hierarchy_urn: str, node_id: str) -> str | None:
             row = store.connection.execute(
-                "SELECT parent_node_id FROM sdmx.hierarchy_node WHERE hierarchy_urn = ? AND node_id = ?",
+                "SELECT parent_path FROM sdmx.hierarchy_node WHERE hierarchy_urn = ? AND node_id = ?",
                 [hierarchy_urn, node_id],
             ).fetchone()
             assert row is not None, f"missing node {node_id} in {hierarchy_urn}"
@@ -471,10 +475,12 @@ class TestHierarchyIngest:
             # become the string "None" — the #114 defect, in a test.
             return None if parent is None else str(parent)
 
+        # A parent is named by its path, not its leaf id: sdmxlib keys a
+        # nested item by path, since one code may sit at several places.
         # Admin: TOR → ON → CA (root)
         assert _parent_of(h_admin_urn, "CA") is None
         assert _parent_of(h_admin_urn, "ON") == "CA"
-        assert _parent_of(h_admin_urn, "TOR") == "ON"
+        assert _parent_of(h_admin_urn, "TOR") == "CA.ON"
         # Statistical: TOR is a sibling of ON / QC under CA — different parent.
         assert _parent_of(h_stat_urn, "TOR") == "CA"
         assert _parent_of(h_stat_urn, "ON") == "CA"
@@ -593,7 +599,7 @@ def _make_descent_registry(
         id="DSD_GEO",
         maintainer="TEST",
         name=InternationalString(en="Geo DSD"),
-        dimensions=[Dimension(id="REF_AREA", representation=cl_area)],
+        dimensions=[Dimension(id="REF_AREA", concept=concept_of("REF_AREA"), representation=cl_area)],
     )
     flow = Dataflow(
         id="DF_GEO",
@@ -839,17 +845,14 @@ def _make_wide_descent_registry(n_flows: int, n_prov: int, n_sub: int) -> InMemo
         tree=[
             HierarchicalCode(
                 id="CA",
-                name=InternationalString(en="CA"),
                 code=_cref("CA"),
                 children=[
                     HierarchicalCode(
                         id=f"P{p_i:02d}",
-                        name=InternationalString(en="p"),
                         code=_cref(f"P{p_i:02d}"),
                         children=[
                             HierarchicalCode(
                                 id=f"P{p_i:02d}-{k:03d}",
-                                name=InternationalString(en="s"),
                                 code=_cref(f"P{p_i:02d}-{k:03d}"),
                             )
                             for k in range(n_sub)
@@ -869,7 +872,7 @@ def _make_wide_descent_registry(n_flows: int, n_prov: int, n_sub: int) -> InMemo
             maintainer="TEST",
             version="1.0",
             name=InternationalString(en="dsd"),
-            dimensions=[Dimension(id="REF_AREA", representation=cl)],
+            dimensions=[Dimension(id="REF_AREA", concept=concept_of("REF_AREA"), representation=cl)],
         )
         flow = Dataflow(
             id=f"DF{i:03d}",

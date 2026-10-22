@@ -31,7 +31,7 @@ SQL JOINs are the graph traversal. No network round-trips at query time.
 
 ## Installation
 
-Requires Python 3.13+. Managed with [uv](https://docs.astral.sh/uv/).
+Requires Python 3.14+. Managed with [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv add statcatlib

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import concept_of
+
 pytestmark = pytest.mark.unit
 
 
@@ -254,7 +256,7 @@ class TestConstruct:
             id="DSD_FILTER",
             maintainer="TEST",
             name=IStr(en="Filter DSD"),
-            dimensions=[Dimension(id="GEO", representation=cl)],
+            dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=cl)],
         )
         flow = Dataflow(
             id="DF_FILTER",
