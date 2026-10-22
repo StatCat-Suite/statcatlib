@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] — 2026-10-22
+
+`ingest_data()` can fetch observations from Eurostat, which 0.9.0
+listed as a known issue. sdmxlib 0.70.1 keeps store schema 2.48, so
+catalogs built by 0.9.0 open without a rebuild.
+
+### Bug Fixes
+
+- **deps:** Require sdmxlib 0.70.1 so ingest_data fetches from Eurostat
+
 ## [0.9.0] — 2026-10-22
 
 Moves to sdmxlib 0.70, which needs **Python 3.14** and **DuckDB 2.0**.
