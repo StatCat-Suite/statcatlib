@@ -3,6 +3,38 @@
 All notable changes to this project will be documented in this file.
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-10-22
+
+Moves to sdmxlib 0.70, which needs **Python 3.14** and **DuckDB 2.0**.
+
+**Catalogs and bundles built by 0.8.0 must be rebuilt.** sdmxlib's store
+schema went from 2.19 to 2.48, and sdmxlib migrates by dropping its `sdmx`
+schema. Opened read-write, a 0.8.0 catalog would have lost every artefact
+its datasets link to, with no error. `Catalog.open()` now refuses such a
+catalog with `IncompatibleCatalogError` and leaves it untouched. A catalog
+written under DuckDB 2 cannot be opened by 0.8.0, so deploy this release
+before building any bundle with it.
+
+`ingest_data()` cannot fetch observations from Eurostat yet: sdmxlib's
+`RestRegistry.obs()` sends an `Accept` header Eurostat refuses (sdmxlib
+GH-50). Structure ingest from Eurostat is unaffected.
+
+### Bug Fixes
+
+- **sources:** Ingest_data reads observations through reg.obs()
+
+### Documentation
+
+- README and CLAUDE.md for sdmxlib 0.70
+
+### Features
+
+- **store:** Refuse to open a catalog whose sdmx schema sdmxlib would drop (**breaking**)
+
+### chore
+
+- **deps:** Require sdmxlib 0.70, DuckDB 2 and Python 3.14 (**breaking**)
+
 ## [0.8.0] — 2026-10-22
 
 First release as **statcatlib**, formerly `pinaxlib` (imported as `pinax`),

@@ -1,6 +1,6 @@
 [project]
 name = "statcatlib"
-version = "0.8.0"
+version = "0.9.0"
 description = "Queryable open data catalog engine for DCAT-AP, StatDCAT-AP, CKAN, and SDMX"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
