@@ -240,8 +240,8 @@ def ingest_data(
 ) -> str:
     """Materialise observation data for one dataflow into the bundle's lake.
 
-    Fetches the (wide) observations via ``reg.data(...).pivot()``, writes
-    them into ``lake.<agency>.df_<id>_<version>`` through the bundle's
+    Fetches the observations wide via ``reg.obs(...).pivot()``, writes them
+    into ``lake.<agency>.df_<id>_<version>`` through the bundle's
     DuckLake-backed data store, and registers a
     `sdmxlib.DataflowBinding` so the dataflow is queryable through
     ``cat.observations(...)``.
@@ -257,7 +257,7 @@ def ingest_data(
         identifier: Catalog identifier in ``AGENCY:ID(VERSION)`` form.
             ``(latest)`` resolves to the highest stored version.
         measure_dim: Dimension to pivot into measure columns. ``None``
-            (default) leaves the data long.
+            (default) pivots on the DSD's ``MeasureDimension``.
 
     Returns:
         The fully-qualified table location (``<schema>.<table>``).
@@ -266,8 +266,9 @@ def ingest_data(
         KeyError: No `AggregateDataset` is stored under *identifier* — run
             ``ingest_sdmx`` first.
         ValueError: The dataset carries no ``sdmx_dataflow_urn``, so there is
-            nothing to fetch observations for; or *identifier* is not in
-            ``AGENCY:ID(VERSION)`` form.
+            nothing to fetch observations for; *identifier* is not in
+            ``AGENCY:ID(VERSION)`` form; or *measure_dim* is ``None`` and the
+            DSD declares no ``MeasureDimension`` to pivot on.
     """
     identifier = _resolve_latest(store, identifier)
 
@@ -289,21 +290,16 @@ def ingest_data(
     table = f"df_{flow_id}_{version.replace('.', '_')}".lower()
 
     # Pull the wide dataframe and write through the bundle's lake. ``pivot()``
-    # returns a LazyFrame; the data store collects it via Arrow under the hood.
-    lf = reg.data(
-        Dataflow,
-        agency=agency,
-        id=flow_id,
-        version=version,
-        measure_dim=measure_dim,
-    ).pivot()
-    store.data.write_observations(schema=schema, table=table, source=lf)
+    # returns an eager DataFrame; with ``on=None`` it pivots on the DSD's
+    # MeasureDimension, as ``reg.data(...).pivot()`` did.
+    flow_urn = Dataflow.parse_urn(ds.sdmx_dataflow_urn)
+    wide = reg.obs(flow_urn).pivot(on=measure_dim)
+    store.data.write_observations(schema=schema, table=table, source=wide)
 
     # Register a DataflowBinding so ``cat.observations(flow_urn)`` can find
     # the table. Derive identity column maps from the DSD when resolvable.
     import sdmxlib as sl  # noqa: PLC0415
 
-    flow_urn = Dataflow.parse_urn(ds.sdmx_dataflow_urn)
     flow = store.registry.get(flow_urn)
     if isinstance(flow, Dataflow) and isinstance(flow.structure, sl.Ref):
         dsd = store.registry.get(flow.structure.urn)
