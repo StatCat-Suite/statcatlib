@@ -124,6 +124,20 @@ class TestCatalogChecks:
         (bundle / MANIFEST_NAME).write_text(json.dumps(manifest))
         assert _findings(bundle) == ["[statcat] search [de]: declared in the manifest, absent from the index"]
 
+    def test_a_table_the_index_manifest_does_not_name(self, bundle: Path) -> None:
+        """An orphan the manifest lists passes sdmxlib's ``files`` check, so this one has to see it."""
+        import lancedb
+
+        from statcatlib.store.lance import _to_arrow
+
+        lancedb.connect(str(bundle / "search")).create_table(
+            "search_de__000099",
+            data=_to_arrow([{"id": "x", "entity_type": "open", "lang": "de", "text": "verwaist"}]),
+        )
+        publish_bundle(bundle, bundle_id="synthetic", producer=_PRODUCER)
+        detail = "a table index.json does not name: rebuild with build_index(), then publish again"
+        assert _findings(bundle) == [f"[statcat] search/search_de__000099: {detail}"]
+
     def test_undeclared_search_index(self, tmp_path: Path) -> None:
         path = tmp_path / "bundle"
         synthetic_catalog(path, _SHAPE, index=False)
