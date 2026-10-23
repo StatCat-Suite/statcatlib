@@ -18,7 +18,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, Self, TypedDict, ov
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
 
-    from statcatlib.store.lance import Bm25HitRow, LanceIndex, LanguageLayout, SearchRow, VectorHitRow
+    from statcatlib.store.lance import (
+        Bm25HitRow,
+        IndexAnnotations,
+        LanceIndex,
+        LanguageLayout,
+        SearchRow,
+        VectorHitRow,
+    )
 
 import duckdb
 import sdmxlib
@@ -1597,6 +1604,75 @@ SEARCH_CONTEXT_ANNOTATION_TYPE = "statcat:searchContext"
 #: structural tables — only its search rows are skipped.
 SEARCH_EXCLUDE_ANNOTATION_TYPE = "statcat:searchExclude"
 
+#: The SKOS synonym annotation `build_index` folds into code rows
+#: (``include_alt_labels``).
+_ALT_LABEL_ANNOTATION_TYPE = "skos:altLabel"
+
+#: Every annotation type `build_index` reads by default. An annotation
+#: overlay touching one of these changes what the index should hold, so it
+#: needs ``build_index()`` to take effect in search (GH-3).
+SEARCH_ANNOTATION_TYPES: tuple[str, ...] = (
+    SEARCH_CONTEXT_ANNOTATION_TYPE,
+    SEARCH_EXCLUDE_ANNOTATION_TYPE,
+    _ALT_LABEL_ANNOTATION_TYPE,
+)
+
+
+def annotation_fingerprint(conn: duckdb.DuckDBPyConnection, types: Sequence[str]) -> str:
+    """A digest of every annotation of *types* in the ``sdmx`` store.
+
+    What `build_index` records, and what a stale-index check recomputes: it
+    changes when an annotation of one of *types* is added, removed or edited
+    anywhere in the store — on any owner, which over-approximates the codes
+    the index reads and so never misses a change. Each annotation row is
+    hashed with its owner, position, id, title and value, and each of its
+    localised texts with its owner, position and language.
+
+    The row hashes are summed, not sorted and concatenated: order-independent
+    without a sort, so it costs one scan (about 140 ms for 400,000
+    annotations with 400,000 texts). md5 rather than DuckDB's ``hash``, which
+    is not stable across DuckDB versions. NULLs are spelled out, since
+    ``concat_ws`` skips them and would let a title and a value trade places.
+
+    Args:
+        conn: A connection whose ``sdmx`` schema holds the annotations.
+        types: The annotation types to cover.
+
+    Returns:
+        A hex digest. With *types* empty, or no ``sdmx`` schema, the digest
+        of nothing.
+    """
+    nothing = hashlib.md5(b"", usedforsecurity=False).hexdigest()
+    has_sdmx = conn.execute(
+        """SELECT count(*) FROM information_schema.tables WHERE table_schema = 'sdmx' AND table_name = 'annotation'"""
+    ).fetchone()
+    if not types or not has_sdmx or not has_sdmx[0]:
+        return nothing
+    row = conn.execute(
+        """
+        WITH typed AS (
+            SELECT id, owner_urn, ordinal, annotation_id, annotation_type, title, value
+            FROM sdmx.annotation
+            WHERE annotation_type IN (SELECT UNNEST($types))
+        )
+        SELECT
+            (SELECT count(*) FROM typed),
+            (SELECT sum(md5_number_lower(concat_ws(chr(31),
+                owner_urn, ordinal, coalesce(annotation_id, chr(0)), annotation_type,
+                coalesce(title, chr(0)), coalesce(value, chr(0))))) FROM typed),
+            (SELECT count(*) FROM typed a JOIN sdmx.annotation_text t ON t.annotation_id = a.id),
+            (SELECT sum(md5_number_lower(concat_ws(chr(31),
+                a.owner_urn, a.ordinal, coalesce(t.lang, chr(0)), coalesce(t.text, chr(0)))))
+             FROM typed a JOIN sdmx.annotation_text t ON t.annotation_id = a.id)
+        """,
+        {"types": sorted(types)},
+    ).fetchone()
+    if row is None:
+        return nothing
+    folded = "|".join(str(part) for part in (sorted(types), *row))
+    return hashlib.md5(folded.encode(), usedforsecurity=False).hexdigest()
+
+
 #: Bucket key for search text that carries no language. Not a language
 #: tag: it means "applies to every language", which is the only thing
 #: untagged text can mean. Text bucketed here folds into every language's
@@ -2785,6 +2861,7 @@ class Catalog:
             self._data = sdmxlib.DuckDBDataStore.from_registry(self._registry)
         if self._bundle_dir is not None:
             self._init_lance()
+            self._warn_if_index_annotations_changed()
             # Restore embedding metadata written by a previous build_index()
             # so the caller doesn't have to remember which model + prefixes
             # match this index. Missing/malformed metadata leaves the store
@@ -2981,6 +3058,35 @@ class Catalog:
             self._lance = LanceIndex(search_dir)
         except ImportError:
             return
+
+    def _warn_if_index_annotations_changed(self) -> None:
+        """Warn if the store's search annotations are not the ones the index was built from.
+
+        A warning, never an error and never a rebuild: opening a bundle in a
+        serving pod must not fail or write because an overlay was folded in.
+        It fires on every open until ``build_index()`` is run (GH-3).
+        """
+        recorded = self._lance.annotations if self._lance is not None else None
+        if recorded is None or self._conn is None:
+            return
+        if annotation_fingerprint(self._conn, recorded["types"]) == recorded["fingerprint"]:
+            return
+        warnings.warn(
+            f"search index is out of date: annotations of type {', '.join(recorded['types'])} have changed "
+            "since it was built (an overlay folded into the store?), so search does not reflect them. "
+            "Rebuild with build_index() to fix. (statcatlib GH-3)",
+            stacklevel=3,
+        )
+
+    @property
+    def index_annotations(self) -> IndexAnnotations | None:
+        """The annotation types the search index was built from, and their fingerprint.
+
+        ``None`` when no index is built, or for one built before statcatlib
+        recorded them. Compare ``types`` with an annotation overlay's entries
+        to tell whether applying it needs a ``build_index()`` to reach search.
+        """
+        return self._lance.annotations if self._lance is not None else None
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
@@ -4625,9 +4731,18 @@ class Catalog:
         )
 
         embedding_dim = _infer_embedding_dim(self._embedding_model, dataset_rows)
+        # The annotation types this build read, and a digest of them, so a
+        # later change to them (a folded overlay) is detected, not missed.
+        annotation_types: set[str] = set()
+        if include_codes:
+            annotation_types |= {*context_annotation_types, *exclude_annotation_types}
+            if include_alt_labels:
+                annotation_types.add(_ALT_LABEL_ANNOTATION_TYPE)
+        types = sorted(annotation_types)
         self._lance.add_bulk(
             dataset_rows + code_rows + concept_rows + refmeta_rows,
             embedding_dim=embedding_dim,
+            annotations={"types": types, "fingerprint": annotation_fingerprint(self._c, types)},
         )
         self._lance.build_index()
         if progress is not None:

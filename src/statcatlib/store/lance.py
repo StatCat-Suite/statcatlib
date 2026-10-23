@@ -147,6 +147,17 @@ def _as_opt_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _as_annotations(entry: object) -> IndexAnnotations | None:
+    """Narrow the manifest's ``annotations`` entry, or ``None`` if absent or malformed."""
+    if not isinstance(entry, Mapping):
+        return None
+    types = entry.get("types")
+    fingerprint = _as_opt_str(entry.get("fingerprint"))
+    if not isinstance(types, list) or fingerprint is None:
+        return None
+    return {"types": [str(t) for t in types], "fingerprint": fingerprint}
+
+
 def _as_layout(entry: object) -> LanguageLayout | None:
     """Narrow one manifest ``languages`` entry, or ``None`` if it is not one.
 
@@ -263,6 +274,20 @@ class LanguageLayout(TypedDict):
     stemmer: str | None
 
 
+class IndexAnnotations(TypedDict):
+    """The annotations an index was built from, as `Catalog.index_annotations` reports it.
+
+    `types` are the annotation types `build_index` read (what to exclude, what
+    context and synonyms to fold in); `fingerprint` is a digest of every
+    annotation of those types in the store at the time. An overlay folded
+    into the store afterwards changes the fingerprint the store yields, which
+    is how a stale index is detected without rebuilding it (GH-3).
+    """
+
+    types: list[str]
+    fingerprint: str
+
+
 class _Manifest(TypedDict):
     """``index.json``, as written.
 
@@ -277,6 +302,7 @@ class _Manifest(TypedDict):
     written_by: str
     generation: int
     languages: dict[str, LanguageLayout]
+    annotations: NotRequired[IndexAnnotations]
 
 
 class SearchRow(TypedDict):
@@ -985,11 +1011,13 @@ class LanceIndex:
         self._langs: dict[str, _LanguageIndex] = {}
         self._legacy: lancedb.table.Table | None = None
         self._generation = 0
+        self._annotations: IndexAnnotations | None = None
 
         names = set(self._db.list_tables().tables)
         manifest = self._read_manifest()
         if manifest is not None:
             self._generation = _as_int(manifest.get("generation"))
+            self._annotations = _as_annotations(manifest.get("annotations"))
             languages = manifest.get("languages")
             entries = languages.items() if isinstance(languages, Mapping) else ()
             for lang, entry in entries:
@@ -1109,6 +1137,8 @@ class LanceIndex:
                 for lang, index in sorted(indexes.items())
             },
         }
+        if self._annotations is not None:
+            payload["annotations"] = self._annotations
         self._path.mkdir(parents=True, exist_ok=True)
         tmp = self._path / f"{_MANIFEST_FILE}.tmp"
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
@@ -1125,6 +1155,11 @@ class LanceIndex:
         if self._legacy is not None:
             return _LanguageIndex(self._db, slug, _TABLE, filter_lang=True)
         return None
+
+    @property
+    def annotations(self) -> IndexAnnotations | None:
+        """The annotations this index was built from; ``None`` for one built before they were recorded."""
+        return self._annotations
 
     @property
     def languages(self) -> list[str]:
@@ -1203,7 +1238,13 @@ class LanceIndex:
         if added_language:
             self._write_manifest(self._langs, self._generation)
 
-    def add_bulk(self, rows: list[SearchRow], *, embedding_dim: int | None = None) -> None:
+    def add_bulk(
+        self,
+        rows: list[SearchRow],
+        *,
+        embedding_dim: int | None = None,
+        annotations: IndexAnnotations | None = None,
+    ) -> None:
         """Bulk-load rows, replacing every language's table.
 
         More efficient than per-row ``add()`` for full rebuilds — avoids
@@ -1224,6 +1265,9 @@ class LanceIndex:
                 null-typed embedding column, and the ANN index would
                 silently never build. ``None`` falls back to scanning the
                 rows, which is correct whenever at least one is embedded.
+            annotations: The annotations *rows* were built from. Recorded in
+                the same manifest write that commits the new generation, so
+                the two cannot disagree after a crash.
 
         Raises:
             Exception: Whatever the underlying build raised. Every table
@@ -1254,6 +1298,7 @@ class LanceIndex:
                 index.drop()
             raise
 
+        self._annotations = annotations
         self._write_manifest(built, generation)
 
         # Past this point the rebuild has committed; everything below is
