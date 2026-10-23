@@ -98,7 +98,7 @@ _DATASET_CLASSES = (OpenDataset, AggregateDataset, MicrodataDataset, GeospatialD
 
 # entity_type values that identify a dataset-level row in the search index.
 # Used to exclude code-level rows (entity_type == "code") from dataset
-# rankings, see issue #82. Built from the classes, so the two cannot drift.
+# rankings. Built from the classes, so the two cannot drift.
 _DATASET_ENTITY_TYPES: tuple[str, ...] = DATASET_KINDS
 
 # Sidecar file that records which embedding model + prefixes produced the
@@ -106,7 +106,7 @@ _DATASET_ENTITY_TYPES: tuple[str, ...] = DATASET_KINDS
 # back by ``open()`` so callers don't have to remember which model to load.
 _EMBEDDINGS_META_FILE = "embeddings.json"
 # v2: code-row schema gained dimension_id/dimension_label/code_id/code_label
-# columns and the default for `embed_codes` flipped to False (#83, #84).
+# columns and the default for `embed_codes` flipped to False.
 # v3: expanded sidecar to record embedding_dim, normalize, include_codes,
 # embed_codes, max_codes_per_codelist, built_at, built_by, docs_indexed,
 # and code_rows_indexed so query-side consumers can validate compatibility
@@ -124,13 +124,12 @@ _EMBEDDINGS_META_VERSION = 4
 #:
 #: e5 is trained asymmetrically: documents are embedded as ``passage: <text>``
 #: and queries as ``query: <text>``. Embedding one side without the other
-#: leaves the two in different regions of the space, and the symptom is not an
-#: error — it is quietly worse recall, which is how #81 went unnoticed until a
-#: downstream caller saw BM25 and vector top-K barely overlap.
+#: leaves the two in different regions of the space. Nothing raises: recall is
+#: quietly worse, and the visible symptom is BM25 and vector top-K results that
+#: barely overlap.
 #:
-#: Lives here rather than in `statcatlib.cli` so the library and the CLI share one
-#: source; the CLI used to hold the only copy, which left the Python API — the
-#: interface #81 was actually reported against — unguarded.
+#: Lives here rather than in `statcatlib.cli` so the library and the CLI share
+#: one source, and the Python API gets the same defaults as the CLI.
 #:
 #: A name absent from this table gets no prefix, which is correct for
 #: symmetric encoders (BGE-M3, jina-v3).
@@ -2904,7 +2903,7 @@ class Catalog:
         # DATA_PATH directory on first write, so creating ``parquet/`` here
         # bought nothing and cost a real discriminator: an empty local
         # ``parquet/`` beside a split bundle makes an unresolvable layout
-        # look co-located (#120).
+        # look co-located.
         path.mkdir(parents=True, exist_ok=True)
         return duckdb.connect(str(path / "meta.duckdb")), path
 
@@ -4005,13 +4004,13 @@ class Catalog:
                 # Per-language context (e.g. the code's topical-universe
                 # label) — the leaf label leads, so a bare leaf query still
                 # prefers leaves named exactly that, while a topic-flavoured
-                # query also matches the universe tokens. (#61)
+                # query also matches the universe tokens.
                 context_texts = context_by_lang.get(lang, [])
                 if context_texts:
                     parts.append(" | ".join(context_texts))
                 # Own-language footnote text plus any value that carries no
                 # language (scalars: URLs, vintages). Same rule as the
-                # altLabels above — see #100.
+                # altLabels above.
                 parts.extend([*blend_by_lang.get(lang, []), *blend_by_lang.get(_ANY_LANG, [])])
                 text = " | ".join(parts)
                 items.append(
@@ -4554,7 +4553,7 @@ class Catalog:
                 f"{doc!r} and queries with {qry!r}, but document_prefix is empty. "
                 "The two sides will not share an embedding space and vector "
                 "recall will be quietly worse. Pass document_prefix / "
-                "query_prefix to build_index() or to Catalog(). (statcatlib #81)",
+                "query_prefix to build_index() or to Catalog().",
                 stacklevel=3,
             )
         if model_name is None and (self._document_prefix or self._query_prefix):
@@ -4562,8 +4561,7 @@ class Catalog:
                 "document_prefix / query_prefix are set but model_name is not, "
                 "so no embeddings.json is written and the next open() restores "
                 "neither. Queries would then run unprefixed against prefixed "
-                "vectors. Pass model_name to build_index() to pin them. "
-                "(statcatlib #81)",
+                "vectors. Pass model_name to build_index() to pin them.",
                 stacklevel=3,
             )
 
@@ -5114,8 +5112,8 @@ class Catalog:
 
         # The column is MAP(VARCHAR, VARCHAR), so a non-string value cannot
         # come back as what went in. Refused rather than coerced: `str(v)`
-        # turned `None` into the string `"None"` — present and truthy where
-        # an absence was stored — and said nothing about it (#114).
+        # would turn `None` into the string `"None"`, present and truthy where
+        # an absence was stored, without a word.
         extras_map = _validated_extras(dataset.extras)
         language_list = dataset.language or None
 
@@ -5128,7 +5126,7 @@ class Catalog:
                 {_DATASET_UPSERT_SET}
             """,
             # Keyword-built, so the parameter order is the row's order, and the
-            # INSERT column list is derived from the same `_fields` (#110).
+            # INSERT column list is derived from the same `_fields`.
             tuple(
                 DatasetRow(
                     identifier=dataset.identifier,
@@ -6024,7 +6022,7 @@ class Catalog:
 
     # -- Batch reconstruction --
 
-    #: Derived from `DatasetRow._fields` — see #110.
+    #: Derived from `DatasetRow._fields`.
     _DATASET_COLUMNS = _DATASET_COLUMN_SQL
 
     def _batch_reconstruct(
