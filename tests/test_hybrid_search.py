@@ -2055,7 +2055,7 @@ class TestQuantisedIndexWarning:
         recwarn.clear()
         LanceIndex(tmp_path / "search")
         messages = [str(w.message) for w in recwarn]
-        assert any("#102" in m and "en" in m for m in messages), messages
+        assert any("quantised" in m and "en" in m for m in messages), messages
 
     def test_does_not_warn_on_a_current_index(self, tmp_path):
         idx = LanceIndex(tmp_path / "search")
@@ -2144,8 +2144,8 @@ class TestQuantisedIndexWarning:
         message = str(caught[0].message)
         assert "per-language tables" in message
         assert "quantised" in message
-        assert "#101" in message
-        assert "#102" in message
+        assert "(1)" in message
+        assert "(2)" in message
 
 
 class TestSearchRowMatchesSchema:

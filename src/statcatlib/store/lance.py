@@ -1050,7 +1050,6 @@ class LanceIndex:
         their vector search was also degraded.
         """
         reasons: list[str] = []
-        refs: list[str] = []
 
         if self._legacy is not None:
             reasons.append(
@@ -1058,7 +1057,6 @@ class LanceIndex:
                 "as English and non-English queries match fewer documents than "
                 "they should"
             )
-            refs.append("#101")
 
         # Both the legacy table and the per-language ones can carry a
         # pre-#102 vector index, and exactly one of the two is populated.
@@ -1072,13 +1070,12 @@ class LanceIndex:
                 "correct nearest neighbours, though the stored vectors "
                 "themselves are correct"
             )
-            refs.append("#102")
 
         if not reasons:
             return
         detail = reasons[0] if len(reasons) == 1 else "; ".join(f"({i}) {r}" for i, r in enumerate(reasons, 1))
         warnings.warn(
-            f"search index is out of date: {detail}. Rebuild with build_index() to fix. (statcatlib {', '.join(refs)})",
+            f"search index is out of date: {detail}. Rebuild with build_index() to fix.",
             stacklevel=3,
         )
 

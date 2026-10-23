@@ -4554,7 +4554,7 @@ class Catalog:
                 f"{doc!r} and queries with {qry!r}, but document_prefix is empty. "
                 "The two sides will not share an embedding space and vector "
                 "recall will be quietly worse. Pass document_prefix / "
-                "query_prefix to build_index() or to Catalog(). (statcatlib #81)",
+                "query_prefix to build_index() or to Catalog().",
                 stacklevel=3,
             )
         if model_name is None and (self._document_prefix or self._query_prefix):
@@ -4562,8 +4562,7 @@ class Catalog:
                 "document_prefix / query_prefix are set but model_name is not, "
                 "so no embeddings.json is written and the next open() restores "
                 "neither. Queries would then run unprefixed against prefixed "
-                "vectors. Pass model_name to build_index() to pin them. "
-                "(statcatlib #81)",
+                "vectors. Pass model_name to build_index() to pin them.",
                 stacklevel=3,
             )
 
