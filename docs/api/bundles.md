@@ -1,7 +1,9 @@
 # Bundles
 
 A statcatlib **bundle** is the on-disk triple `meta.duckdb` + `lake.ducklake` +
-`parquet/` — a catalog you can copy, ship, and mount somewhere else.
+`parquet/` — a catalog you can copy, ship, and mount somewhere else — with
+its `search/` index, and a `bundle.manifest.json` once it is published
+(see [Publishing and checking a bundle](#publishing-and-checking-a-bundle)).
 
 The DuckLake catalog file embeds an absolute `data_path` recorded at write
 time. Call it the **stamp**. It does two jobs at once: it locates the
@@ -134,6 +136,58 @@ if info.will_write or info.target is None and info.verdict.startswith("ambiguous
 | `will_write`       | `Auto` would rewrite the stamp.                                            |
 | `verdict`          | One line naming the layout and the action, for logs.                       |
 
+## Publishing and checking a bundle
+
+A bundle is published by writing its `bundle.manifest.json` last. The
+manifest format is sdmxlib's (`sdmxlib.bundle`, from sdmxlib 0.72): a fresh
+`token` per publication, which caches and ETags key on, and a sha256 for
+every file. A statcat bundle is an sdmxlib bundle plus the `statcat`
+schema and `search/`, so statcatlib adds a `statcat` section describing
+them, and checks that sit on top of sdmxlib's.
+
+```python
+from sdmxlib.bundle import Producer
+
+from statcatlib.bundle import check_bundle, publish_bundle
+
+with sc.Catalog("out/my-catalog") as cat:
+    ...  # ingest
+    cat.build_index()
+
+publish_bundle("out/my-catalog", bundle_id="my-catalog", producer=Producer(name="my-builder", version="1.2"))
+assert check_bundle("out/my-catalog").ok
+```
+
+The `statcat` section records:
+
+| Field                | Meaning                                                              |
+|:---------------------|:---------------------------------------------------------------------|
+| `format`             | The section's own version, `1`.                                      |
+| `statcatlib_version` | The statcatlib that published it.                                    |
+| `datasets`           | Rows in `statcat.dataset`.                                           |
+| `search`             | `null` when no index is built; else its `index_version`, `embedding_model`, and each language's `rows` and `stemmer`. |
+
+`check_bundle` runs sdmxlib's checks (manifest, files, lake, bindings,
+structural references) and then the `statcat` check: the schema is there,
+the dataset count matches, every `sdmx_dataflow_urn` names a stored
+dataflow, and `search/` is present exactly when declared, each language
+stemmed as declared and holding the declared rows. `references=False`
+skips the structural check, the costly one.
+
+!!! warning "Publish after `build_index()`, check before `rebind`"
+
+    The manifest lists every file, so anything written afterwards fails
+    the check: an index built after publishing, or a stamp rewritten by
+    `statcat bundle rebind` or by `Auto` repointing a moved bundle (both
+    change `lake.ducklake`). Run the check where a bundle is built or
+    received, before deploy-time rebinding, and never on the serving path.
+    Opening and searching a bundle, read-only or not, changes nothing.
+
+`statcatlib.testing.synthetic_catalog(path, shape, seed=)` builds a
+published bundle of any shape from `sdmxlib.testing.Shape`: very large
+codelists, deep or wide hierarchies, many languages. Use it for stress
+tests and benchmarks without shipping a real bundle.
+
 ## `read_current_data_path`
 
 ```python
@@ -175,6 +229,7 @@ byte-copying it and rewriting the copy, returning the copy's path.
 | `statcat bundle explain <dir>`           | What does this bundle say, and what would an open do? |
 | `statcat bundle rebind <dir> --to <uri>` | Point it at where the data actually is.               |
 | `statcat bundle attach-cmd <dir>`        | Print the `ATTACH` for ad-hoc `duckdb` CLI use.       |
+| `statcat bundle check <dir>`             | Check a published bundle; exits 1 on any finding.     |
 
 `explain` exits 1 when the layout is ambiguous, so it composes:
 
