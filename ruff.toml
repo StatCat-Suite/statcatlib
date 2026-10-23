@@ -74,8 +74,6 @@ ignore = [
 # Tests: skip docstrings, annotations, security checks, and unused-arg checks
 "tests/**/*.py" = ["D", "ANN", "S101", "ARG", "DTZ001", "SLF001", "PLC0415"]
 "tests/test_public_api.py" = ["PLC0415"]  # imports inside test methods are the point
-# Examples: standalone scripts — allow print, missing docstrings, implicit namespace
-"examples/**/*.py" = ["T201", "D1", "INP001"]
 # tools/: developer scripts, run by `just`, not shipped — not an importable
 # package. T201 stays ON: the prints are scoped with `# noqa: T201` inline, as
 # they are in sdmxlib, so the two copies of count_any.py stay comparable.

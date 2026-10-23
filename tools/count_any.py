@@ -9,8 +9,9 @@ that — for *bare* annotations. It does not look inside generic arguments::
     def f(x: Any) -> None: ...  # ANN401 finding
     def f(x: dict[str, Any]) -> None: ...  # silent
 
-statcatlib carries 214 occurrences and ANN401 reports 44 of them, so 170 are
-invisible to every linter in the stack. sdmxlib measured the same shape before
+statcatlib carried 214 occurrences when this was written, and ANN401 reported
+44 of them, so 170 were invisible to every linter in the stack. The count is
+down to the baseline in ``tools/any_baseline.txt``. sdmxlib measured the same shape before
 us — 112 of 171 were the second form — which is where this tool comes from;
 it is copied rather than rewritten so the two counts stay comparable.
 
