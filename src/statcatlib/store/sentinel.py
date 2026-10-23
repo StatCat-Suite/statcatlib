@@ -76,21 +76,17 @@ class _UnloadedType:
 def make_unloaded(field: str) -> Any:
     """Return a cached UNLOADED sentinel for *field*.
 
-    One of the few places `Any` is the honest annotation rather than a hole.
-    The sentinel is assigned into model fields of every declared type — a
-    `Agent`, a `list[Distribution]`, an `InternationalString` — so the return
-    genuinely needs the erased type back out, which is the litmus for `Any`
-    over `object`. `object` here would push a narrowing onto every assignment
-    it was designed to satisfy.
+    The return is `Any` because the sentinel is assigned into model fields of
+    every declared type — an `Agent`, a `list[Distribution]`, an
+    `InternationalString` — so callers need the erased type back. `object`
+    would force a narrowing at every one of those assignments.
 
     The hole is one line wide: the value is opaque, and touching it raises
     `NotLoadedError` at runtime.
-
-    (No `# noqa: ANN401` yet — ANN401 is still ignored project-wide until
-    #109 step 3, and a suppression that suppresses nothing is the thing
-    pyrefly's `unused-ignore` exists to catch. Add it with the
-    rule.)
     """
+    # No `# noqa: ANN401` here: ruff.toml ignores ANN401 project-wide, and a
+    # suppression for an ignored rule suppresses nothing. Add it if the rule is
+    # turned on.
     if field not in _cache:
         _cache[field] = _UnloadedType(field)
     return _cache[field]

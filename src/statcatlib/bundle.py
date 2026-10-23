@@ -20,19 +20,16 @@ deployed, and the consumer cannot tell by looking:
 `open_bundle` therefore does not ask the caller which of those it is.
 It reads the stamp and dispatches on what it finds — see `Auto`.
 
-Two facts about DuckLake shape this module, both verified rather than
-assumed (#120):
+Two DuckLake behaviours shape this module:
 
 - ``ATTACH`` with **no** ``DATA_PATH`` option honours the stamp and skips
-  the comparison entirely. Honouring the stamp is therefore *passing
-  nothing*, not passing the value back — it cannot disagree with itself.
+  the comparison entirely. To honour the stamp, `open_bundle` passes no
+  ``DATA_PATH`` at all.
 - A stale stamp does **not** fail at ATTACH. It fails at the first query
   that reads observations; metadata-only queries (``count(*)``, facets)
   answer correctly from the catalog. So a bad deploy can pass a health
   check and fail later, which is why `inspect_bundle` checks that the
-  stamp resolves rather than leaving it to DuckDB to discover.
-
-See #94, #98 and #120 for the design history.
+  stamp resolves before DuckDB reads from it.
 
 A bundle is published by writing sdmxlib's ``bundle.manifest.json`` last.
 `publish_bundle` writes it with a ``statcat`` section describing the catalog
@@ -182,10 +179,8 @@ class Auto:
     local, missing              missing, has data      `BundleDataPathError`
     ==========================  =====================  =========================
 
-    Resolve-first rather than scheme-sniffing: "does the stamp resolve?"
-    subsumes "is it remote?" and additionally covers parquet on a local
-    mount that is not ``<bundle>/parquet/`` — the case that previously
-    needed an explicit escape hatch to express.
+    It asks whether the stamp resolves, which covers "is it remote?" and
+    also parquet on a local mount other than ``<bundle>/parquet/``.
 
     Writes are rare by construction. Every deployment whose bundle has
     not moved opens with zero writes and takes no lock, which is what

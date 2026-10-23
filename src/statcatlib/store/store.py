@@ -579,43 +579,26 @@ def _map_to_istring(m: dict[str, str] | None) -> InternationalString | None:
 
 @runtime_checkable
 class EmbeddingModel(Protocol):
-    """What statcatlib needs of an embedding model, and nothing more.
+    """What statcatlib needs of an embedding model: one ``encode`` method.
 
-    A Protocol rather than `Any` or a hard dependency on
-    ``sentence_transformers.SentenceTransformer``: statcatlib calls exactly one
-    method, so that is the whole contract, and any object honouring it works —
-    a stub in a test, a remote client, a different library.
+    Any object with a matching ``encode`` works: a
+    ``sentence_transformers.SentenceTransformer``, a remote client, a stub in a
+    test. statcatlib passes either one string or a list of strings, and reads
+    the result through `as_vector` and `as_vectors`, which do the one
+    narrowing.
 
-    The signature states only what is *true* of a real encoder, which is less
-    than it first appears. `SentenceTransformer.encode` names its parameter
-    ``inputs`` (older versions: ``sentences``), and declares a return union
-    wide enough to include ``dict[str, Tensor]``. Promising
-    ``-> Iterable[float]`` here was the first attempt and no real encoder
-    satisfied it; worse, narrowing to it with `isinstance` is unsound, as
-    basedpyright reported — a runtime_checkable Protocol checks method
-    *presence*, never signatures.
+    ``encode`` returns `object` because real encoders declare wide returns:
+    ``SentenceTransformer.encode`` includes ``dict[str, Tensor]`` in its union.
+    A ``runtime_checkable`` Protocol checks that the method exists, never its
+    signature, so an `isinstance` check cannot narrow the result either.
 
-    So: two overloads, one per shape statcatlib passes, `object` out, and
-    `as_vectors` / `as_vector` below doing the one narrowing. The hole is two
-    functions wide and cannot spread.
+    The two overloads mirror the two shapes statcatlib passes. A single
+    ``str | list[str]`` parameter would not match ``SentenceTransformer.encode``,
+    which is overloaded seven ways with no overload taking the whole union.
 
-    Overloads rather than a `str | list[str]` union because
-    `SentenceTransformer.encode` is itself overloaded — seven ways — and a
-    protocol method taking a union needs a single implementation overload
-    accepting the whole union, which none of them is. Parameters are also
-    contravariant, so `object` in would demand an encoder that accepts
-    anything, and `**kwargs: object` would demand one that accepts arbitrary
-    keywords.
-
-    No keyword is named. `show_progress_bar` was, and it made this Protocol
-    demand more than statcatlib needs: `_batch_encode` caught the `TypeError` from
-    encoders without it, and `build_index`'s own docstring asks only for
-    ``.encode(text) -> Sequence[float]`` — three statements of one contract,
-    disagreeing. It also bought little: sentence-transformers defaults the
-    flag to `None`, which resolves to ``logger.getEffectiveLevel() in (INFO,
-    DEBUG)``, so under normal logging it was suppressing a bar that was never
-    drawn. Passing it now costs a minimal encoder a type error for code that
-    works, so it is gone and the fallback with it (#116).
+    The contract names no keyword argument, so an encoder that takes only
+    ``encode(text)`` satisfies it. statcatlib passes none; sentence-transformers
+    draws its progress bar only under INFO or DEBUG logging.
     """
 
     @overload
@@ -753,17 +736,13 @@ class _DimensionIds:
 
 
 class DatasetRow(NamedTuple):
-    """One ``statcat.dataset`` row, named rather than positional (#110).
+    """One ``statcat.dataset`` row, with named fields.
 
     The single source for the ``dataset`` column order: the SELECT list and the
     two reconstruction paths all derive from ``_fields`` below, so they cannot
-    disagree.
-
-    They used to be a hand-maintained SELECT list plus two 37-name positional
-    destructures. Swapping two adjacent same-typed columns in just the SELECT
-    (``collection_method`` and ``anonymization``, neither asserted by any test)
-    left every microdata dataset reading back with the two exchanged — and
-    passed basedpyright, pyrefly, ruff and all 853 tests.
+    disagree. A hand-maintained SELECT list could swap two adjacent columns of
+    the same type, such as ``collection_method`` and ``anonymization``, and no
+    type checker or test would notice.
 
     Types follow the DDL in ``store/schema.py``: ``MAP(VARCHAR, VARCHAR)``
     arrives as ``dict[str, str]``, ``TEXT[]`` as ``list[str]``, ``TIMESTAMP``
@@ -3192,15 +3171,13 @@ class Catalog:
 
         ``{lang: {"table": …, "rows": …, "stemmer": …}}``, read from the
         search index's manifest; empty when no index has been built. A
-        ``stemmer`` of ``None`` means that language is indexed unstemmed
-        because no Snowball stemmer exists for it — which is weaker, but
-        never wrong in the way borrowing another language's stemmer would
-        be (#101).
+        ``stemmer`` of ``None`` means no Snowball stemmer exists for that
+        language, so it is indexed unstemmed: queries miss inflected forms,
+        and no word is stemmed by another language's rules.
 
-        The check worth running after a rebuild: every language you
-        expect is present, and each names the stemmer you expect. A
-        language missing here is one whose rows were never tagged with
-        it upstream.
+        After a rebuild, check that every language you expect is present
+        and names the stemmer you expect. A missing language is one whose
+        rows were never tagged with it upstream.
 
         Unlike `embedding_metadata`, this is populated for BM25-only
         catalogs too — they write no ``embeddings.json``, and are exactly
@@ -4642,7 +4619,7 @@ class Catalog:
                 with an e5-family model can take hours, but BM25 over
                 short controlled-vocabulary code labels is usually
                 sufficient. Set to True if you need vector search over
-                individual codes (#84).
+                individual codes.
             max_codes_per_codelist: Skip codelists with more entries than this
                 to avoid bloating the index. Defaults to 500.
             codelist_urns: Restrict code indexing to these codelists only.
@@ -6194,7 +6171,7 @@ class Catalog:
         vector evidence per kind, narrow to one scope and pass
         ``mode="hybrid"``.
 
-        Returns an empty result when the index has not been built (#77).
+        Returns an empty result when the index has not been built.
 
         Returns:
             A new `QueryBuilder` with the search text applied. The original is

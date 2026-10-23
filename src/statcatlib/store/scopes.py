@@ -410,8 +410,8 @@ def _compile_enriched_query(
 class DimensionInfo:
     """Plain data object describing a dimension of a dataset.
 
-    Unlike the old ``DimensionView``, this has no lazy properties.
-    Navigation to the codelist is done via ``DimensionScope.codelist``.
+    It has no lazy properties; navigate to the codelist through
+    ``DimensionScope.codelist``.
 
     Mutable rather than frozen so it satisfies sdmxlib's ``SupportsId``,
     the bound on ``ItemList[T]`` since 0.61 — a protocol declaring a
