@@ -262,10 +262,10 @@ class _EmbeddingsSidecar(TypedDict):
     this module builds it — so declaring it buys key-name checking and stops
     a renamed field drifting away from the reader below.
 
-    `_read_embeddings_meta` deliberately does not use it: that value comes off
-    disk, possibly written by an older statcatlib, and claiming this shape of it
-    would be an assertion rather than a fact. It returns `dict[str, object]`
-    and `_parse_embeddings_meta` narrows every key.
+    `_read_embeddings_meta` does not use it: that value comes off disk,
+    possibly written by an older statcatlib, so its shape is unknown until
+    checked. It returns `dict[str, object]` and `_parse_embeddings_meta`
+    narrows every key.
     """
 
     version: int
@@ -524,29 +524,25 @@ class _ReadsEntity(Protocol):
 class _EntitySpec[R: NamedTuple, E]:
     """Everything the query path needs to read one non-dataset entity.
 
-    One object rather than the five class-keyed dicts this replaces
-    (``_TABLE_MAP``, ``_ENTITY_COLUMNS``, ``_ENTITY_ROW_TYPES``,
-    ``_ENTITY_FILTER_COLS``, ``_ENTITY_RECONSTRUCTORS``), which had to be
-    kept in step by hand — the same parallel-tables defect #110 removes
-    from the dataset columns, reproduced one screen further down.
+    One object holds the table, columns, row type, filter columns and
+    reconstructor, so they cannot drift apart the way five class-keyed dicts
+    kept in step by hand could. `DatasetRow` does the same for the dataset
+    columns.
 
     Being generic is what does the work. ``row_type`` and ``reconstruct``
     share ``R``, so pairing a row type with the wrong reconstructor is a
-    type error *at the spec*, where the mistake is made. Previously it
-    typechecked cleanly and surfaced as an `AttributeError` thousands of
-    lines away, inside the query loop.
+    type error *at the spec*, where the mistake is made. Without the shared
+    ``R`` it would typecheck cleanly and surface as an `AttributeError`
+    thousands of lines away, inside the query loop.
 
     The specs must therefore be bound *unannotated* (see below). Writing
     ``_AGENT_SPEC: _EntitySpec[Any, Any] = ...`` supplies `Any` as the
     expected type, `R` unifies with it, and the mismatch is accepted
     again — the annotation would silently undo the checking.
 
-    Bounding ``R`` by `NamedTuple` is what makes `columns` derivable —
-    it is the one spelling of "a row type" that basedpyright *and* pyrefly
-    both accepted while both ran (until GH-7). A `Protocol` carrying
-    ``_fields`` did not: declared `ClassVar` (which it truly is) basedpyright
-    rejected ``type[R]``; declared as an instance attribute pyrefly rejects
-    the specialization.
+    Bounding ``R`` by `NamedTuple` is what makes `columns` derivable. A
+    `Protocol` carrying ``_fields`` does not serve: declared as an instance
+    attribute, pyrefly rejects the specialization.
 
     Attributes:
         table: The DuckDB table name, unqualified.
@@ -1028,12 +1024,12 @@ def _sql_literal(v: object) -> str:
 def _validated_extras(extras: Mapping[str, str]) -> dict[str, str] | None:
     """Check `BaseDataset.extras` is string-to-string before it is stored.
 
-    The column is ``MAP(VARCHAR, VARCHAR)``. Coercing with ``str()`` made
-    every value storable and none of them recoverable — `None` came back as
-    the string ``"None"``, truthy and indistinguishable from a stored
-    ``"None"``; lists and dicts came back as Python ``repr``, which only
-    ``ast.literal_eval`` can reverse and which is not a format the other
-    tools reading this column understand (#114).
+    The column is ``MAP(VARCHAR, VARCHAR)``. Coercing with ``str()`` would
+    make every value storable and none of them recoverable: `None` would come
+    back as the string ``"None"``, truthy and indistinguishable from a stored
+    ``"None"``, and lists and dicts as Python ``repr``, which only
+    ``ast.literal_eval`` can reverse and which other tools reading this
+    column do not understand.
 
     So the write is refused instead. Callers wanting structured values
     encode them — ``json.dumps`` in, ``json.loads`` out — which keeps the
@@ -1147,10 +1143,9 @@ type AnyHit = Hit[BaseDataset] | Hit[CodeHit] | Hit[ConceptHit] | Hit[ReferenceM
 class _QueryResult:
     """One page of a query: the matching identifiers, and how many there were.
 
-    ``rows`` holds *identifiers*, not row tuples — it was `list[Any]`, and the
-    name reads like the latter. Every consumer treats them as ids
-    (``ds_by_id[ident] for ident in qr.rows``), so `list[str]` is both the
-    true type and the correction.
+    ``rows`` holds *identifiers*, not row tuples, whatever the name suggests.
+    Every consumer treats them as ids (``ds_by_id[ident] for ident in
+    qr.rows``).
     """
 
     total: int
@@ -2923,7 +2918,7 @@ class Catalog:
         An explicit ``data_path`` also sets ``OVERRIDE_DATA_PATH``: without
         it DuckLake rejects any DATA_PATH not spelled exactly like the
         stamp — even the same directory, absolute instead of relative —
-        so an explicit path could only ever restate the stamp (#126). The
+        so an explicit path could only ever restate the stamp. The
         override is per-attach and never rewrites the stamp, and it is
         allowed under ``READ_ONLY``. The default (``data_path=None``) stays
         a checked ``<bundle>/parquet/``, so a plain ``Catalog(path)`` on a
@@ -3850,7 +3845,7 @@ class Catalog:
         works well for RAG retrieval — and the row also carries
         structured fields so callers don't re-parse the joined text:
         ``dimension_id`` / ``dimension_label`` / ``code_id`` /
-        ``code_label`` (#83) plus ``code_urn`` / ``codelist_urn`` /
+        ``code_label`` plus ``code_urn`` / ``codelist_urn`` /
         ``parent_id`` / ``depth`` (used by hybrid code search and
         hierarchy-aware UIs).
 
@@ -4445,8 +4440,8 @@ class Catalog:
 
         - the ``i18n`` MAP, unnested to one row per language. These fold
           into their own language's row alone, so a French query matches
-          French footnote text and the French corpus stops carrying
-          English tokens (#100).
+          French footnote text and the French corpus carries no English
+          tokens.
         - the ``scalar`` column, which carries no language — URLs,
           vintages, codes. These land under `_ANY_LANG` and fold
           into every language's row.
@@ -4537,9 +4532,9 @@ class Catalog:
         """Warn where a prefix mismatch would degrade recall without erroring.
 
         Both cases below produce vectors whose document side and query side
-        sit in different regions of the embedding space. Nothing raises; recall
-        is merely worse, which is why #81 was found by a downstream caller
-        noticing BM25 and vector top-K barely overlapped rather than by a test.
+        sit in different regions of the embedding space. Nothing raises and
+        recall is merely worse; the visible symptom is BM25 and vector top-K
+        results that barely overlap.
 
         Warned rather than corrected. Applying a prefix silently would change
         what is embedded, and a rebuild is the caller's decision — the same
@@ -4844,7 +4839,7 @@ class Catalog:
           those are forced to ``embedding=None`` (FTS-only opt-in via
           `CodelistIndexPolicy`).
         - Model + ``embed_codes=False`` → set ``embedding=None`` so the
-          row schema lines up with the dataset rows (#84).
+          row schema lines up with the dataset rows.
         """
         if not code_rows or self._embedding_model is None:
             return
@@ -6504,7 +6499,7 @@ class Catalog:
         ``build_index()`` has not been called yet), returns an empty
         result instead of raising — callers should already handle the
         empty-results case, and a soft failure is friendlier than a
-        hard ``RuntimeError`` mid-request.  See issue #77.
+        hard ``RuntimeError`` mid-request.
         """
         if self._lance is None:
             return _QueryResult(total=0, rows=[], scores={})
