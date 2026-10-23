@@ -13,7 +13,7 @@
 # Suppressions are written `# pyrefly: ignore[kind]`, never `# type: ignore`,
 # which names no checker and no kind.
 #
-# Adopting it (#107), as a second opinion beside basedpyright then, cost
+# Adopting it, as a second opinion beside basedpyright at the time, cost
 # 60-odd code fixes and found five things basedpyright did not see, four of
 # them fixed at the cause:
 #
@@ -26,8 +26,8 @@
 #     say which branch it is;
 #   * two `field(default=[])` in `scopes.py` — attrs shares one list across
 #     every instance, so that is a live bug the first time anything appends;
-#   * 38 `str()` / `int()` / `float()` conversions that #109 made provably
-#     dead by typing the boundaries they were guarding.
+#   * 38 `str()` / `int()` / `float()` conversions made provably dead by
+#     typing the boundaries they were guarding.
 #
 # The fifth is not fixable and says so at the site: `_execute_query` cannot
 # narrow with `isinstance(ds, cls)` because `query(sc.Dataset)` passes a
@@ -38,7 +38,7 @@
 python-version = "3.14"
 
 # src-layout: make `import statcatlib` resolve. Checks `src` and `tests`.
-# `tests` was added by #116: the gap let a wrong `tmp_path` annotation stand
+# `tests` is included because leaving it out let a wrong `tmp_path` annotation stand
 # behind 25 suppressions, and hid three dead ignores from the rule that exists
 # to catch them.
 # `"."` so `from tests.conftest import …`, the suite's way of sharing
@@ -63,9 +63,9 @@ unknown-variable-type = false  #   2 — the same boundary, on the receiving end
 unused-call-result = false     #  31 — mostly `conn.execute(...)`, whose return we do not want
 
 # `explicit-any` (14) flags every literal `Any` token, including the ones
-# #109 kept deliberately and documented: `make_unloaded`, whose sentinel is
+# kept deliberately and documented: `make_unloaded`, whose sentinel is
 # assigned into fields of every declared type; the three kind-dispatched
-# construction locals; and `tuple[Any, ...]` for DuckDB rows, which is #110.
+# construction locals; and `tuple[Any, ...]` for DuckDB rows.
 # The check we actually want is a *degradation* to Any — `implicit-any` and
 # the `no-any-return` family — and those are on via the preset. The literal
 # count is guarded instead by `just check-any`, which ratchets it and, unlike
@@ -79,7 +79,7 @@ explicit-any = false
 implicit-reexport = false
 
 # ── tests/ ────────────────────────────────────────────────────────────────
-# Checked (#116), but not required to be annotated. `ruff.toml` already
+# Checked, but not required to be annotated. `ruff.toml` already
 # exempts tests from `ANN`; demanding annotations here would contradict that
 # decision rather than extend it.
 #

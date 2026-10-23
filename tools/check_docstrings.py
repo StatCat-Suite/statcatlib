@@ -10,9 +10,8 @@ in ``tests/test_check_docstrings.py`` are that sabotage, kept.
 
 Ruff's pydocstyle rules check a docstring's **structure** (summary line, blank
 lines, punctuation). They never read its markup or reject a NumPy section
-header. The same line sat declared and unenforced here, when the project was
-pinax, while 98 Sphinx roles and 13 NumPy-sectioned docstrings accumulated
-underneath it (#105).
+header. With that line declared and nothing checking it, 98 Sphinx roles and
+13 NumPy-sectioned docstrings accumulated here while the project was pinax.
 
 ## The four arms
 
@@ -25,10 +24,11 @@ underneath it (#105).
    which is fine and common.
 3. **No `Parameters:` / `Arguments:` / `Params:` headings.** Google spells the
    section ``Args:``. pydoclint parses the others well enough that DOC003 stays
-   quiet, which is how three survived the #105 sweep. statcatlib's own arm.
+   quiet, which is how three survived a sweep that relied on it. statcatlib's
+   own arm.
 4. **pydoclint, in full**, with the settings in ``pyproject.toml``'s
    ``[tool.pydoclint]``. sdmxlib consults only DOC003, because its tree carries
-   600-odd other findings. statcatlib cleared all of its own (#108), so every
+   600-odd other findings. statcatlib cleared all of its own, so every
    code counts here: a docstring that is not Google (DOC003), and one that
    disagrees with its signature (missing args, undocumented raises, a return
    section with no return).
