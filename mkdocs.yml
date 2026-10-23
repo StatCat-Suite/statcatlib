@@ -5,32 +5,58 @@ site_url: "https://statcat-suite.github.io/statcatlib/"
 repo_url: "https://github.com/StatCat-Suite/statcatlib"
 repo_name: "StatCat-Suite/statcatlib"
 
+# ── Suite configuration ─────────────────────────────────────────────────────
+# The StatCat Suite block, copied from https://statcat-suite.github.io/sites/
+# (the hub repository's docs/sites.md). Change it there first; every project
+# site carries the same block, so the sites share one look.
+
+validation:
+  links:
+    anchors: warn
+
+extra_css:
+  - https://statcat-suite.github.io/assets/stylesheets/statcat.css
+
 theme:
   name: material
+  icon:
+    logo: material/library-shelves
+    repo: fontawesome/brands/github
+  favicon: https://statcat-suite.github.io/assets/favicon.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
       primary: indigo
       accent: indigo
       toggle:
-        icon: material/brightness-7
+        icon: material/weather-sunny
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
       primary: indigo
       accent: indigo
       toggle:
-        icon: material/brightness-4
+        icon: material/weather-night
         name: Switch to light mode
-  icon:
-    repo: fontawesome/brands/github
   features:
+    - content.code.copy
+    - navigation.tabs
     - navigation.sections
     - navigation.top
-    - content.code.copy
+    - toc.follow
+
+extra:
+  homepage: https://statcat-suite.github.io/
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/StatCat-Suite
+      name: StatCat Suite on GitHub
+
+copyright: 'Part of the <a href="https://statcat-suite.github.io/">StatCat Suite</a>'
 
 markdown_extensions:
   - admonition
+  - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
@@ -46,6 +72,28 @@ markdown_extensions:
   - toc:
       permalink: true
 
+# ── End of suite configuration ──────────────────────────────────────────────
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          # sdmxlib's inventory, so `[Name][sdmxlib.Name]` and the sdmxlib
+          # types in a generated signature link to its site (GH-56).
+          inventories:
+            - https://statcat-suite.github.io/sdmxlib/objects.inv
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            heading_level: 3
+            merge_init_into_class: true
+            show_signature_annotations: true
+            separate_signature: true
+
 nav:
   - Overview: index.md
   - Tutorial: tutorial.md
@@ -56,3 +104,13 @@ nav:
     - Domain Model: api/model.md
     - Query Filters: api/query.md
     - Source Connectors: api/sources.md
+  - Reference:
+    - Catalog: reference/catalog.md
+    - Scopes: reference/scopes.md
+    - Domain Model: reference/model.md
+    - Query: reference/query.md
+    - Sources: reference/sources.md
+    - Bundles: reference/bundle.md
+    - URNs: reference/urn.md
+    - Testing: reference/testing.md
+  - StatCat Suite: https://statcat-suite.github.io/
