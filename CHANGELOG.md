@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-10-23
+
+Fixes `ingest_data`, whose observations could not be read back. Up to 0.10.1
+it stored the pivoted frame, one column per code of the measure dimension,
+while the `DataflowBinding` it registered describes the long layout, a column
+per dimension and measure. Reading the dataflow through
+`store.registry.obs(flow)` raised a DuckDB `BinderException`.
+
+From 0.11.0 `ingest_data` stores the long layout, one row per observation, and
+the binding reads it:
+
+```python
+obs = store.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
+obs.filter(obs.col("GEO") == "CA").frame()   # long
+obs.pivot(on=ds.measure_dim)                  # wide
+```
+
+`measure_dim` no longer changes what is stored. It must name one of the DSD's
+dimensions, and it is recorded as `AggregateDataset.measure_dim`, the axis to
+pass to `pivot(on=...)`. `ingest_data` now raises `ValueError` when the
+dataflow's DSD is not stored, where it used to write a table with no binding.
+
+**Upgrading:** re-run `ingest_data` for each dataflow in an existing catalog.
+That rewrites its `lake.<agency>.df_<id>_<version>` table in the long layout,
+which the binding can read. SQL that read the wide columns directly must pivot
+instead. The sdmxlib store schema is unchanged, so nothing else needs a
+rebuild.
+
+The docs described a Parquet file attached as a `Distribution` and read with
+`pl.scan_parquet`, and a `cat.observations()` method that does not exist. They
+now describe the DuckLake table and `store.registry.obs(flow)`. A docs pass
+also corrected the catalog folder layout (`meta.duckdb`, `lake.ducklake`,
+`parquet/`), the `Hit` objects `search()` returns, and `QueryBuilder`
+immutability.
+
+### Breaking Changes
+
+- **sources**: `ingest_data` stores the long layout its binding reads (GH-29)
+
+### Documentation
+
+- Rewrite user docs and CLAUDE.md to the writing-style rules; gate prose (GH-28)
+
+### Miscellaneous
+
+- **types**: Pyrefly is the only type checker; cap the checkers (GH-7)
+- **docs**: Port the docstring gate tool from sdmxlib; lint tools/ (GH-9)
+
 ## [0.10.1] - 2026-10-23
 
 Fixes folder catalogs created from a relative path, such as
