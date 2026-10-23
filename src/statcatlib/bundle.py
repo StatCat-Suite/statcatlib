@@ -33,25 +33,40 @@ assumed (#120):
   stamp resolves rather than leaving it to DuckDB to discover.
 
 See #94, #98 and #120 for the design history.
+
+A bundle is published by writing sdmxlib's ``bundle.manifest.json`` last.
+`publish_bundle` writes it with a ``statcat`` section describing the catalog
+and its search index, and `check_bundle` runs sdmxlib's checks and then
+`check_catalog` against that section (GH-3).
 """
 
 from __future__ import annotations
 
 import errno
+import json
 import shutil
+from collections.abc import Mapping
 from contextlib import contextmanager
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import duckdb
 from attrs import field, frozen
+from sdmxlib.bundle import MANIFEST_NAME, Finding, Manifest, Producer, Provenance, Report, write_manifest
+from sdmxlib.bundle import check_bundle as sdmx_check_bundle
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterator
+
+    from sdmxlib import LocalRegistry
 
     from statcatlib.store import Catalog
+    from statcatlib.store.lance import LanceIndex, LanguageLayout
 
 __all__ = [
+    "STATCAT_SECTION",
+    "STATCAT_SECTION_FORMAT",
     "At",
     "Auto",
     "BundleDataPathError",
@@ -59,9 +74,13 @@ __all__ = [
     "Colocated",
     "DataPolicy",
     "Embedded",
+    "catalog_section",
+    "check_bundle",
+    "check_catalog",
     "inspect_bundle",
     "normalize_lake_data_path",
     "open_bundle",
+    "publish_bundle",
     "read_current_data_path",
 ]
 
@@ -563,3 +582,243 @@ def open_bundle(
     )
     with catalog.open() as opened:
         yield opened
+
+
+# -- the published bundle: statcatlib's part of sdmxlib's contract -------
+#
+# sdmxlib owns ``bundle.manifest.json`` (sdmxlib GH-56): the token caches key
+# on, a sha256 per file, and the checker. A statcat bundle is an sdmxlib
+# bundle plus the ``statcat`` schema and ``search/``, so statcatlib adds what
+# only it can describe: a ``statcat`` section in the manifest, and checks
+# that the catalog and its search index are what that section says (GH-3).
+
+#: The manifest's extension section statcatlib owns.
+STATCAT_SECTION = "statcat"
+
+#: Version of the ``statcat`` section. Bumped when its fields change meaning.
+STATCAT_SECTION_FORMAT = 1
+
+_SEARCH_DIRNAME = "search"
+_INDEX_MANIFEST = "index.json"
+
+
+def _has_index(search_dir: Path) -> bool:
+    """Whether ``search/`` holds anything. Opening a folder catalog creates it empty."""
+    return search_dir.is_dir() and any(search_dir.iterdir())
+
+
+def _search_section(cat: Catalog, search_dir: Path) -> dict[str, object] | None:
+    """The ``search`` part of the section.
+
+    Args:
+        cat: The bundle's catalog, open.
+        search_dir: Its ``search/`` directory.
+
+    Returns:
+        The index format version, embedding model and per-language layout,
+        or ``None`` when no index is built.
+
+    Raises:
+        ValueError: ``search/`` holds an index from before per-language
+            tables, which has no layout to record.
+    """
+    if not _has_index(search_dir):
+        return None
+    layout = cat.index_layout
+    if not layout:
+        msg = f"{search_dir} holds a search index with no {_INDEX_MANIFEST}: rebuild it with build_index() first"
+        raise ValueError(msg)
+    index_manifest = json.loads((search_dir / _INDEX_MANIFEST).read_text())
+    return {
+        "index_version": index_manifest.get("version"),
+        "embedding_model": cat.embedding_model_name,
+        "languages": {lang: {"rows": entry["rows"], "stemmer": entry["stemmer"]} for lang, entry in layout.items()},
+    }
+
+
+def catalog_section(path: str | Path) -> dict[str, object]:
+    """Describe the catalog in a bundle, as its manifest's ``statcat`` section.
+
+    Opens the bundle read-only. The section records the number of catalog
+    datasets and, when a search index is built, its index format version,
+    embedding model, and each language's row count and stemmer.
+
+    Args:
+        path: The bundle directory.
+
+    Returns:
+        The section, ready for ``write_manifest(extensions=...)``.
+    """
+    from statcatlib.store import Catalog  # noqa: PLC0415
+
+    root = Path(path)
+    with Catalog(root, read_only=True, data_path=Embedded()) as cat:
+        row = cat.connection.execute("""SELECT count(*) FROM statcat.dataset""").fetchone()
+        return {
+            "format": STATCAT_SECTION_FORMAT,
+            "statcatlib_version": metadata.version("statcatlib"),
+            "datasets": row[0] if row else 0,
+            "search": _search_section(cat, root / _SEARCH_DIRNAME),
+        }
+
+
+def publish_bundle(
+    path: str | Path,
+    *,
+    bundle_id: str,
+    producer: Producer,
+    product: dict[str, object] | None = None,
+    extensions: dict[str, dict[str, object]] | None = None,
+    provenance: Provenance | None = None,
+) -> Manifest:
+    """Publish a statcat bundle: sdmxlib's manifest, with the ``statcat`` section.
+
+    `sdmxlib.bundle.write_manifest` with `catalog_section` added to its
+    extensions. Call it **last**, after `Catalog.build_index`, once nothing
+    in the directory will change: the manifest lists every file with its
+    sha256, so a file written afterwards fails `check_bundle`. Publishing
+    again mints a new token, which is what tells caches to refresh.
+
+    Args:
+        path: The bundle directory.
+        bundle_id: The producer's stable name for the bundle, kept across rebuilds.
+        producer: What built it.
+        product: Producer-specific fields, carried and not interpreted.
+        extensions: Other packages' sections; ``statcat`` is filled in here.
+        provenance: Where a fetched bundle came from.
+
+    Returns:
+        The manifest written.
+
+    Raises:
+        ValueError: *extensions* already has a ``statcat`` section, or the
+            search index predates per-language tables and must be rebuilt.
+    """
+    if extensions and STATCAT_SECTION in extensions:
+        msg = f"the {STATCAT_SECTION!r} section is written by publish_bundle, not passed to it"
+        raise ValueError(msg)
+    section = catalog_section(path)
+    return write_manifest(
+        path,
+        bundle_id=bundle_id,
+        producer=producer,
+        product=product,
+        extensions={**(extensions or {}), STATCAT_SECTION: section},
+        provenance=provenance,
+    )
+
+
+def _check_catalog_rows(conn: duckdb.DuckDBPyConnection, section: Mapping[str, object]) -> Iterator[Finding]:
+    """The catalog's datasets: counted as declared, each linked flow stored."""
+    row = conn.execute("""SELECT count(*) FROM statcat.dataset""").fetchone()
+    found = row[0] if row else 0
+    if found != section.get("datasets"):
+        detail = f"{found} datasets, the manifest says {section.get('datasets')}"
+        yield Finding(STATCAT_SECTION, "statcat.dataset", detail)
+    dangling = conn.execute(
+        """
+        SELECT d.identifier, d.sdmx_dataflow_urn
+        FROM statcat.dataset d
+        WHERE d.sdmx_dataflow_urn IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM sdmx.dataflow f WHERE f.urn = d.sdmx_dataflow_urn)
+        ORDER BY d.identifier
+        """
+    ).fetchall()
+    for identifier, urn in dangling:
+        yield Finding(STATCAT_SECTION, identifier, f"links {urn}, which the registry does not hold")
+
+
+def _check_search(root: Path, declared: object) -> Iterator[Finding]:
+    """The search index: present exactly when declared, with the declared layout."""
+    search_dir = root / _SEARCH_DIRNAME
+    if declared is None:
+        if _has_index(search_dir):
+            yield Finding(STATCAT_SECTION, _SEARCH_DIRNAME, "a search index the manifest does not declare")
+        return
+    if not isinstance(declared, Mapping) or not isinstance(languages := declared.get("languages"), Mapping):
+        yield Finding(STATCAT_SECTION, MANIFEST_NAME, "the search section has no languages")
+        return
+    if not (search_dir / _INDEX_MANIFEST).is_file():
+        yield Finding(STATCAT_SECTION, f"{_SEARCH_DIRNAME}/{_INDEX_MANIFEST}", "the manifest declares a search index")
+        return
+    try:
+        from statcatlib.store.lance import LanceIndex  # noqa: PLC0415
+    except ImportError:
+        yield Finding(STATCAT_SECTION, _SEARCH_DIRNAME, "cannot check the search index without statcatlib[search]")
+        return
+    index = LanceIndex(search_dir)
+    layout = index.describe()
+    for lang in sorted(set(languages) | set(layout)):
+        yield from _check_language(index, lang, layout.get(lang), languages.get(lang))
+
+
+def _check_language(index: LanceIndex, lang: str, found: LanguageLayout | None, want: object) -> Iterator[Finding]:
+    """One language's table: declared, stemmed as declared, holding the declared rows."""
+    subject = f"{_SEARCH_DIRNAME} [{lang}]"
+    if found is None:
+        yield Finding(STATCAT_SECTION, subject, "declared in the manifest, absent from the index")
+        return
+    if not isinstance(want, Mapping):
+        yield Finding(STATCAT_SECTION, subject, "in the index, not declared in the manifest")
+        return
+    if found["stemmer"] != want.get("stemmer"):
+        yield Finding(
+            STATCAT_SECTION, subject, f"stemmed with {found['stemmer']}, the manifest says {want.get('stemmer')}"
+        )
+    table = index.table_for(lang)
+    rows = table.count_rows() if table is not None else 0
+    if rows != want.get("rows"):
+        yield Finding(STATCAT_SECTION, subject, f"{rows} rows, the manifest says {want.get('rows')}")
+
+
+def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Finding]:
+    """The ``statcat`` check `check_bundle` adds to sdmxlib's.
+
+    - the ``statcat`` schema is in ``meta.duckdb``, and the manifest has a
+      ``statcat`` section in a format this build reads;
+    - the catalog holds the datasets the section counts, and every dataset
+      linked to a dataflow names one the registry holds;
+    - ``search/`` is present exactly when the section declares an index,
+      with the declared languages, each stemmed as declared and holding the
+      declared rows.
+
+    Args:
+        root: The bundle directory.
+        manifest: Its manifest.
+        reg: sdmxlib's registry over the bundle.
+
+    Returns:
+        Everything found wrong with the catalog's part of the bundle.
+    """
+    conn = reg.connection
+    has_schema = conn.execute(
+        """SELECT count(*) FROM information_schema.tables WHERE table_schema = 'statcat' AND table_name = 'dataset'"""
+    ).fetchone()
+    if not has_schema or not has_schema[0]:
+        return [Finding(STATCAT_SECTION, "meta.duckdb", "no statcat schema: not a statcat catalog")]
+    section = manifest.extensions.get(STATCAT_SECTION)
+    if section is None:
+        return [Finding(STATCAT_SECTION, MANIFEST_NAME, "no statcat section: publish with statcatlib's publish_bundle")]
+    if section.get("format") != STATCAT_SECTION_FORMAT:
+        detail = f"statcat section format {section.get('format')!r}, this build reads {STATCAT_SECTION_FORMAT}"
+        return [Finding(STATCAT_SECTION, MANIFEST_NAME, detail)]
+    return [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
+
+
+def check_bundle(path: str | Path, *, references: bool = True) -> Report:
+    """Check a statcat bundle: sdmxlib's checks, then the catalog's.
+
+    sdmxlib's `sdmxlib.bundle.check_bundle` checks the manifest, the files
+    against their checksums, the lake, the bindings and the structural
+    closure; `check_catalog` runs after them as the ``statcat`` check. Run
+    it where a bundle is built or received, never on the path that serves
+    it. ``statcat bundle check`` runs it from a shell.
+
+    Args:
+        path: The bundle directory.
+        references: Whether to check the structural closure, the costly check.
+
+    Returns:
+        What was checked and what was found.
+    """
+    return sdmx_check_bundle(path, references=references, extensions={STATCAT_SECTION: check_catalog})

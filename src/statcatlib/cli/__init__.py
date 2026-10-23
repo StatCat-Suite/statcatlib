@@ -225,6 +225,39 @@ def bundle_explain(
         raise typer.Exit(code=1)
 
 
+@bundle_app.command("check")
+def bundle_check(
+    bundle: Path = typer.Argument(
+        ...,
+        help="Path to a published statcatlib Catalog bundle (the folder containing bundle.manifest.json).",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+    ),
+    references: bool = typer.Option(
+        True,
+        "--references/--no-references",
+        help="Check that every structural reference resolves in the bundle. The costly check.",
+    ),
+) -> None:
+    """Check a published bundle against its manifest: sdmxlib's checks, then the catalog's.
+
+    Run it where a bundle is built or received, not on the serving path.
+    Lists everything found wrong and exits 1 if anything was.
+    """
+    from statcatlib.bundle import check_bundle  # noqa: PLC0415
+
+    report = check_bundle(bundle.resolve(), references=references)
+    for finding in report.findings:
+        # The finding's own "[check]" prefix is text, not Rich markup.
+        console.print(str(finding), style="red", markup=False, highlight=False)
+    checked = ", ".join(report.checked)
+    if not report.ok:
+        console.print(f"[red]{len(report.findings)} finding(s)[/] — checked {checked}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]ok[/] — checked {checked}")
+
+
 @bundle_app.command("attach-cmd")
 def bundle_attach_cmd(
     bundle: Path = typer.Argument(

@@ -17,6 +17,7 @@ from statcatlib.model.dataset import AggregateDataset
 
 if TYPE_CHECKING:
     from sdmxlib.api.registry import RestRegistry
+    from sdmxlib.local.registry import LocalRegistry
     from sdmxlib.model.in_memory_registry import InMemoryRegistry
 
     from statcatlib.model.skos import ConceptRef
@@ -133,7 +134,7 @@ def dataset_from_dataflow(
 
 
 def prepare_sdmx(
-    registry: InMemoryRegistry,
+    registry: InMemoryRegistry | LocalRegistry,
     *,
     publisher: Agent | None = None,
     themes: list[ConceptRef] | None = None,
@@ -148,6 +149,9 @@ def prepare_sdmx(
 
     Code and codelist information is resolved at query time via the SDMX
     structural tables once ``local.ingest(registry)`` has been called.
+
+    *registry* can also be a `LocalRegistry` whose store already holds the
+    structures, such as a bundle's: each flow's DSD is read from the store.
     """
     results: list[AggregateDataset] = []
     for flow in registry.get_all(Dataflow):
