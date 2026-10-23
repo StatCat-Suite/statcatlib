@@ -666,24 +666,26 @@ Multiple calls to `.filter()` are also ANDed.
 ### `.search`
 
 ```python
-.search(text: str, *, operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]
+.search(text: str, *, lang: str = "en", operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]
 ```
 
 Add BM25 full-text search. Combines with any `.filter()` conditions.
 
 | Parameter  | Description |
 |------------|-------------|
+| `lang`     | Which language's index to search, as for `store.search()`. A French query needs `lang="fr"` |
 | `operator` | `"or"` (default) matches any term; `"and"` requires all terms |
 | `fuzzy`    | Levenshtein edit distance for fuzzy matching: `0` (default), `1`, or `2` |
 
 ### `.hybrid_search`
 
 ```python
-.hybrid_search(text: str) -> QueryBuilder[T]
+.hybrid_search(text: str, *, lang: str = "en") -> QueryBuilder[T]
 ```
 
 Add hybrid BM25 + vector search (RRF). Requires `embedding_model` on the store.
 Relational filters from `.filter()` are applied on top of the RRF-merged result.
+`lang` selects the language's index for both techniques, as for `.search`.
 
 ```python
 import statcatlib.query as q

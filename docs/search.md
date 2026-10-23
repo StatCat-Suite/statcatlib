@@ -163,8 +163,14 @@ The search runs first: `search()` takes the top 200 BM25 matches, and
 `hybrid_search()` fuses the top 200 from each technique. The filters then keep
 the candidates that match, in search order. A dataset that matches the filters
 but ranks outside those candidates is not returned, so a narrow filter with a
-broad query can return fewer results than exist. Both methods search the
-English table; for another language, use `cat.datasets.find(..., lang=...)`.
+broad query can return fewer results than exist.
+
+Both methods take `lang`, which names the table to search and defaults to
+`"en"`. A French query with filters needs `lang="fr"`:
+
+```python
+cat.query(sc.AggregateDataset).filter(q.has_code("GEO", "QC")).search("chômage", lang="fr")
+```
 
 ## Keeping the index current
 
