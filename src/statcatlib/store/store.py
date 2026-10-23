@@ -260,13 +260,15 @@ def _refuse_sdmx_schema_rebuild(conn: duckdb.DuckDBPyConnection) -> None:
             version and holds artefacts.
     """
     try:
-        row = conn.execute("""
+        rows = conn.execute("""
             SELECT value FROM sdmx._meta WHERE key = 'schema_version'
-        """).fetchone()
+        """).fetchall()
+        row = _catalog_schema.first_row(rows)
         stored = row[0] if row else None
-        artefacts = conn.execute("""
+        rows = conn.execute("""
             SELECT count(*) FROM sdmx.artefact
-        """).fetchone()
+        """).fetchall()
+        artefacts = _catalog_schema.first_row(rows)
     except duckdb.CatalogException:
         return
     n_artefacts = artefacts[0] if artefacts else 0
@@ -1695,12 +1697,13 @@ def annotation_fingerprint(conn: duckdb.DuckDBPyConnection, types: Sequence[str]
         of nothing.
     """
     nothing = hashlib.md5(b"", usedforsecurity=False).hexdigest()
-    has_sdmx = conn.execute(
+    rows = conn.execute(
         """SELECT count(*) FROM information_schema.tables WHERE table_schema = 'sdmx' AND table_name = 'annotation'"""
-    ).fetchone()
+    ).fetchall()
+    has_sdmx = _catalog_schema.first_row(rows)
     if not types or not has_sdmx or not has_sdmx[0]:
         return nothing
-    row = conn.execute(
+    rows = conn.execute(
         """
         WITH typed AS (
             SELECT id, owner_urn, ordinal, annotation_id, annotation_type, title, value
@@ -1718,7 +1721,8 @@ def annotation_fingerprint(conn: duckdb.DuckDBPyConnection, types: Sequence[str]
              FROM typed a JOIN sdmx.annotation_text t ON t.annotation_id = a.id)
         """,
         {"types": sorted(types)},
-    ).fetchone()
+    ).fetchall()
+    row = _catalog_schema.first_row(rows)
     if row is None:
         return nothing
     folded = "|".join(str(part) for part in (sorted(types), *row))
@@ -7018,7 +7022,7 @@ class Catalog:
     def _resolve_codelist_urn(self, dataflow_urn: str, dimension_id: str) -> str | None:
         """Resolve the codelist URN for a specific dimension of a dataflow."""
         try:
-            row = self.connection.execute(
+            rows = self.connection.execute(
                 """
                 SELECT dc.codelist_urn
                 FROM sdmx.dataflow df
@@ -7030,7 +7034,8 @@ class Catalog:
                 LIMIT 1
                 """,
                 [dataflow_urn, dimension_id],
-            ).fetchone()
+            ).fetchall()
+            row = _catalog_schema.first_row(rows)
         except duckdb.CatalogException:
             return None
         return row[0] if row else None
@@ -7069,7 +7074,7 @@ class Catalog:
         dataset has no SDMX link or the dimension has no enumerated codelist.
         """
         try:
-            row = self.connection.execute(
+            rows = self.connection.execute(
                 """
                 SELECT dc.codelist_urn
                 FROM statcat.dataset d
@@ -7082,7 +7087,8 @@ class Catalog:
                 LIMIT 1
                 """,
                 [dataset_id, dimension],
-            ).fetchone()
+            ).fetchall()
+            row = _catalog_schema.first_row(rows)
         except duckdb.CatalogException:
             return None
         if row is None:
@@ -7100,10 +7106,11 @@ class Catalog:
         if ds.sdmx_dataflow_urn is None:
             return None
         try:
-            row = self.connection.execute(
+            rows = self.connection.execute(
                 "SELECT dsd_urn FROM sdmx.dataflow WHERE urn = ? LIMIT 1",
                 [ds.sdmx_dataflow_urn],
-            ).fetchone()
+            ).fetchall()
+            row = _catalog_schema.first_row(rows)
         except duckdb.CatalogException:
             return None
         if row is None:
