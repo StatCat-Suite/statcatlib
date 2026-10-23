@@ -210,9 +210,9 @@ def _stemmer_for(lang: str) -> str | None:
     Falls back on the primary subtag, so ``fr-CA`` stems as French. Returns
     ``None`` for any language LanceDB has no stemmer for — the caller then
     indexes it unstemmed, which is merely weaker. The one thing never done
-    is substituting a *different* language's stemmer: applying English
-    rules to French text is the defect #101 exists to fix, and silently
-    doing it to a third language would be the same bug wearing a hat.
+    is substituting a *different* language's stemmer: per-language tables
+    exist so French text is never stemmed with English rules, and a third
+    language gets the same guarantee.
     """
     return _SNOWBALL_LANGUAGE.get(_language_slug(lang).split("_")[0])
 
@@ -295,7 +295,7 @@ class _Manifest(TypedDict):
     `store._EmbeddingsSidecar`: here the shape is guaranteed because this
     module builds it. `_read_manifest` returns `dict[str, object]` — that
     value came off disk and may have been written by an older statcatlib, so
-    claiming this shape of it would be an assertion rather than a fact.
+    its shape is unknown until checked.
     """
 
     version: int
@@ -696,7 +696,8 @@ def _ann_is_quantised(tbl: lancedb.table.Table | None) -> bool:
     """True when *tbl* carries a vector index that stores approximations.
 
     Read from the table rather than the manifest. The manifest only began
-    recording ``ann`` in version 2, so every index predating #102 is
+    recording ``ann`` in version 2, so every index built before pinaxlib
+    5.24.0 is
     indistinguishable there from one that never had a vector index at all
     — and those two cases want opposite answers. ``list_indices()``
     separates them exactly, at no extra cost: the table is already open.
@@ -727,7 +728,7 @@ class _LanguageIndex:
     """One language's slice of the search corpus, in its own Lance table.
 
     Per-language tables exist so each can carry its own Tantivy tokenizer
-    — French text stemmed with French rules, not English ones (#101). The
+    — French text stemmed with French rules, not English ones. The
     separation also gives each language exact BM25 document frequencies:
     with every language in one table, `N` and `avgdl` pooled across all of
     them, so a term common in English looked rarer than it was inside the
@@ -780,7 +781,7 @@ class _LanguageIndex:
         return self._name
 
     def ann_is_quantised(self) -> bool:
-        """True when this table carries a *lossy* vector index (#103).
+        """True when this table carries a *lossy* vector index.
 
         See `_ann_is_quantised`; this is the per-language view of it.
 
@@ -815,7 +816,7 @@ class _LanguageIndex:
 
         The number that governs whether an ANN index is worth building —
         the index only ever contains these rows, however many others sit
-        beside them (#102).
+        beside them.
 
         Returns 0 when the table has no ``embedding`` column at all
         (a BM25-only catalog): there is nothing to index, and pushing the
@@ -894,7 +895,7 @@ class _LanguageIndex:
 
         "Big enough" is measured in *embedded* rows, not table rows: the
         index is trained on the embedding column, so rows that carry no
-        vector are training noise rather than training data (#102).
+        vector are training noise rather than training data.
         Below the bar the language is left to brute-force scan, which at
         that size is both faster and exact.
         """
@@ -1042,8 +1043,8 @@ class LanceIndex:
         thing. It also keeps the two from being triaged separately when
         they are usually the same neglected bundle.
 
-        The two conditions genuinely co-occur. A pre-#101 bundle predates
-        #102 as well, so its single legacy table is stemmed as English
+        The two conditions co-occur. An index built before pinaxlib 5.23.0
+        also predates 5.24.0, so its single legacy table is stemmed as English
         *and* carries an IVF_PQ vector index; warning about the stemming
         alone would send someone to rebuild while leaving them unaware
         their vector search was also degraded.

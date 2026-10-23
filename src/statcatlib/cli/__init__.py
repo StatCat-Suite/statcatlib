@@ -312,8 +312,8 @@ def _resolve_prefixes(
     `ASYMMETRIC_MODEL_PREFIXES`; an unrecognized model gets empty prefixes
     (correct for symmetric encoders, harmless for ones that don't care).
 
-    The table used to live here, which left the Python API — the interface
-    #81 was reported against — with no such default at all.
+    The table lives in ``statcatlib.store.store``, so the Python API applies
+    the same defaults.
     """
     default_doc, default_q = ASYMMETRIC_MODEL_PREFIXES.get(model, ("", ""))
     doc = default_doc if document_prefix is None else document_prefix
