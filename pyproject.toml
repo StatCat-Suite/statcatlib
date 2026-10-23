@@ -48,10 +48,6 @@ Documentation = "https://statcat-suite.github.io/statcatlib"
 "Issue Tracker" = "https://github.com/StatCat-Suite/statcatlib/issues"
 Changelog = "https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md"
 
-[[tool.uv.index]]
-url = "https://pypi.org/simple"
-default = true
-
 [build-system]
 requires = ["uv_build>=0.11.6,<0.14.0"]
 build-backend = "uv_build"
@@ -111,83 +107,20 @@ exclude_lines = [
 
 [dependency-groups]
 dev = [
-    "basedpyright>=1.38.4",
     "lancedb>=0.39",
     "mkdocs-material>=9.7.6",
     "polars>=1.39.3",
-    "pydoclint>=0.9.1",
-    "pyrefly>=1.2.0",
+    # The checkers are capped, as sdmxlib's are: uv.lock is gitignored, so an
+    # uncapped checker's next release would change what `just ci` reports
+    # without a commit. A bump goes in its own PR, with its findings fixed.
+    "pydoclint>=0.11.1,<0.12",
+    "pyrefly>=1.4.0,<1.5",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "pytest-httpx>=0.35",
     "rich>=15.0",
-    "ruff>=0.15.8",
+    "ruff>=0.17.1,<0.18",
     "sentence-transformers>=3.0",
     "typer>=0.15",
     "watchfiles>=1.1.1",
 ]
-
-[tool.basedpyright]
-pythonVersion = "3.14"
-typeCheckingMode = "standard"
-venvPath = "."
-venv = ".venv"
-exclude = ["scripts", ".venv"]
-# Strict-mode rules that are clean on this codebase (0 findings each, measured
-# on the commit that turned them on), enabled as regression guards rather than
-# as a cleanup. Borrowed from sdmxlib, which runs the same set — see #106.
-#
-# The first two are basedpyright's Any-degradation catchers: a bare generic
-# (`list` rather than `list[str]`) and an untyped parameter both silently
-# become Any.
-reportMissingTypeArgument = "error"
-reportMissingParameterType = "error"
-# Dead casts, getter/setter drift, __init__/__new__ disagreement, and
-# always-true/false `in` checks. Pure hardening.
-reportUnnecessaryCast = "error"
-reportInvalidCast = "error"
-reportPropertyTypeMismatch = "error"
-reportInconsistentConstructor = "error"
-reportUnnecessaryContains = "error"
-reportDeprecated = "error"
-reportUnsafeMultipleInheritance = "error"
-reportTypeCommentUsage = "error"
-reportSelfClsParameterName = "error"
-# Suppression hygiene, and the rule that keeps the .claude suppression guard
-# honest in the other direction: an ignore that outlived its defect is a lie
-# the next reader believes. Found 6 the day it went on, none of which were
-# hiding anything.
-reportUnnecessaryTypeIgnoreComment = "error"
-#
-# NOT enabled: reportCallInDefaultInitializer (23 findings). `ruff.toml`
-# already ignores B008, which is the same concern — turning this on would
-# contradict a decision the project has already made. Recorded here so the
-# next person diffing against sdmxlib's config does not re-litigate it.
-reportAny = "none"
-reportExplicitAny = "none"
-reportUnknownVariableType = "none"
-
-# `tests/` is type-checked too (#116) — the gap let a wrong `tmp_path`
-# annotation stand behind 25 suppressions, and hid three dead ignores from
-# `reportUnnecessaryTypeIgnoreComment`, which exists to catch exactly those.
-#
-# Annotation-completeness rules stay off there. `ruff.toml` already exempts
-# tests from `ANN`; demanding parameter types here would contradict that
-# decision rather than extend it. Measured: 285 of basedpyright's 416
-# findings over `tests/` were this one rule, and neither bug the gap hid was
-# an annotation-coverage finding.
-[[tool.basedpyright.executionEnvironments]]
-root = "tests"
-# `from tests.conftest import …` is how the suite shares fixtures; without the
-# repo root on the path the package does not resolve from inside `tests`.
-extraPaths = ["."]
-reportMissingParameterType = "none"
-# 48 — a test collects rows of one kind and reads that kind's keys, which
-# `SearchRow` cannot express: every extension key is `NotRequired` because it
-# belongs to one row kind, deliberately and per its docstring. The rule is
-# right in `src`, where the kind is not known locally, and cannot see the
-# narrowing a test performs by construction.
-reportTypedDictNotRequiredAccess = "none"
-
-[[tool.basedpyright.executionEnvironments]]
-root = "src"

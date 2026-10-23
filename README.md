@@ -386,7 +386,7 @@ just test              # unit tests
 just test-integration  # integration tests (no network)
 just test-live         # live tests against real SDMX endpoints
 just lint              # ruff check
-just typecheck         # basedpyright
+just typecheck         # pyrefly
 just check-indexes     # only public PyPI is named anywhere in the repo
 just docs              # local docs server
 ```

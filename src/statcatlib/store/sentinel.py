@@ -86,7 +86,7 @@ def make_unloaded(field: str) -> Any:
 
     (No `# noqa: ANN401` yet — ANN401 is still ignored project-wide until
     #109 step 3, and a suppression that suppresses nothing is the thing
-    `reportUnnecessaryTypeIgnoreComment` exists to catch. Add it with the
+    pyrefly's `unused-ignore` exists to catch. Add it with the
     rule.)
     """
     if field not in _cache:

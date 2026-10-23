@@ -543,9 +543,10 @@ class _EntitySpec[R: NamedTuple, E]:
 
     Bounding ``R`` by `NamedTuple` is what makes `columns` derivable —
     it is the one spelling of "a row type" that basedpyright *and* pyrefly
-    both accept. A `Protocol` carrying ``_fields`` does not: declared
-    `ClassVar` (which it truly is) basedpyright rejects ``type[R]``;
-    declared as an instance attribute pyrefly rejects the specialization.
+    both accepted while both ran (until GH-7). A `Protocol` carrying
+    ``_fields`` did not: declared `ClassVar` (which it truly is) basedpyright
+    rejected ``type[R]``; declared as an instance attribute pyrefly rejects
+    the specialization.
 
     Attributes:
         table: The DuckDB table name, unqualified.
@@ -590,8 +591,8 @@ class EmbeddingModel(Protocol):
     ``inputs`` (older versions: ``sentences``), and declares a return union
     wide enough to include ``dict[str, Tensor]``. Promising
     ``-> Iterable[float]`` here was the first attempt and no real encoder
-    satisfied it; worse, narrowing to it with `isinstance` is unsound, and
-    basedpyright says so — a runtime_checkable Protocol checks method
+    satisfied it; worse, narrowing to it with `isinstance` is unsound, as
+    basedpyright reported — a runtime_checkable Protocol checks method
     *presence*, never signatures.
 
     So: two overloads, one per shape statcatlib passes, `object` out, and
@@ -1157,7 +1158,7 @@ class _SortSpec:
 #:
 #: A union rather than `Hit[object]` because attrs generics are invariant:
 #: `Hit` is frozen and `SearchResult.items` could be a `Sequence`, and
-#: basedpyright still reports the parameter invariant, since the synthesised
+#: basedpyright reported the parameter invariant, since the synthesised
 #: `__init__` puts `T` in a parameter position. `Hit[CodeHit]` is therefore not
 #: a `Hit[object]`, and no amount of freezing changes that.
 type AnyHit = Hit[BaseDataset] | Hit[CodeHit] | Hit[ConceptHit] | Hit[ReferenceMetadataHit]
@@ -6437,7 +6438,7 @@ class Catalog:
         # arg 2 must be a type`. Found by trying it; five tests failed.
         # Entity queries never see the alias, which is why the same fix holds
         # there.
-        items: list[T] = [  # pyright: ignore[reportAssignmentType] # pyrefly: ignore[bad-assignment]
+        items: list[T] = [  # pyrefly: ignore[bad-assignment]
             ds_by_id[ident] for ident in qr.rows if ident in ds_by_id
         ]
 
@@ -6493,7 +6494,7 @@ class Catalog:
         # returns `Any` here, and the `isinstance` is what soundly recovers `T`
         # — the bridge back from runtime dispatch to the declared return type,
         # not a redundant assertion. It is also why this path needs no
-        # `pyright: ignore` while the dataset path above does.
+        # suppression while the dataset path above does.
         items: list[T] = []
         for raw in rows:
             item = spec.build(raw)
