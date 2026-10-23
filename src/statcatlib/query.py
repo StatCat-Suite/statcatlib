@@ -27,10 +27,9 @@ The ``ctx`` is a `CompileContext` (extended in ``store.store`` as
 ``_QueryContext`` with a WHERE accumulator on top of the shared join
 state).
 
-This used to be *sdmxlib's* ``CompileContext``, so one compiler could walk
-statcatlib and sdmxlib predicates through the same context. sdmxlib#306 retired
-that seam in 0.50 — a downstream library can still inject a `SqlRelation`,
-but no longer a predicate — so the class is statcatlib's now.
+statcatlib owns `CompileContext`. Since sdmxlib 0.50, a downstream library
+passes sdmxlib a `SqlRelation`, never a predicate, so no compile state is
+shared between the two.
 """
 
 from __future__ import annotations
@@ -82,19 +81,6 @@ class CompileContext:
     filters in a single query — most importantly joins, so a second
     filter touching the same bridge table reuses the first one's alias
     instead of emitting a duplicate.
-
-    This was ``sdmxlib.CompileContext`` until sdmxlib#306 retired the
-    cross-library predicate seam (`Predicate`, `CompileContext`,
-    `RowKind`, `ColumnSql`) in 0.50. sdmxlib kept `SqlRelation` — a
-    downstream library can still inject a *relation* — but the shared
-    compile state went with the predicates that needed it, so statcatlib
-    carries its own. Ported unchanged rather than redesigned: the
-    subclass in ``store.store`` and the ten ``to_sql`` implementations
-    below already spoke this shape, and a rewrite would have mixed a
-    behaviour change into an upgrade.
-
-    An attrs class, like the rest of the module — it was a dataclass only
-    because sdmxlib's was.
 
     Attributes:
         row_alias: The main table's alias in the outer query — ``"d"``

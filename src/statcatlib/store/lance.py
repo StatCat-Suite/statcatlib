@@ -13,8 +13,8 @@ committing to any of it.
 
 The split is what lets each language carry its own tokenizer: Tantivy
 takes one stemmer and one stopword list per index, so a shared table
-meant one shared configuration, and LanceDB's default is English. French
-text was being stemmed with English rules (#101). Separate tables also
+meant one shared configuration, and LanceDB's default is English, so one
+table would stem French text with English rules. Separate tables also
 give each language exact BM25 statistics — pooled into one table, ``N``
 and ``avgdl`` spanned every language at once.
 
@@ -323,7 +323,7 @@ class SearchRow(TypedDict):
     than omitting them. `_to_arrow` would turn an absent key into NULL and
     says so, so the padding is belt-and-braces — but the two are not the same
     stored value, and anything filtering on ``code_id = ''`` would notice.
-    Dropping it is a data change, not a typing one.
+    Removing the padding would change stored data.
     """
 
     id: str
@@ -383,7 +383,7 @@ def make_schema(*, embedding_dim: int | None) -> pa.Schema:
     carries ``embedding=None`` — ``embed_codes=False``, or every codelist
     marked ``fts_only`` — infers a null-typed column, and the ANN index
     then silently never builds. Declaring the schema also guarantees the
-    per-language tables of #101 share one column set instead of each
+    per-language tables share one column set instead of each
     inferring its own from whatever rows that language happened to get.
 
     Args:
@@ -1546,7 +1546,7 @@ class LanceIndex:
 
         The ANN index requires ``_ANN_MIN_VECTORS`` *embedded* rows —
         rows without a vector are not in the index and so do not count
-        toward being worth building one (#102). The threshold applies per
+        toward being worth building one. The threshold applies per
         language now that each has its own table, so a language with too
         few vectors is left to brute-force scan, which at that size costs
         little.
