@@ -109,6 +109,7 @@ exclude_lines = [
 dev = [
     "lancedb>=0.39",
     "mkdocs-material>=9.7.6",
+    "mkdocstrings[python]>=1.0.3",
     "polars>=1.39.3",
     # The checkers are capped, as sdmxlib's are: uv.lock is gitignored, so an
     # uncapped checker's next release would change what `just ci` reports
