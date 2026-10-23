@@ -6,7 +6,7 @@ This is the only statcatlib module that imports sdmxlib beyond InternationalStri
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from sdmxlib import InternationalString
 from sdmxlib.model.dataflow import Dataflow
@@ -16,14 +16,16 @@ from statcatlib.model.agents import Agent
 from statcatlib.model.dataset import AggregateDataset
 
 if TYPE_CHECKING:
-    from sdmxlib.api.registry import RestRegistry
+    from sdmxlib import ObsQuery
     from sdmxlib.local.registry import LocalRegistry
     from sdmxlib.model.in_memory_registry import InMemoryRegistry
+    from sdmxlib.model.urn import SdmxUrn
 
     from statcatlib.model.skos import ConceptRef
     from statcatlib.store.store import Catalog
 
 __all__ = [
+    "ObservationSource",
     "dataset_from_dataflow",
     "ingest_data",
     "ingest_sdmx",
@@ -32,6 +34,17 @@ __all__ = [
 ]
 
 _IDENTIFIER_RE = re.compile(r"^([^:]+):([^(]+)\(([^)]+)\)$")
+
+
+class ObservationSource(Protocol):
+    """Where `ingest_data` reads observations from.
+
+    `sdmxlib.RestRegistry` is the usual one; `sdmxlib.LocalRegistry` fits too.
+    """
+
+    def obs(self, flow: SdmxUrn[Dataflow], /) -> ObsQuery:
+        """A lazy query over *flow*'s observations."""
+        ...
 
 
 def _resolve_latest(store: Catalog, identifier: str) -> str:
@@ -237,31 +250,40 @@ def _query_dimension_names(conn: object, dataflow_urn: str) -> list[Internationa
 
 def ingest_data(
     store: Catalog,
-    reg: RestRegistry,
+    reg: ObservationSource,
     identifier: str,
     *,
     measure_dim: str | None = None,
 ) -> str:
     """Materialise observation data for one dataflow into the bundle's lake.
 
-    Fetches the observations wide via ``reg.obs(...).pivot()``, writes them
-    into ``lake.<agency>.df_<id>_<version>`` through the bundle's
-    DuckLake-backed data store, and registers a
-    `sdmxlib.DataflowBinding` so the dataflow is queryable through
-    ``cat.observations(...)``.
+    Fetches the observations from *reg* in the long layout, one row per
+    observation with a column per dimension and measure, and writes them into
+    ``lake.<agency>.df_<id>_<version>`` through the bundle's DuckLake-backed
+    data store. A re-run replaces the table. It then registers a
+    `sdmxlib.DataflowBinding` for that table, so the dataflow reads back
+    through the co-located registry::
+
+        obs = cat.registry.obs(flow_urn)
+        obs.filter(obs.col("GEO") == "CA").frame()
+        obs.pivot(on=ds.measure_dim)
 
     Requires that ``ingest_sdmx`` has already been called for this
-    identifier so the catalog record exists, and that ``store`` is a
-    folder-mode `Catalog` (a DuckLake is ATTACHed on ``open()``).
+    identifier, so the catalog record and the DSD are stored, and that
+    ``store`` is a folder-mode `Catalog` (a DuckLake is ATTACHed on
+    ``open()``).
 
     Args:
         store: The catalog holding the `AggregateDataset` for *identifier*.
             Must be folder-mode — a DuckLake is ATTACHed on ``open()``.
-        reg: REST registry to fetch observations from.
+        reg: Where to fetch observations from, usually a
+            `sdmxlib.RestRegistry`.
         identifier: Catalog identifier in ``AGENCY:ID(VERSION)`` form.
             ``(latest)`` resolves to the highest stored version.
-        measure_dim: Dimension to pivot into measure columns. ``None``
-            (default) pivots on the DSD's ``MeasureDimension``.
+        measure_dim: The dimension readers pivot on, recorded as
+            `AggregateDataset.measure_dim`. It does not change what is
+            stored. ``None`` (default) records none, and ``pivot()`` then
+            uses the DSD's ``MeasureDimension``.
 
     Returns:
         The fully-qualified table location (``<schema>.<table>``).
@@ -271,9 +293,12 @@ def ingest_data(
             ``ingest_sdmx`` first.
         ValueError: The dataset carries no ``sdmx_dataflow_urn``, so there is
             nothing to fetch observations for; *identifier* is not in
-            ``AGENCY:ID(VERSION)`` form; or *measure_dim* is ``None`` and the
-            DSD declares no ``MeasureDimension`` to pivot on.
+            ``AGENCY:ID(VERSION)`` form; the dataflow's DSD is not stored, so
+            no binding can describe the table; or *measure_dim* is not one of
+            the DSD's dimensions.
     """
+    import sdmxlib as sl  # noqa: PLC0415
+
     identifier = _resolve_latest(store, identifier)
 
     ds = store.get(AggregateDataset, identifier)
@@ -290,31 +315,31 @@ def ingest_data(
         raise ValueError(msg)
     agency, flow_id, version = m.group(1), m.group(2), m.group(3)
 
+    flow_urn = Dataflow.parse_urn(ds.sdmx_dataflow_urn)
+    dsd = store.registry.dsd(flow_urn)
+    if dsd is None:
+        msg = f"The DSD of {ds.sdmx_dataflow_urn} is not stored — run ingest_sdmx with resolve=True first"
+        raise ValueError(msg)
+    dimensions = [d.id for d in dsd.dimensions]
+    if measure_dim is not None and measure_dim not in dimensions:
+        msg = f"measure_dim {measure_dim!r} is not a dimension of {dsd.id}: {', '.join(dimensions)}"
+        raise ValueError(msg)
+
     schema = agency.lower()
     table = f"df_{flow_id}_{version.replace('.', '_')}".lower()
 
-    # Pull the wide dataframe and write through the bundle's lake. ``pivot()``
-    # returns an eager DataFrame; with ``on=None`` it pivots on the DSD's
-    # MeasureDimension, as ``reg.data(...).pivot()`` did.
-    flow_urn = Dataflow.parse_urn(ds.sdmx_dataflow_urn)
-    wide = reg.obs(flow_urn).pivot(on=measure_dim)
-    store.data.write_observations(schema=schema, table=table, source=wide)
-
-    # Register a DataflowBinding so ``cat.observations(flow_urn)`` can find
-    # the table. Derive identity column maps from the DSD when resolvable.
-    import sdmxlib as sl  # noqa: PLC0415
-
-    flow = store.registry.get(flow_urn)
-    if isinstance(flow, Dataflow) and isinstance(flow.structure, sl.Ref):
-        dsd = store.registry.get(flow.structure.urn)
-        if isinstance(dsd, DataStructure):
-            binding = sl.DataflowBinding.from_dsd(
-                dsd,
-                dataflow=sl.Ref[Dataflow].unresolved(flow_urn),
-                schema=schema,
-                table=table,
-            )
-            store.registry.add(binding)
+    # Store the long layout. The binding below maps each DSD component to a
+    # column of the same name, which is the long layout; a pivoted table has a
+    # column per code instead and cannot be read through it (GH-29).
+    store.data.write_observations(schema=schema, table=table, source=reg.obs(flow_urn).frame())
+    store.registry.add(
+        sl.DataflowBinding.from_dsd(
+            dsd,
+            dataflow=sl.Ref[Dataflow].unresolved(flow_urn),
+            schema=schema,
+            table=table,
+        )
+    )
 
     ds.measure_dim = measure_dim
     store.put(ds)

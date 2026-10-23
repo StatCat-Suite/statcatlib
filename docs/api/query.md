@@ -119,8 +119,8 @@ criteria. All keyword arguments are ANDed within a single distribution row.
 # Datasets with a CSV distribution
 store.query(sc.OpenDataset).filter(q.distribution(format="CSV")).all()
 
-# Datasets with a Parquet distribution (written by ingest_data)
-store.query(sc.AggregateDataset).filter(
+# Datasets with a Parquet download
+store.query(sc.OpenDataset).filter(
     q.distribution(media_type="application/parquet")
 ).all()
 ```

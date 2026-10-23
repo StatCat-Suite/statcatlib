@@ -145,15 +145,16 @@ class AggregateDataset(BaseDataset):
     dimension_names: list[InternationalString] = []  # human-readable dimension labels
     num_series: int | None = None                    # total number of series
     sdmx_dataflow_urn: str | None = None            # FK → sdmxlib dataflows.urn
-    measure_dim: str | None = None                  # pivot axis for ingest_data()
+    measure_dim: str | None = None                  # default pivot axis, set by ingest_data()
 ```
 
 The `sdmx_dataflow_urn` links this catalog record to sdmxlib's structural tables
 (DSDs, codelists). Structural filters like `has_code("geo", "DE")` JOIN through
 this URN.
 
-`measure_dim` records which dimension was used as the pivot axis when
-`ingest_data()` wrote the Parquet file. Needed to re-run the ingest.
+`measure_dim` is the dimension readers pivot the observations on, recorded by
+`ingest_data()`: `store.registry.obs(flow).pivot(on=ds.measure_dim)`. It does not
+change what is stored. `None` lets `pivot()` use the DSD's `MeasureDimension`.
 
 **Example:**
 

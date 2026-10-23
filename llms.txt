@@ -101,7 +101,7 @@ Five concrete types, all inheriting from `BaseDataset`:
 - `dimension_names: list[InternationalString]` — human-readable dimension labels
 - `num_series: int | None`
 - `sdmx_dataflow_urn: str | None` — FK to sdmxlib's dataflows table
-- `measure_dim: str | None` — pivot axis for `ingest_data()`
+- `measure_dim: str | None` — default pivot axis for readers, recorded by `ingest_data()`
 
 ### MicrodataDataset extra fields
 
@@ -317,7 +317,7 @@ q.has_dimensions(["geo", "freq"])
 
 # Distribution filter — datasets with a CSV distribution
 q.distribution(format="CSV")
-q.distribution(media_type="application/parquet")
+q.distribution(media_type="application/zip")
 
 # Service filter — datasets served by a specific endpoint
 q.has_service(endpoint_url="https://sdmx.oecd.org/public/rest")
@@ -459,7 +459,7 @@ with sc.Catalog("my_catalog") as store:
         publisher = sc.Agent(id="ESTAT", name=I18n(en="Eurostat"))
         sc.ingest_sdmx_registry(store, reg.registry, publisher=publisher)
 
-        # Stream observation data to Parquet
+        # Write observations to the bundle's DuckLake (long layout) and bind them to the dataflow
         sc.ingest_data(store, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
 ```
 
@@ -623,24 +623,20 @@ related = store.dataset("ESTAT:NAMA_10_GDP(1.0)").related("codelist")
 reg = store.registry
 ```
 
-## Observation data with Polars
+## Reading observations
 
-After `ingest_data()`, find the Parquet distribution and hand off to Polars:
+`ingest_data()` registers an sdmxlib `DataflowBinding` for the table it writes,
+so the co-located registry reads it back. The query is lazy until a terminal;
+`.frame()` and `.pivot()` return a `polars.DataFrame` typed from the DSD.
 
 ```python
-import polars as pl
+import sdmxlib as sl
 
 ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
-parquet = next(d for d in ds.distributions if d.media_type == "application/parquet")
-obs = pl.scan_parquet(parquet.download_url)  # lazy — no data loaded yet
+obs = store.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
 
-annual_de = (
-    obs
-    .filter(pl.col("freq") == "A", pl.col("geo") == "DE")
-    .select("TIME_PERIOD", "B1GQ")
-    .sort("TIME_PERIOD")
-    .collect()
-)
+annual_de = obs.filter(obs.col("freq") == "A", obs.col("geo") == "DE").frame()  # long
+wide = obs.pivot(on=ds.measure_dim)  # one column per code of the pivot axis
 ```
 
 ## URN helpers (`statcatlib.urn`)
@@ -682,7 +678,7 @@ One DuckDB database, three layers:
 
 - **Discovery layer** (statcatlib, `statcat` schema) — dataset, agent, concept_scheme, concept, distribution, lineage
 - **Structural layer** (sdmxlib, `sdmx` schema) — dataflow, data_structure, codelist, code
-- **Observation layer** (Polars/Parquet) — actual time-series data
+- **Observation layer** (DuckLake tables, bound to dataflows) — actual time-series data, read with `store.registry.obs(flow)`
 
 statcatlib queries JOIN freely across both its own tables and sdmxlib's tables. The `sdmx_dataflow_urn` field on `AggregateDataset` is the foreign key that links the two. `has_code()` and `has_dimensions()` JOIN through sdmxlib's structural tables (only work for datasets that have `sdmx_dataflow_urn` set via SDMX ingest).
 

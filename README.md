@@ -108,8 +108,13 @@ with sc.Catalog("my_catalog").open() as store:
             reg.get(sl.Dataflow.urn_for(agency="ESTAT", id=df_id), resolve=True)
         sc.ingest_sdmx(store, reg.registry)
 
-        # Stream observation data to Parquet, attach as Distribution
+        # Write observations to the bundle's DuckLake and bind them to the dataflow
         sc.ingest_data(store, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
+
+    # Read them back through the co-located sdmxlib registry
+    ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+    obs = store.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
+    wide = obs.pivot(on=ds.measure_dim)   # a polars.DataFrame
 ```
 
 ### CKAN (open.canada.ca, data.gov, ...)
@@ -364,12 +369,13 @@ Three layers share one DuckDB database:
 ```
 Discovery layer  — Catalog            (dataset, agent, concept_scheme, concept, distribution, lineage)
 Structural layer — sdmxlib tables     (dataflows, dsd_components, codes, codelists)
-Observation layer — Polars / Parquet  (actual time-series data)
+Observation layer — DuckLake tables  (actual time-series data, under parquet/)
 ```
 
 statcatlib owns the discovery layer. sdmxlib owns the structural layer. Both write
-to the same DuckDB connection — queries JOIN freely across both. Parquet files live
-alongside the database and are referenced via DCAT `Distribution` records.
+to the same DuckDB connection, and queries JOIN freely across both. `ingest_data()`
+writes each dataflow's observations to a DuckLake table and registers an sdmxlib
+`DataflowBinding`, through which `store.registry.obs(flow)` reads them.
 
 ## Development
 

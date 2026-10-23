@@ -94,7 +94,7 @@ sc.ingest_sdmx_registry(store, reg.registry, publisher=publisher, themes=themes)
 ```python
 ingest_data(
     store: Catalog,
-    reg: sdmxlib.api.registry.RestRegistry,
+    reg: ObservationSource,
     identifier: str,
     *,
     measure_dim: str | None = None,
@@ -102,19 +102,26 @@ ingest_data(
 ```
 
 Materialise observation data for one dataflow into the bundle's lake. The
-observations are fetched with `reg.data(...).pivot()`, written into
+observations are fetched with `reg.obs(flow).frame()` in the long layout, one
+row per observation with a column per dimension and measure, and written into
 `lake.<agency>.df_<id>_<version>` through the bundle's DuckLake-backed data
-store, and bound so the dataflow is queryable through `cat.observations(...)`.
+store. A re-run replaces the table. `ingest_data` then registers an sdmxlib
+`DataflowBinding` for the table, so the dataflow reads back through
+`store.registry.obs(flow)`.
 
 **Parameters:**
 
 - `store` — a folder-mode `Catalog` (a DuckLake is ATTACHed on `open()`) that
   already holds an `AggregateDataset` for `identifier` — run `ingest_sdmx` first
-- `reg` — an open `RestRegistry` connected to the SDMX endpoint
+- `reg` — where to fetch observations from: any object with
+  `obs(flow) -> sdmxlib.ObsQuery` (`ObservationSource`), usually an open
+  `RestRegistry`
 - `identifier` — `"AGENCY:ID(VERSION)"` format, e.g. `"ESTAT:NAMA_10_GDP(1.0)"`.
   The version `latest` is resolved to the highest stored version automatically.
-- `measure_dim` — dimension to pivot into measure columns. `None` (the default)
-  leaves the data long.
+- `measure_dim` — the dimension readers pivot on, recorded as
+  `AggregateDataset.measure_dim`. It does not change what is stored. `None`
+  (the default) records none, and `pivot()` then uses the DSD's
+  `MeasureDimension`.
 
 **Returns:** the fully-qualified table location (`<schema>.<table>`).
 
@@ -135,8 +142,9 @@ with sc.Catalog("my_catalog") as store:
 **Raises:**
 
 - `KeyError` — if no `AggregateDataset` exists for `identifier`
-- `ValueError` — if the dataset carries no `sdmx_dataflow_urn`, or `identifier`
-  is not in `AGENCY:ID(VERSION)` form
+- `ValueError` — if the dataset carries no `sdmx_dataflow_urn`, `identifier`
+  is not in `AGENCY:ID(VERSION)` form, the dataflow's DSD is not stored, or
+  `measure_dim` is not one of the DSD's dimensions
 
 ---
 
