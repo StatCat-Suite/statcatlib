@@ -30,8 +30,9 @@ dependencies = [
     # >=0.70: needs Python 3.14 and DuckDB 2.0; `reg.data()` is gone, and a
     # component without a concept is refused as it is built. >=0.70.1:
     # `reg.obs()` asks Eurostat for CSV it serves, so `ingest_data()` can
-    # fetch from it (sdmxlib GH-50).
-    "sdmxlib>=0.70.1",
+    # fetch from it (sdmxlib GH-50). >=0.72: `sdmxlib.bundle`, the manifest
+    # and checker `publish_bundle` and `check_bundle` build on (GH-3).
+    "sdmxlib>=0.72.0",
 ]
 
 [project.optional-dependencies]

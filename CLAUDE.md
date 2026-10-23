@@ -62,7 +62,8 @@ src/
     │   └── ckan.py          # CkanClient, ingest_ckan()
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
-    ├── bundle.py       # Portable bundles — layout-aware data_path policies
+    ├── bundle.py       # Portable bundles — data_path policies; publish_bundle, check_bundle
+    ├── testing.py      # synthetic_catalog() — published statcat bundles of any shape
     ├── urn.py          # Convenience URN builders for SDMX artefacts
     └── __init__.py     # Public API re-exports
 ```
@@ -252,7 +253,19 @@ One DuckDB file, two schema owners:
   refuse with `IncompatibleCatalogError` when the stored `sdmx._meta`
   version differs from sdmxlib's and `sdmx.artefact` holds rows
   (`_refuse_sdmx_schema_rebuild` in `store/store.py`). An sdmxlib that bumps
-  its store schema therefore means rebuilding every catalog.
+  its store schema therefore means rebuilding every catalog. Since 0.71
+  sdmxlib refuses too (`sl.StoreSchemaError`, sdmxlib GH-57); the guard
+  stays because it runs first and names the catalog, not the cache.
+
+**Bundle contract** — sdmxlib owns `bundle.manifest.json`
+(`sdmxlib.bundle`, sdmxlib GH-56): a `token` per publication, which caches
+key on, and a sha256 per file. statcatlib adds a `statcat` extension
+section (dataset count, search layout) via `publish_bundle`, and
+`check_bundle` = sdmxlib's checks + `check_catalog` (`statcat bundle
+check`). Publish **after** `build_index()`: any later write to the
+directory fails the files check. So nothing on the open or search path may
+write to a bundle — the FTS index is reused as found, never rebuilt by a
+query (GH-3).
 
 statcatlib creates its own tables via `store/schema.py:create_schema(conn)` which
 creates the `statcat` schema and returns a cursor with
