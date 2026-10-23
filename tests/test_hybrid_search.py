@@ -1698,6 +1698,30 @@ class TestAtomicRebuild:
         assert reopened.languages == ["en"]
         assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
+    def test_a_rebuild_reclaims_orphans_first(self, tmp_path):
+        """A table no manifest names is dropped by the next rebuild, not shipped with it.
+
+        The orphan is a language the rebuild does not write, so overwriting
+        same-named tables cannot account for its going.
+        """
+        import lancedb
+
+        from statcatlib.store.lance import LanceIndex, _to_arrow
+
+        idx = LanceIndex(tmp_path / "search")
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        db = lancedb.connect(str(tmp_path / "search"))
+        db.create_table(
+            "search_fr__000099",
+            data=_to_arrow([{"id": "b", "entity_type": "open", "lang": "fr", "text": "bonjour"}]),
+        )
+
+        reopened = LanceIndex(tmp_path / "search")
+        assert reopened.orphan_tables() == ["search_fr__000099"]
+        reopened.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "again"}])
+        assert reopened.orphan_tables() == []
+        assert set(db.list_tables().tables) == {"search_en__000002"}
+
     def test_corrupt_manifest_is_treated_as_missing(self, tmp_path):
         """A catalog must not be stranded by an unreadable manifest."""
         from statcatlib.store.lance import LanceIndex

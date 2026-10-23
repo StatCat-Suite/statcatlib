@@ -168,9 +168,11 @@ tables it names and no others.
 A rebuild writes a whole new generation of tables, then replaces
 `index.json` with one atomic rename. A reader that opens the bundle mid-build
 therefore reads the previous generation whole. Tables no manifest names are
-orphans of an interrupted build, and `LanceIndex.discard_orphans()` drops
-them. `build_index()` does not, so a producer SHOULD drop them before
-publishing; otherwise `files` lists them and the bundle ships them.
+orphans: a process killed before the rename leaves them, and so does a
+superseded table whose drop failed. `build_index()` drops every orphan before
+it builds, so a bundle published after a build holds only the tables
+`index.json` names. A producer MUST NOT publish orphans; the `statcat` check
+reports each one (§6).
 
 Version 1 stored each language's table name as a bare string where version 2
 stores a `LanguageLayout`, and statcatlib still reads both. A reader reads
@@ -315,6 +317,7 @@ and otherwise reports every finding:
 | languages | the index has exactly the declared languages | continues, one finding per language |
 | stemmers | each language's table uses the declared stemmer | continues |
 | rows | each language's table holds the declared rows | continues |
+| orphans | `search/` holds no `search_*` table that `index.json` does not name | continues, one finding per table |
 | annotations | the store's fingerprint of the declared types is the declared one | continues |
 
 Checking `search/` needs `statcatlib[search]`; without it the check reports
@@ -332,9 +335,8 @@ policy that never writes, such as `Embedded()`
    and one catalog record per dataflow, `ingest_data` writes each dataflow's
    observations to the lake with its `DataflowBinding`, and `put` adds any
    other datasets.
-2. Run `build_index()`. If an earlier build was interrupted, drop its
-   orphaned tables with
-   `statcatlib.store.lance.LanceIndex(path / "search").discard_orphans()`.
+2. Run `build_index()`. It also drops any table an earlier, interrupted
+   build left behind.
 3. Call `publish_bundle(path, bundle_id=..., producer=...)` last. It is
    sdmxlib's `write_manifest` with the `statcat` section added, and takes
    the same `product`, `extensions` and `provenance`.

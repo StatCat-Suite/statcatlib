@@ -776,6 +776,9 @@ def _check_search(root: Path, declared: object) -> Iterator[Finding]:
     layout = index.describe()
     for lang in sorted(set(languages) | set(layout)):
         yield from _check_language(index, lang, layout.get(lang), languages.get(lang))
+    for name in index.orphan_tables():
+        detail = f"a table {_INDEX_MANIFEST} does not name: rebuild with build_index(), then publish again"
+        yield Finding(STATCAT_SECTION, f"{_SEARCH_DIRNAME}/{name}", detail)
 
 
 def _check_language(index: LanceIndex, lang: str, found: LanguageLayout | None, want: object) -> Iterator[Finding]:
@@ -806,7 +809,7 @@ def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Fi
       linked to a dataflow names one the registry holds;
     - ``search/`` is present exactly when the section declares an index,
       with the declared languages, each stemmed as declared and holding the
-      declared rows;
+      declared rows, and no table that ``index.json`` does not name;
     - the store's annotations of the types the index read are the ones it was
       built from, so an overlay folded in since shows up as a stale index.
 

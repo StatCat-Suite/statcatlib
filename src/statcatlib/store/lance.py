@@ -1276,6 +1276,9 @@ class LanceIndex:
         """
         if not rows:
             return
+        # Reclaim what an earlier rebuild left behind (GH-41), so a bundle
+        # published after this build ships only the tables the manifest names.
+        self.discard_orphans()
         grouped = self._by_language(rows)
         previous = {lang: index.name for lang, index in self._langs.items()}
         generation = self._generation + 1
@@ -1314,15 +1317,24 @@ class LanceIndex:
                 self._db.drop_table(_TABLE)
             self._legacy = None
 
-    def discard_orphans(self) -> int:
-        """Drop language tables no live manifest points at.
+    def orphan_tables(self) -> list[str]:
+        """Language tables on disk that the manifest does not name, sorted.
 
-        A crash between building a generation and committing it leaves
-        those tables on disk. They are inert — nothing routes to them —
-        but they hold space. Returns the number dropped.
+        A process killed between building a generation and committing it
+        leaves them, and so does a superseded table whose drop failed. They
+        are inert, since no query reads a table the manifest does not name,
+        but a published bundle lists and ships them like any other file.
         """
         live = {index.name for index in self._langs.values()}
-        names = [n for n in self._db.list_tables().tables if n.startswith(_TABLE_PREFIX) and n not in live]
+        return sorted(n for n in self._db.list_tables().tables if n.startswith(_TABLE_PREFIX) and n not in live)
+
+    def discard_orphans(self) -> int:
+        """Drop the tables `orphan_tables` lists. `add_bulk` calls it before each rebuild.
+
+        Returns:
+            The number of tables it tried to drop.
+        """
+        names = self.orphan_tables()
         for name in names:
             with contextlib.suppress(Exception):
                 self._db.drop_table(name)
