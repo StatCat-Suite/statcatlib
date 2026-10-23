@@ -796,7 +796,7 @@ def test_build_index_applies_document_prefix(tmp_path):
             description=I18n(en="Employment data"),
         )
     )
-    store.build_index()
+    store.build_index(model_name="recording-model")
     assert rec.encoded, "encode() was never called"
     assert all(t.startswith("passage: ") for t in rec.encoded)
 
@@ -818,7 +818,7 @@ def test_semantic_search_applies_query_prefix(tmp_path):
             description=I18n(en="Test description"),
         )
     )
-    store.build_index()
+    store.build_index(model_name="recording-model")
     rec.encoded.clear()
     store.datasets.find(mode="vector", query="labour", lang="en", limit=3)
     assert rec.encoded == ["query: labour"]
@@ -840,7 +840,7 @@ def test_hybrid_search_applies_query_prefix(tmp_path):
             description=I18n(en="Test description"),
         )
     )
-    store.build_index()
+    store.build_index(model_name="recording-model")
     rec.encoded.clear()
     store.datasets.find(mode="hybrid", query="inflation", lang="en", limit=3)
     assert rec.encoded == ["query: inflation"]
@@ -878,7 +878,9 @@ def test_build_index_can_set_prefixes(tmp_path):
             description=I18n(en="A test"),
         )
     )
-    store.build_index(embedding_model=rec, document_prefix="passage: ", query_prefix="query: ")
+    store.build_index(
+        embedding_model=rec, document_prefix="passage: ", query_prefix="query: ", model_name="recording-model"
+    )
     assert all(t.startswith("passage: ") for t in rec.encoded)
     rec.encoded.clear()
     store.datasets.find(mode="vector", query="anything", lang="en", limit=3)
@@ -1538,7 +1540,8 @@ class TestLegacyIndexFallback:
                 {"id": "b", "entity_type": "open", "lang": "fr", "text": "estimations demographiques"},
             ],
         )
-        idx = LanceIndex(search_dir)
+        with pytest.warns(UserWarning, match="predates per-language tables"):
+            idx = LanceIndex(search_dir)
         # No per-language tables exist yet — the legacy one answers.
         assert idx.languages == []
         assert [i for i, _ in idx.bm25_search("population", lang="en")] == ["a"]
@@ -1554,7 +1557,8 @@ class TestLegacyIndexFallback:
             search_dir,
             [{"id": "a", "entity_type": "open", "lang": "en", "text": "population estimates"}],
         )
-        idx = LanceIndex(search_dir)
+        with pytest.warns(UserWarning, match="predates per-language tables"):
+            idx = LanceIndex(search_dir)
         idx.add_bulk(
             [
                 {"id": "a", "entity_type": "open", "lang": "en", "text": "population estimates"},

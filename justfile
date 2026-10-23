@@ -119,15 +119,11 @@ fmt:
 test:
     uv run pytest -m unit
 
-# Run documentation example tests
-[group('test')]
-test-docs:
-    uv run pytest -m docs
-
-# Run all tests with coverage (unit + docs)
+# Run the gate's tests with coverage (unit + integration, as `just ci` selects).
+# Fails under the `fail_under` floor in pyproject.toml.
 [group('test')]
 coverage:
-    uv run pytest -m "unit or docs" --cov --cov-report=term-missing --cov-report=xml --cov-report=html
+    uv run pytest -m "unit or integration" --cov --cov-report=term-missing --cov-report=xml --cov-report=html
     @echo "HTML report: htmlcov/index.html"
 
 # Run integration tests (in-process DuckDB + sdmxlib, no network)
@@ -143,7 +139,6 @@ test-live:
 # Full CI gate: index guard + lint + format + typecheck + unit and
 # integration tests + docs. Enforced locally by the pre-push hook — see
 # `just hooks-install`. Only `live` tests, which need the network, stay out.
-# (test-docs is not wired in: nothing carries the `docs` marker yet.)
 [group('test')]
 ci: check test test-integration docs-build
 

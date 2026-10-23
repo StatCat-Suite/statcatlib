@@ -48,6 +48,10 @@ Documentation = "https://statcat-suite.github.io/statcatlib"
 "Issue Tracker" = "https://github.com/StatCat-Suite/statcatlib/issues"
 Changelog = "https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md"
 
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
 [build-system]
 requires = ["uv_build>=0.11.6,<0.14.0"]
 build-backend = "uv_build"
@@ -74,11 +78,35 @@ allow-init-docstring = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `strict` makes an unregistered marker a collection error: a typo such as
+# `pytest.mark.uint` would otherwise drop a whole file out of `just ci`, which
+# selects by marker (GH-8). It also rejects duplicate parametrize ids.
+strict = true
+# A warning that cannot fail is a warning nobody reads. The suite raised seven
+# when this went on, all statcatlib's own: each test now asserts the warning
+# its setup provokes, or avoids it as a real caller would. No ignore list.
+filterwarnings = ["error"]
 markers = [
     "unit: fast, in-process tests with no network I/O",
-    "docs: doctests and example-script tests",
     "integration: tests that use real DuckDB and sdmxlib but no network",
     "live: tests that make real HTTP calls to external SDMX endpoints",
+]
+
+[tool.coverage.run]
+source = ["src/statcatlib"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# 88% when this was set (2026-10-23, `just coverage`). A floor, a little under
+# that, so a change that drops a module's tests fails here. `sources/sdmx.py`
+# is the lowest at 54%: `ingest_data` is reached only by the `live` tier.
+fail_under = 85
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@overload",
 ]
 
 [dependency-groups]
@@ -90,6 +118,7 @@ dev = [
     "pydoclint>=0.9.1",
     "pyrefly>=1.2.0",
     "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
     "pytest-httpx>=0.35",
     "rich>=15.0",
     "ruff>=0.15.8",
