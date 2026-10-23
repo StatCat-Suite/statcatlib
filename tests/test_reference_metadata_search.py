@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
 import sdmxlib as sl
 
 from statcatlib.store.store import Catalog
@@ -21,6 +22,8 @@ _DQ_TEXT = (
     "edit and imputation, aggregate total income increased 3.0 percent. Tax record "
     "linkage reached 90.0 percent of the population aged 15 and older."
 )
+
+pytestmark = pytest.mark.integration
 
 
 def _topic_urn(item_id: str) -> sl.SdmxUrn[sl.Code]:

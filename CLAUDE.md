@@ -377,7 +377,7 @@ are used here during ingest and do not appear anywhere else in statcatlib.
 ## Commands
 
 ```bash
-just ci                        # the gate: index guard + lint + fmt + docstrings + Any + typecheck + tests + docs
+just ci                        # the gate: index guard + lint + fmt + docstrings + Any + typecheck + unit and integration tests + docs
 just typecheck                 # basedpyright over src/
 just lint                      # ruff check src tests
 just fmt                       # ruff format + ruff check --fix
@@ -392,6 +392,10 @@ Hosted CI runs no tests — only `.github/workflows/docs.yml`, which publishes
 the docs to GitHub Pages on pushes to main that touch the site's sources (or
 by hand from the Actions tab). So nothing merges on a green pipeline; it
 merges on a green `just ci`.
+
+The gate selects tests by marker (`-m unit`, then `-m integration`), so **every
+test file needs a `pytestmark`**: a file without one never runs in `just ci`
+(GH-8). `live` (network) is the only tier left out.
 
 **The pre-push hook is the real gate**: `just hooks-install` points
 `core.hooksPath` at `.githooks`, and every `git push` runs `just ci` first.

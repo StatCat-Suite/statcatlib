@@ -3,7 +3,11 @@ down-convert reference-metadata sections for the search corpus."""
 
 from __future__ import annotations
 
+import pytest
+
 from statcatlib.store.xhtml import xhtml_to_markdown
+
+pytestmark = pytest.mark.unit
 
 
 def test_plain_text_passthrough() -> None:

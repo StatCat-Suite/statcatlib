@@ -1,4 +1,4 @@
-# cataloglib development tasks
+# statcatlib development tasks
 
 default:
     @just --list
@@ -136,11 +136,12 @@ test-integration:
 test-live:
     uv run pytest -m live
 
-# Full CI gate: index guard + lint + format + typecheck + unit tests.
-# Enforced locally by the pre-push hook — see `just hooks-install`.
+# Full CI gate: index guard + lint + format + typecheck + unit and
+# integration tests + docs. Enforced locally by the pre-push hook — see
+# `just hooks-install`. Only `live` tests, which need the network, stay out.
 # (test-docs is not wired in: nothing carries the `docs` marker yet.)
 [group('test')]
-ci: check test docs-build
+ci: check test test-integration docs-build
 
 # ── Docs ──────────────────────────────────────────────────────────────────────
 
