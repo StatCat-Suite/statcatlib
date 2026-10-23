@@ -13,9 +13,12 @@ default:
 lint:
     uv run ruff check src tests
 
+# pyrefly at `preset = "all"` minus a documented deny-list (pyrefly.toml),
+# the only type checker (GH-7).
+# Type-check src and tests with pyrefly
 [group('dev')]
 typecheck:
-    uv run basedpyright src tests
+    uv run pyrefly check
 
 [group('dev')]
 checkfmt:
@@ -66,12 +69,6 @@ check-docstrings:
     # [tool.pydoclint].
     uv run pydoclint --quiet src/statcatlib
 
-# Independent second-opinion type check: pyrefly at `preset = "all"` minus a
-# documented deny-list (pyrefly.toml). basedpyright stays the source of truth.
-[group('dev')]
-pyrefly:
-    uv run pyrefly check
-
 # Guard: `Any` in src/ must not grow (#109). ANN401 cannot see inside a
 # generic argument, so this ratchet is what guards `dict[str, Any]`.
 [group('dev')]
@@ -93,9 +90,9 @@ check-indexes:
     set -euo pipefail
     uv run python tools/check_indexes.py --check
 
-# index guard + lint + format + docstrings + Any-ratchet + both type checkers
+# index guard + lint + format + docstrings + Any-ratchet + type check
 [group('dev')]
-check: check-indexes lint checkfmt check-docstrings check-any typecheck pyrefly
+check: check-indexes lint checkfmt check-docstrings check-any typecheck
 
 # Install the pre-push hook that runs `just ci` (hosted CI only builds docs)
 [group('dev')]

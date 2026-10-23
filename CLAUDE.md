@@ -445,7 +445,11 @@ stating it.
 
 - **Package manager**: `uv`
 - **Command runner**: `just`
-- **Type checker**: `basedpyright`
+- **Type checker**: `pyrefly`, the only one (GH-7): `preset = "all"` minus a
+  counted deny-list in `pyrefly.toml`, over `src` and `tests`. Suppressions are
+  `# pyrefly: ignore[kind]` only; its `unused-ignore` reports a dead one.
+  ruff, pyrefly and pydoclint are capped in `pyproject.toml`, so a checker
+  release reaches the gate only through a PR that bumps it.
 - **Linter/formatter**: `ruff`
 - **Domain model**: `attrs`
 - **Storage**: `duckdb`
@@ -459,7 +463,7 @@ stating it.
 
 ```bash
 just ci                        # the gate: index guard + lint + fmt + docstrings + Any + typecheck + unit and integration tests + docs
-just typecheck                 # basedpyright over src/
+just typecheck                 # pyrefly over src/ and tests/
 just lint                      # ruff check src tests
 just fmt                       # ruff format + ruff check --fix
 just check-docstrings          # Google sections, no RST roles, pydoclint

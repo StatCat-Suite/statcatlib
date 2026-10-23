@@ -32,7 +32,7 @@ def _untyped(value: object) -> Any:
     The `extras` rejection tests deliberately pass what the annotation
     forbids — that is what a runtime guard is for, and a type checker is
     right to object. Laundering here states the intent once, where it can be
-    read, rather than scattering ``pyright: ignore`` over six tests.
+    read, rather than scattering suppressions over six tests.
     """
     return value
 

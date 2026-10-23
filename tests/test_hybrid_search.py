@@ -2181,8 +2181,8 @@ class TestSearchRowMatchesSchema:
         `lance.py` carries `from __future__ import annotations`, so every
         annotation is a string at runtime and TypedDict cannot see the
         `NotRequired[...]` wrapper when it computes `__required_keys__` — it
-        reports all 19 keys as required. basedpyright resolves the strings and
-        gets it right, which is why `add_bulk` still refuses a row missing
+        reports all 19 keys as required. The type checker resolves the strings
+        and gets it right, which is why `add_bulk` still refuses a row missing
         ``id`` and accepts one missing ``code_id``.
 
         Asserted rather than merely commented so the surprise is recorded

@@ -143,9 +143,10 @@ class _SdmxEdge(TypedDict):
 #:
 #: Discriminated on an explicit ``kind`` rather than on key presence. Testing
 #: ``"custom_count_sql" in edge`` to conclude ``custom_exists_sql`` also exists
-#: is sound given the TypedDicts, but only basedpyright narrows it; pyrefly
-#: reported reading the second key as an error. Two checkers disagreeing about
-#: whether a branch is safe is reason enough to say which branch it is.
+#: is sound given the TypedDicts, but pyrefly reports reading the second key as
+#: an error, where basedpyright (run beside it until GH-7) narrowed it. Two
+#: checkers disagreeing about whether a branch is safe is reason enough to say
+#: which branch it is.
 type _Edge = _BridgeEdge | _SdmxEdge
 
 

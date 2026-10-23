@@ -933,18 +933,18 @@ class _LanguageIndex:
     ) -> list[Bm25HitRow]:
         """Run a BM25 query, returning raw result rows.
 
-        The `# pyright: ignore[reportReturnType]` below is this module's only
-        suppression, and is the shape sdmxlib's CLAUDE.md prescribes for a
-        gradual-typing boundary: the one unsafe step, kept to the accessor
-        that performs it. `to_list()` is declared `List[dict[Unknown, Unknown]]`
+        The `# pyrefly: ignore[bad-return]` below (and its twin in `vector`)
+        is this module's only suppression, and is the shape sdmxlib's
+        CLAUDE.md prescribes for a gradual-typing boundary: the one unsafe
+        step, kept to the accessor that performs it. `to_list()` is declared `List[dict[Unknown, Unknown]]`
         — LanceDB hands back rows of the schema *this module declared* and
         says nothing about their shape. Validating 19 keys per row on every
         search to recover what `make_schema` already guarantees would cost
         more than it proves.
 
-        Not `# type: ignore`: that form is unattributable, so neither checker
-        can tell a dead comment from one carrying the other's error, and
-        `reportUnnecessaryTypeIgnoreComment` stops being trustworthy.
+        Not `# type: ignore`: that form names no checker and no error kind,
+        so a dead one cannot be told from a live one, and pyrefly's
+        `unused-ignore` stops being trustworthy.
         """
         if self._tbl is None:
             return []
@@ -957,7 +957,7 @@ class _LanguageIndex:
             where = self._where(*filters)
             if where:
                 search = search.where(where, prefilter=True)
-            return search.limit(limit).select(select_cols).to_list()  # pyright: ignore[reportReturnType] # pyrefly: ignore[bad-return]
+            return search.limit(limit).select(select_cols).to_list()  # pyrefly: ignore[bad-return]
         except Exception:  # noqa: BLE001
             return []
 
@@ -978,7 +978,7 @@ class _LanguageIndex:
             where = self._where(*filters)
             if where:
                 search = search.where(where, prefilter=True)
-            return search.limit(limit).select(select_cols).to_list()  # pyright: ignore[reportReturnType] # pyrefly: ignore[bad-return]
+            return search.limit(limit).select(select_cols).to_list()  # pyrefly: ignore[bad-return]
         except Exception:  # noqa: BLE001
             return []
 

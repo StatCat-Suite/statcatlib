@@ -37,7 +37,7 @@ class TestConceptScheme:
     def test_immutable(self):
         scheme = sc.ConceptScheme(uri=SCHEME_URI, label=_i("Themes"))
         with pytest.raises((AttributeError, TypeError)):
-            scheme.uri = "other"  # type: ignore[misc]
+            scheme.uri = "other"  # pyrefly: ignore[read-only]
 
 
 class TestConcept:
@@ -63,7 +63,7 @@ class TestConcept:
     def test_immutable(self):
         c = sc.Concept(notation="A", label=_i("A"))
         with pytest.raises((AttributeError, TypeError)):
-            c.notation = "B"  # type: ignore[misc]
+            c.notation = "B"  # pyrefly: ignore[read-only]
 
 
 class TestConceptRef:
