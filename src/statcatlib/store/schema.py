@@ -389,12 +389,32 @@ def open_schema_readonly(conn: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConn
     return cursor
 
 
+def first_row[T](rows: list[T]) -> T | None:
+    """Return the first of *rows*, or None when there are none.
+
+    Pass it ``conn.execute(...).fetchall()``. DuckDB 2 counts a result as
+    finished only after a fetch returns no rows, so ``fetchone()`` on a
+    one-row result leaves it pending, and the relation API (``conn.sql``,
+    ``conn.table``) then refuses the connection with
+    ``ResourceInUseException`` (GH-43). ``fetchall()`` finishes the result.
+    Queries on the catalog's shared connection read single rows this way.
+
+    Args:
+        rows: The fetched rows.
+
+    Returns:
+        The first row, or None.
+    """
+    return rows[0] if rows else None
+
+
 def schema_exists(conn: duckdb.DuckDBPyConnection) -> bool:
     """Return True if the statcat schema exists and has the _meta table."""
     try:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_schema = 'statcat' AND table_name = '_meta'"
-        ).fetchone()
+        ).fetchall()
+        row = first_row(rows)
     except Exception:  # noqa: BLE001
         return False
     else:
@@ -404,7 +424,8 @@ def schema_exists(conn: duckdb.DuckDBPyConnection) -> bool:
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> str | None:
     """Return the schema version from ``statcat._meta``, or None."""
     try:
-        row = conn.execute("SELECT value FROM statcat._meta WHERE key = 'schema_version'").fetchone()
+        rows = conn.execute("SELECT value FROM statcat._meta WHERE key = 'schema_version'").fetchall()
+        row = first_row(rows)
         return row[0] if row else None
     except Exception:  # noqa: BLE001
         return None

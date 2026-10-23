@@ -658,10 +658,12 @@ def catalog_section(path: str | Path) -> dict[str, object]:
         The section, ready for ``write_manifest(extensions=...)``.
     """
     from statcatlib.store import Catalog  # noqa: PLC0415
+    from statcatlib.store.schema import first_row  # noqa: PLC0415
 
     root = Path(path)
     with Catalog(root, read_only=True, data_path=Embedded()) as cat:
-        row = cat.connection.execute("""SELECT count(*) FROM statcat.dataset""").fetchone()
+        rows = cat.connection.execute("SELECT count(*) FROM statcat.dataset").fetchall()
+        row = first_row(rows)
         return {
             "format": STATCAT_SECTION_FORMAT,
             "statcatlib_version": metadata.version("statcatlib"),
@@ -718,7 +720,10 @@ def publish_bundle(
 
 def _check_catalog_rows(conn: duckdb.DuckDBPyConnection, section: Mapping[str, object]) -> Iterator[Finding]:
     """The catalog's datasets: counted as declared, each linked flow stored."""
-    row = conn.execute("""SELECT count(*) FROM statcat.dataset""").fetchone()
+    from statcatlib.store.schema import first_row  # noqa: PLC0415
+
+    rows = conn.execute("SELECT count(*) FROM statcat.dataset").fetchall()
+    row = first_row(rows)
     found = row[0] if row else 0
     if found != section.get("datasets"):
         detail = f"{found} datasets, the manifest says {section.get('datasets')}"
@@ -833,12 +838,14 @@ def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Fi
     Returns:
         Everything found wrong with the catalog's part of the bundle.
     """
+    from statcatlib.store.schema import first_row  # noqa: PLC0415
     from statcatlib.store.store import annotation_fingerprint, statcat_schema_mismatch  # noqa: PLC0415
 
     conn = reg.connection
-    has_schema = conn.execute(
+    rows = conn.execute(
         """SELECT count(*) FROM information_schema.tables WHERE table_schema = 'statcat' AND table_name = 'dataset'"""
-    ).fetchone()
+    ).fetchall()
+    has_schema = first_row(rows)
     if not has_schema or not has_schema[0]:
         return [Finding(STATCAT_SECTION, "meta.duckdb", "no statcat schema: not a statcat catalog")]
     if (stored := statcat_schema_mismatch(conn)) is not None:

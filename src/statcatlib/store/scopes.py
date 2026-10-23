@@ -47,6 +47,7 @@ from sdmxlib.model.collections import ItemList
 from statcatlib.model.skos import Concept, ConceptRef, ConceptScheme
 from statcatlib.query import ExistsFilter, label_norm_sql
 from statcatlib.store.row import Row
+from statcatlib.store.schema import first_row
 
 
 def _map_to_istring(m: dict[str, str] | None) -> InternationalString | None:
@@ -456,7 +457,8 @@ class ThemesScope:
         return iter(self.collect())
 
     def __len__(self) -> int:
-        row = self._store.connection.execute("SELECT COUNT(*) FROM statcat.concept_scheme").fetchone()
+        rows = self._store.connection.execute("SELECT COUNT(*) FROM statcat.concept_scheme").fetchall()
+        row = first_row(rows)
         return row[0] if row else 0
 
 
@@ -531,10 +533,11 @@ class SchemeScope:
 
     def count(self) -> int:
         """Terminal: number of concepts in this scheme."""
-        row = self._store.connection.execute(
+        rows = self._store.connection.execute(
             "SELECT COUNT(*) FROM statcat.concept WHERE in_scheme = ?",
             [self.scheme],
-        ).fetchone()
+        ).fetchall()
+        row = first_row(rows)
         return row[0] if row else 0
 
     def labels(self, lang: str = "en") -> dict[str, str]:
@@ -598,14 +601,15 @@ class ConceptScope:
 
     def collect(self) -> Concept:
         """Terminal: materialize this concept."""
-        row = self._store.connection.execute(
+        rows = self._store.connection.execute(
             """
             SELECT notation, label, alt_label, definition
             FROM statcat.concept
             WHERE in_scheme = ? AND notation = ?
             """,
             [self.scheme, self.notation],
-        ).fetchone()
+        ).fetchall()
+        row = first_row(rows)
         if row is None:
             msg = f"Concept not found: notation={self.notation!r} in scheme {self.scheme!r}"
             raise LookupError(msg)
@@ -620,10 +624,11 @@ class ConceptScope:
     def datasets(self) -> QueryBuilder[BaseDataset]:
         """Navigate to datasets tagged with this concept (lazy)."""
         # Resolve notation → URI first
-        row = self._store.connection.execute(
+        rows = self._store.connection.execute(
             "SELECT uri FROM statcat.concept WHERE in_scheme = ? AND notation = ?",
             [self.scheme, self.notation],
-        ).fetchone()
+        ).fetchall()
+        row = first_row(rows)
         from statcatlib.model.dataset import BaseDataset  # noqa: PLC0415
 
         qb = self._store.query(BaseDataset)
@@ -768,9 +773,10 @@ class CodelistsScope:
 
     def __len__(self) -> int:
         try:
-            row = self._store.connection.execute(
+            rows = self._store.connection.execute(
                 "SELECT COUNT(DISTINCT urn) FROM sdmx.artefact WHERE artefact_type = 'Codelist'"
-            ).fetchone()
+            ).fetchall()
+            row = first_row(rows)
         except duckdb.CatalogException:
             return 0
         return row[0] if row else 0
@@ -838,14 +844,15 @@ class CodelistScope:
         Resolves via the sdmxlib localized_text table.
         """
         try:
-            row = self._store.connection.execute(
+            rows = self._store.connection.execute(
                 """
                 SELECT lt.text FROM sdmx.localized_text lt
                 WHERE lt.owner_urn = ? AND lt.field = 'name' AND lt.lang = ?
                 LIMIT 1
                 """,
                 [self.urn, lang],
-            ).fetchone()
+            ).fetchall()
+            row = first_row(rows)
         except duckdb.CatalogException:
             return None
         return row[0] if row else None
@@ -918,7 +925,7 @@ class CodeScope:
     def dataset_count(self) -> int:
         """Terminal: number of datasets whose DSD uses the codelist containing this code."""
         try:
-            row = self._store.connection.execute(
+            rows = self._store.connection.execute(
                 """
                 SELECT COUNT(DISTINCT d.identifier)
                 FROM statcat.dataset d
@@ -927,7 +934,8 @@ class CodeScope:
                 WHERE dc.codelist_urn = ?
                 """,
                 [self.codelist_urn],
-            ).fetchone()
+            ).fetchall()
+            row = first_row(rows)
         except duckdb.Error:
             return 0
         return row[0] if row else 0
@@ -1022,7 +1030,7 @@ class DimensionScope:
 
     def collect(self) -> DimensionInfo:
         """Terminal: materialize this dimension."""
-        row = self._store.connection.execute(
+        rows = self._store.connection.execute(
             """
             SELECT dc.component_id,
                    COALESCE(con.name['en'], dc.component_id),
@@ -1036,7 +1044,8 @@ class DimensionScope:
             LIMIT 1
             """,
             [self.dataflow_urn, self.dimension_id],
-        ).fetchone()
+        ).fetchall()
+        row = first_row(rows)
         if row is None:
             msg = f"Dimension not found: {self.dimension_id}"
             raise LookupError(msg)
