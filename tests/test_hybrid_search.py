@@ -1740,6 +1740,33 @@ class TestIncrementalAddPersistence:
         assert [i for i, _ in reopened.bm25_search("goodbye", lang="en")] == ["c"]
         assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
+    def test_search_after_reopen_writes_nothing(self, tmp_path):
+        """A built index is used as found, not rebuilt by the first query.
+
+        The rebuild wrote new index files under ``search/``, so searching a
+        published bundle broke the checksums in its manifest.
+        """
+        from statcatlib.store.lance import LanceIndex
+
+        idx = LanceIndex(tmp_path / "search")
+        idx.add_bulk(
+            [
+                {"id": "a", "entity_type": "open", "lang": "en", "text": "hello"},
+                {"id": "b", "entity_type": "open", "lang": "fr", "text": "bonjour"},
+            ]
+        )
+        idx.build_fts_index()
+
+        def snapshot() -> dict[str, bytes]:
+            root = tmp_path / "search"
+            return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+        before = snapshot()
+        reopened = LanceIndex(tmp_path / "search")
+        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
+        assert snapshot() == before
+
 
 class TestIndexManifest:
     """The manifest records what each language was indexed with.

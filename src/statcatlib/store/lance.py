@@ -723,6 +723,27 @@ class _LanguageIndex:
         self._ann_index_type: str | None = None
         if name in db.list_tables().tables:
             self._tbl = db.open_table(name)
+            self._has_fts = self._fts_covers_table()
+
+    def _fts_covers_table(self) -> bool:
+        """Whether the opened table already has an FTS index over every row.
+
+        Without this, the first BM25 query in each process rebuilt the
+        index with ``replace=True``: every serving worker re-indexed on
+        startup, and a read-only open wrote new index files into a
+        published bundle, breaking the checksums in its manifest.
+        Rows added after the index was built leave it partial, and then
+        a rebuild is still due.
+        """
+        assert self._tbl is not None  # noqa: S101
+        try:
+            indices = self._tbl.list_indices()
+        except Exception:  # noqa: BLE001
+            return False
+        return any(
+            i.index_type == "FTS" and list(i.columns) == ["text"] and not getattr(i, "num_unindexed_rows", 0)
+            for i in indices
+        )
 
     @property
     def table(self) -> lancedb.table.Table | None:
