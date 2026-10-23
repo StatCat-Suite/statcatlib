@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 __all__: list[str] = ["LanceIndex", "make_schema"]
 
 #: Legacy single-table name. Catalogs built before per-language tables
-#: (#101) have exactly this one table, holding every language under a
+#: (pinaxlib 5.23.0) have exactly this one table, holding every language under a
 #: single English-stemmed FTS index. Read-only fallback; ``build_index``
 #: replaces it with the per-language layout.
 _TABLE = "search"
@@ -76,7 +76,7 @@ _MANIFEST_VERSION = 2
 #: bar applies per language, so a small language is left to scan rather
 #: than given a badly-trained index.
 #:
-#: Counted over embedded rows rather than all rows on purpose (#102). A
+#: Counted over embedded rows rather than all rows on purpose. A
 #: table mixing embedded rows with ``fts_only`` ones is mostly NULL in the
 #: embedding column — 95% of it, on a large catalog whose big codelists
 #: are ``fts_only`` — and IVF
@@ -89,7 +89,7 @@ _ANN_MIN_VECTORS = 256
 
 #: Vector index LanceDB builds for us. IVF_FLAT stores each vector whole
 #: inside its partition; IVF_PQ — LanceDB's default, and what statcatlib built
-#: until #102 — stores a product-quantised approximation instead.
+#: before pinaxlib 5.24.0 — stores a product-quantised approximation instead.
 #:
 #: Measured on clustered 384-d vectors, recall@10 against exact cosine
 #: over the same stored vectors:
@@ -97,8 +97,8 @@ _ANN_MIN_VECTORS = 256
 #:     IVF_PQ    20%   (58% with refine_factor=10; nprobes did not move it)
 #:     IVF_FLAT  100%
 #:
-#: 20% is the bug in #102: the vectors were right and retrieval threw
-#: them away. Quantisation cannot preserve the margin this corpus runs
+#: At 20% the vectors were right and retrieval threw most of them away.
+#: Quantisation cannot preserve the margin this corpus runs
 #: on — e5 puts ~0.001 cosine between the right answer and an unrelated
 #: one — and nprobes leaving recall unchanged is what identifies the loss
 #: as quantisation rather than probing.
@@ -843,7 +843,7 @@ class _LanguageIndex:
         # NULL embeddings are deliberate (fts_only codelists, embed_codes=False)
         # and the schema declares the column nullable; lancedb >= 0.36 counts
         # a NULL as a wrong-width vector and rejects it under the default
-        # on_bad_vectors="error". "null" keeps them NULL (#125).
+        # on_bad_vectors="error". "null" keeps them NULL.
         self._tbl = self._db.create_table(self._name, data=_to_arrow(rows, schema=schema), on_bad_vectors="null")
         self._has_fts = False
 
@@ -855,7 +855,7 @@ class _LanguageIndex:
         for row in rows:
             with contextlib.suppress(Exception):
                 self._tbl.delete(f"id = '{row['id']}'")
-        # on_bad_vectors="null": see create() (#125).
+        # on_bad_vectors="null": see create().
         self._tbl.add(_to_arrow(rows, schema=self._tbl.schema), on_bad_vectors="null")
         self._has_fts = False
 
@@ -1058,8 +1058,9 @@ class LanceIndex:
                 "they should"
             )
 
-        # Both the legacy table and the per-language ones can carry a
-        # pre-#102 vector index, and exactly one of the two is populated.
+        # Both the legacy table and the per-language ones can carry a vector
+        # index from before pinaxlib 5.24.0, and exactly one of the two is
+        # populated.
         stale_ann = sorted(lang for lang, index in self._langs.items() if index.ann_is_quantised())
         if _ann_is_quantised(self._legacy):
             stale_ann = ["the legacy table"]
@@ -1127,7 +1128,7 @@ class LanceIndex:
                     # fts_only codelists the two differ by an order of
                     # magnitude. Recording both makes "why is vector
                     # search scanning?" answerable from the manifest
-                    # alone (#102).
+                    # alone.
                     "embedded": index.count_embedded(),
                     "ann": index.ann_index_type,
                     "stemmer": _stemmer_for(lang),

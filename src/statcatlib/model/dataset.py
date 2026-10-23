@@ -85,10 +85,10 @@ class BaseDataset:
     # --- Extensibility ---
     #: Free-form key/value pairs, both sides strings.
     #:
-    #: Stored in a ``MAP(VARCHAR, VARCHAR)`` column, and declared to match
-    #: rather than to flatter: as ``dict[str, object]`` it accepted values
-    #: it could not return, so `None` read back as the *string* ``"None"``
-    #: — present and truthy where an absence was stored (#114). This is
+    #: Stored in a ``MAP(VARCHAR, VARCHAR)`` column, and declared to match it.
+    #: As ``dict[str, object]`` it would accept values it cannot return:
+    #: `None` would read back as the *string* ``"None"``, present and truthy
+    #: where an absence was stored. This is
     #: also the shape the vocabulary uses; CKAN's package extras are
     #: string-valued key/value pairs.
     #:

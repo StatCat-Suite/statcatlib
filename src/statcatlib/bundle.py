@@ -568,7 +568,7 @@ def open_bundle(
     # A read-only attach cannot UPDATE ducklake_metadata, so persistence is
     # dropped rather than refused — the open itself is still correct, since
     # the resolved path is passed to ATTACH with OVERRIDE_DATA_PATH, which
-    # DuckLake honours under READ_ONLY without touching the stamp (#126).
+    # DuckLake honours under READ_ONLY without touching the stamp.
     if persist and not read_only and data_path is not None:
         lake_file = bundle_path / _LAKE_FILENAME
         if lake_file.exists():
