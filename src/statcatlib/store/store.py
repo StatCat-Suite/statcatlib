@@ -36,7 +36,7 @@ from sdmxlib import InternationalString
 from sdmxlib.model.registry import artefact_urn
 from sdmxlib.storage.schema import SCHEMA_VERSION as _SDMX_SCHEMA_VERSION
 
-from statcatlib.bundle import Embedded
+from statcatlib.bundle import Embedded, normalize_lake_data_path, read_current_data_path
 from statcatlib.model.agents import Agent, ContactPoint
 from statcatlib.model.classification import Standard
 from statcatlib.model.dataset import (
@@ -2847,8 +2847,8 @@ class Catalog:
         # abfss:// URI) via ``data_path``.
         if self._bundle_dir is not None:
             attach_url = f"'ducklake:{self._bundle_dir / 'lake.ducklake'}'"
-            data_path_literal = self._resolve_data_path(self._bundle_dir)
-            attach_options = self._attach_options(data_path_literal)
+            data_path_literal, override = self._resolve_data_path(self._bundle_dir)
+            attach_options = self._attach_options(data_path_literal, override=override)
 
             self._data = sdmxlib.DuckDBDataStore.from_registry(
                 self._registry,
@@ -2914,7 +2914,11 @@ class Catalog:
                 msg = "data_path is not supported with an in-memory catalog (':memory:')"
                 raise ValueError(msg)
             return duckdb.connect(":memory:"), None
-        path = Path(self._uri)
+        # Absolute, so the stamp DuckLake records on first open is too: a
+        # relative one is resolved against whatever the working directory is
+        # when the lake is read (GH-23). `absolute()`, not `resolve()`, which
+        # follows symlinks and would respell a catalog created by absolute path.
+        path = Path(self._uri).absolute()
         if self._read_only:
             meta_path = path / "meta.duckdb"
             if not meta_path.exists():
@@ -2929,7 +2933,7 @@ class Catalog:
         path.mkdir(parents=True, exist_ok=True)
         return duckdb.connect(str(path / "meta.duckdb")), path
 
-    def _attach_options(self, data_path_literal: str | None) -> str:
+    def _attach_options(self, data_path_literal: str | None, *, override: bool = False) -> str:
         """Render the DuckLake ATTACH option list.
 
         A ``None`` literal means honour the lake's own stamp: DuckLake only
@@ -2944,31 +2948,73 @@ class Catalog:
         allowed under ``READ_ONLY``. The default (``data_path=None``) stays
         a checked ``<bundle>/parquet/``, so a plain ``Catalog(path)`` on a
         split bundle still fails at ATTACH rather than reading an empty
-        local directory.
+        local directory. *override* is the one exception, for a read-only
+        open of a catalog stamped with a relative path (`_resolve_data_path`).
         """
         opts = [] if data_path_literal is None else [f"DATA_PATH '{data_path_literal}'"]
-        if data_path_literal is not None and self._data_path is not None:
+        if data_path_literal is not None and (self._data_path is not None or override):
             opts.append("OVERRIDE_DATA_PATH true")
         if self._read_only:
             opts.append("READ_ONLY")
         return f"({', '.join(opts)})" if opts else ""
 
-    def _resolve_data_path(self, bundle_dir: Path) -> str | None:
-        """Return the DuckLake DATA_PATH literal, with trailing slash.
+    def _resolve_data_path(self, bundle_dir: Path) -> tuple[str | None, bool]:
+        """Return the DuckLake DATA_PATH literal, with trailing slash, and whether to override.
 
         Remote URIs (``abfss://``, ``s3://``, ``gs://``, etc.) are passed
         through verbatim; local paths are rendered as ``<bundle>/parquet/``
-        when no override is set.
+        when no override is set, reconciled with the lake's stamp by
+        `_colocated_data_path`.
 
         Returns `None` for `statcatlib.bundle.Embedded` — meaning "omit the
         option entirely and let the lake's own stamp stand".
         """
         if isinstance(self._data_path, Embedded):
-            return None
+            return None, False
         if self._data_path is None:
-            return f"{bundle_dir / 'parquet'}/"
+            return self._colocated_data_path(bundle_dir)
         raw = str(self._data_path)
-        return raw if raw.endswith("/") else f"{raw}/"
+        return (raw if raw.endswith("/") else f"{raw}/"), False
+
+    def _colocated_data_path(self, bundle_dir: Path) -> tuple[str, bool]:
+        """The DATA_PATH for a default open: ``<bundle>/parquet/``, as the lake spells it.
+
+        DuckLake compares DATA_PATH with its stamp as strings, so the same
+        directory spelled differently was refused (GH-23). The stamp is read
+        first:
+
+        - the same directory, spelled any way (a relative open, a symlink):
+          passed back verbatim, which DuckLake accepts unchanged;
+        - relative and ending in ``<bundle name>/parquet``, as
+          ``Catalog("relative")`` stamped it before GH-23: DuckLake resolves
+          it against the working directory, so it is replaced by the absolute
+          path. A read-write open rewrites the stamp, which repairs the
+          catalog; a read-only one overrides it for this attach only;
+        - anything else, a remote URI or another directory: the absolute
+          path, unchanged, so a split bundle still fails at ATTACH rather than
+          reading an empty local directory.
+        """
+        parquet = bundle_dir / "parquet"
+        target = f"{parquet}/"
+        lake = bundle_dir / "lake.ducklake"
+        if not lake.exists():
+            return target, False
+        try:
+            stamp = read_current_data_path(lake)
+        except duckdb.Error, FileNotFoundError:
+            return target, False
+        stamped = Path(stamp)
+        if "://" in stamp or stamp == target:
+            return target, False
+        if stamped.is_absolute():
+            return (stamp, False) if stamped.resolve() == parquet.resolve() else (target, False)
+        colocated = stamped.name == "parquet" and stamped.parent.name in {"", bundle_dir.name}
+        if not colocated:
+            return target, False
+        if self._read_only:
+            return target, True
+        normalize_lake_data_path(lake, target)
+        return target, False
 
     @classmethod
     def from_connection(
