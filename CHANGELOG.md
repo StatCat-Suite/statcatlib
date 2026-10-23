@@ -1,7 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-Versions follow [Semantic Versioning](https://semver.org/).
+
+## [0.10.1] - 2026-10-23
+
+Fixes folder catalogs created from a relative path, such as
+`Catalog("my_catalog")`. Up to 0.10.0 such a catalog recorded its parquet
+location relative to the working directory. From any other directory it
+opened and answered counts and facets, then failed on the first query that
+read observations. `Catalog(path)` also refused a catalog opened by a
+different spelling of its path, relative versus absolute.
+
+From 0.10.1 a new catalog records an absolute path, and `Catalog(path)` opens
+any catalog by any spelling of its path. An older relative one reads
+correctly from any directory. **Open it read-write once to repair it:** that
+rewrites the recorded path to absolute, which readers that use it exactly as
+written, such as `data_path=Embedded()`, need. A read-only open leaves it as
+it is. Catalogs created from an absolute path need nothing. The store schema
+is unchanged (2.48), so 0.10.0 catalogs open without a rebuild.
+
+### Bug Fixes
+
+- **store**: Open a folder catalog by any spelling of its path (GH-23)
+
+### Miscellaneous
+
+- Align the release tooling and CLAUDE.md with the suite baseline (GH-10, GH-11, GH-17)
+
+### Testing
+
+- Strict pytest, warnings as errors, and coverage with a floor (GH-8)
 
 ## [0.10.0] — 2026-10-23
 
