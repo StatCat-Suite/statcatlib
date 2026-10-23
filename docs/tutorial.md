@@ -22,7 +22,7 @@ import statcatlib as sc
 store = sc.Catalog()
 
 # Catalog folder — persistent across restarts
-# Creates my_catalog/bundle.duckdb and my_catalog/parquet/ automatically
+# Opening it creates my_catalog/ with meta.duckdb, lake.ducklake and parquet/
 store = sc.Catalog("my_catalog")
 ```
 
@@ -38,8 +38,7 @@ with sc.Catalog("my_catalog") as store:
 
 ## 2. Add datasets manually
 
-You do not need a remote source to use statcatlib. Any dataset kind can be added
-directly with `put()`:
+Any dataset kind can be added directly with `put()`, with no remote source:
 
 ```python
 from sdmxlib import InternationalString as I18n
@@ -141,7 +140,7 @@ sequenceDiagram
     App->>RestRegistry: get(urn, resolve=True)
     RestRegistry->>RestRegistry: fetch Dataflow + DSD + codelists
     App->>ingest_sdmx: ingest_sdmx(store, reg.registry)
-    ingest_sdmx->>DuckDB: ingest_registry() → writes structural tables
+    ingest_sdmx->>DuckDB: store.registry.ingest() → writes structural tables
     ingest_sdmx->>DuckDB: store.put([...]) → writes AggregateDataset rows
     App->>ingest_data: ingest_data(store, reg, identifier)
     ingest_data->>Parquet: pivot_to() → streams SDMX-CSV → wide Parquet
@@ -362,12 +361,12 @@ store.query(sc.AggregateDataset).filter(
 `publishes()` and `serves()` extend the query engine to non-dataset entities:
 
 ```python
-# Which agents publish aggregate datasets with GEO=CA?
+# Agents that publish aggregate datasets with GEO=CA
 agents = store.query(sc.Agent).filter(
     q.publishes(q.has_code("geo", "CA"), kind="aggregate")
 ).all()
 
-# Which agents publish BOTH aggregate and open datasets?
+# Agents that publish both aggregate and open datasets
 agents = (
     store.query(sc.Agent)
     .filter(q.publishes(kind="aggregate"))
@@ -375,7 +374,7 @@ agents = (
     .all()
 )
 
-# Which data services serve aggregate datasets?
+# Data services that serve aggregate datasets
 services = store.query(sc.DataService).filter(
     q.serves(kind="aggregate")
 ).all()
@@ -391,17 +390,19 @@ services = (
 
 ## 9. Full-text search
 
-`search()` runs BM25 full-text search across titles and descriptions of all
-datasets. Results are relevance-ranked.
+`search()` runs BM25 full-text search over datasets, concepts and codes, and
+ranks the hits by relevance. A dataset is indexed by its title, description,
+keywords, theme labels and dimension names. Each result is a `Hit` carrying the
+matched entity as `hit.payload`; pass `kinds=("dataset",)` for datasets only.
 
 !!! note "Requires `statcatlib[search]`"
     `store.search()` requires a folder-mode catalog backed by LanceDB. Install
     with `uv add statcatlib[search]` and pass a folder path to `Catalog`.
 
 ```python
-results = store.search("gross domestic product", limit=10)
-for ds in results.items:
-    print(ds.title.get("en"))
+results = store.search("gross domestic product", kinds=("dataset",), limit=10)
+for hit in results.items:
+    print(hit.score, hit.payload.title.get("en"))
 ```
 
 Each language is indexed separately, with its own stemmer. Pass `lang=` to
@@ -635,8 +636,8 @@ latest_by_country = (
 )
 ```
 
-The catalog handles discovery. Polars handles the numbers. The split is
-intentional — statcatlib never loads observation data into memory.
+statcatlib handles discovery and never loads observation data into memory.
+Polars, or any Parquet reader, reads the numbers.
 
 ## 14. Persistent catalog workflow
 
@@ -694,10 +695,10 @@ with sc.Catalog("national_stats") as store:
         .all()
     )
 
-    # Who publishes what?
+    # Agents that publish aggregate datasets
     agents = store.query(sc.Agent).filter(q.publishes(kind="aggregate")).all()
 
-    # What themes does the catalog cover?
+    # Counts by theme, publisher and frequency
     print(store.facets("themes", "publisher", "frequency"))
 
     # --- Lineage ---

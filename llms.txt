@@ -70,13 +70,13 @@ Five concrete types, all inheriting from `BaseDataset`:
 | `PublicationDataset` | `"publication"` | Articles, reports, analytical releases |
 
 `sc.Dataset` is the union type alias. `sc.BaseDataset` is the generic bound.
+`kind` is a `ClassVar` on each concrete class; `BaseDataset` has none.
 
 ### BaseDataset fields (shared by all kinds)
 
 - `identifier: str` — unique key (required)
 - `title: InternationalString` — bilingual title (required)
 - `description: InternationalString` — bilingual description (required)
-- `kind: str` — discriminator, set by subclass
 - `publisher: Agent | None`
 - `contact_point: ContactPoint | None`
 - `keywords: list[InternationalString]`
@@ -182,7 +182,7 @@ before indexing so theme labels appear in BM25 search results.
 
 ### QueryBuilder
 
-`store.query(cls)` returns a `QueryBuilder[T]`. All methods return `self` for chaining.
+`store.query(cls)` returns a `QueryBuilder[T]`. Builders are immutable: each method returns a new one, so calls chain.
 
 ```python
 results = (
@@ -272,8 +272,8 @@ isinstance(rows[0], dict)  # True
 ids = store.query(sc.BaseDataset).filter(status="current").scalars("identifier").values()
 # → ["EXR", "M1", "UNEMP", ...]
 
-# .first() and .one() also respect projection
-row = store.query(sc.BaseDataset).filter(identifier="EXR").select("identifier", "title", lang="en").first()
+# .row() is the single-row terminal; .first() and .one() raise ValueError under a projection
+row = store.query(sc.BaseDataset).filter(identifier="EXR").select("identifier", "title", lang="en").row()
 # → Row({"identifier": "EXR", "title": "Exchange Rate EUR/USD"})
 ```
 
@@ -366,11 +366,12 @@ store.query(sc.DataService).filter(
 
 ## Full-text search
 
-Search text is enriched with theme labels and dimension names alongside title, description, and keywords — so BM25 finds datasets by classification metadata.
+A dataset's search text holds its title, description and keywords, plus its theme labels and dimension names, so BM25 also finds datasets by classification metadata.
 
 ```python
-# Standalone BM25 search
-results = store.search("gross domestic product", limit=10)
+# Standalone BM25 search over datasets, concepts and codes; each item is a Hit
+results = store.search("gross domestic product", kinds=("dataset",), limit=10)
+results.items[0].payload.identifier
 
 # Combined with filters via QueryBuilder
 results = (

@@ -6,10 +6,9 @@ Designed for developers working with statistical and open data catalogs
 
 ## Project philosophy
 
-- **The catalog is the materialized graph.** Rather than federated querying
-  across separate stores, ingest pulls the full structural model into one
-  DuckDB database. SQL JOINs are the graph traversal. URNs are the links
-  (exactly like RDF URIs, but as SQL foreign keys).
+- **The catalog is the materialized graph.** Ingest pulls the full structural
+  model into one DuckDB database. SQL JOINs are the graph traversal. URNs are
+  the links, playing the part of RDF URIs as SQL foreign keys.
 - **No duplication — only links.** statcatlib owns the catalog star schema.
   sdmxlib owns the SDMX structural tables (codelists, DSDs, dataflows).
   statcatlib's `Dataset` links to sdmxlib's tables via `sdmx_dataflow_urn`;
@@ -18,11 +17,11 @@ Designed for developers working with statistical and open data catalogs
   (GIS, unit-of-measure ontology, etc.) follows the same pattern: ingest its
   tables into the shared database, add a reference column to `datasets`, JOIN
   to query. No architecture changes needed.
-- **Influenced by DCAT, not beholden to it.** We borrow DCAT-AP's vocabulary
-  and StatDCAT-AP's statistical extensions, but the internal representation is
-  Pythonic attrs classes — no RDF runtime, no triple stores.
-- **sdmxlib is a dependency, not the other way around.** sdmxlib knows nothing
-  about statcatlib. The catalog domain model (`model/`) takes only
+- **DCAT supplies the vocabulary; attrs classes hold the data.** We borrow
+  DCAT-AP's vocabulary and StatDCAT-AP's statistical extensions and represent
+  them as attrs classes, with no RDF runtime or triple store.
+- **statcatlib depends on sdmxlib, in one direction only.** sdmxlib knows
+  nothing about statcatlib. The catalog domain model (`model/`) takes only
   `InternationalString` from it; sdmxlib's SDMX model types (`Dataflow`,
   `DataStructure`, `Code`, …) never appear in a domain model field.
 - **Query surface matters as much as the model.** This library powers chatbots,
@@ -162,15 +161,16 @@ returns `None` regardless of `include_rels`. `is_unloaded(value)` and
 `.sort_by()` supports MAP columns (e.g. `title`) via the `lang` parameter:
 `.sort_by("title", lang="en")`. Uses DuckDB subscript syntax (`d.title[?]`).
 
-Structural filters (e.g. `has_code=("GEO", "ON")`) are resolved via the
-`dataset_code` bridge table, which JOINs into sdmxlib's tables when needed.
+Structural filters (e.g. `q.has_code("GEO", "ON")`) JOIN through
+`sdmx_dataflow_urn` into sdmxlib's tables: `sdmx.dataflow` →
+`sdmx.dsd_component` → `sdmx.code`. statcatlib keeps no copy of the codes.
 
 **Hierarchy descent** — `q.within(dim, root)` and
 `q.has_code(dim, q.descendants_of(root))` match any code beneath *root*.
 Descent is **strict** (the root itself does not match) with
 `include_self=True` to widen it, matching sdmxlib's `q.hcode.ancestors`.
 
-Which Hierarchy applies is sdmxlib's answer, not statcatlib's: the filter
+sdmxlib decides which Hierarchy applies. The filter
 projects `sl.q.hierarchy_applicability` — a `Frame`, so a `SqlRelation` —
 and splices it as one `LEFT JOIN` on `dataflow_urn`. Nothing is
 enumerated client-side. statcatlib owns exactly one decision here, the
@@ -219,12 +219,13 @@ They collect the matching IDs via SQL, then call
 
 One DuckDB file, two schema owners:
 
-- **`statcat` schema** — catalog star schema: `dataset`, `agent`, `contact`,
-  `frequency`, `licence`, `theme`, `standard`, `distribution`, `data_service`,
-  `dataset_theme`, `dataset_keyword`, `dataset_spatial`, `dataset_code`,
-  `dataset_standard`, `service_dataset`, `quality_annotation`, `provenance`,
-  `variable`, `feature_type`, `author`, `dimension_name`,
-  `codelist_dependency`, `lineage`, `_meta`
+- **`statcat` schema** — catalog star schema (`store/schema.py`): `dataset`,
+  `agent`, `contact`, `frequency`, `licence`, `standard`, `concept_scheme`,
+  `concept`, `concept_relation`, `concept_scheme_top_concept`,
+  `dataset_theme`, `dataset_subject`, `dataset_keyword`, `dataset_spatial`,
+  `dataset_standard`, `distribution`, `data_service`, `service_dataset`,
+  `quality_annotation`, `provenance`, `variable`, `feature_type`, `author`,
+  `dimension_name`, `catalog_theme_taxonomy`, `lineage`, `_meta`
 - **`sdmx` schema** — SDMX structural tables owned by sdmxlib (schema 2.48).
   Catalogue spine (`artefact`, `localized_text`, `annotation`,
   `annotation_text`, `artefact_ref`, `fetch_scope`); item tables (`code`,
@@ -462,11 +463,12 @@ stating it.
 ## Commands
 
 ```bash
-just ci                        # the gate: index guard + lint + fmt + docstrings + Any + typecheck + unit and integration tests + docs
+just ci                        # the gate: index guard + lint + fmt + docstrings + prose + Any + typecheck + unit and integration tests + docs
 just typecheck                 # pyrefly over src/ and tests/
 just lint                      # ruff check src tests tools
 just fmt                       # ruff format + ruff check --fix
 just check-docstrings          # Google sections, no RST roles, pydoclint
+just check-prose               # no question headings, no banned hook phrases (GH-28)
 just check-any                 # the `Any` ratchet (tools/count_any.py)
 just check-indexes             # only public PyPI named in tracked files; uv.lock is gitignored
 just coverage                  # unit + integration with coverage; fails under 85% (pyproject.toml)

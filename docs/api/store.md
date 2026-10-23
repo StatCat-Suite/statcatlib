@@ -21,7 +21,8 @@ Catalog(path: str | Path, *, embedding_model: Any | None = None)
 
 Name a catalog folder at `path`. Construction is cheap and does **not** touch the
 disk — the DuckDB connection opens on `.open()` or on entering a `with` block,
-which creates `path/bundle.duckdb` and `path/parquet/` if they do not exist.
+which creates `path/meta.duckdb`, `path/lake.ducklake` and `path/parquet/` if
+they do not exist.
 Querying an unopened catalog raises `RuntimeError`.
 
 Pass `embedding_model` to enable semantic and hybrid search. The model must have
@@ -70,10 +71,6 @@ on entry and closes on exit:
 with sc.Catalog("my_catalog") as store:
     store.query(sc.AggregateDataset).limit(5).collect()
 ```
-
-An earlier API had `Catalog.create()`, `Catalog.open(path)` and
-`Catalog.open_or_create(path)` as classmethods. All three are gone: pass the
-path to the constructor instead.
 
 ### Properties
 
@@ -231,9 +228,9 @@ the LanceDB index has not been built yet; never raises for in-memory or
 unbuilt-index stores.
 
 ```python
-results = store.search("labour force survey", limit=10)
-for ds in results.items:
-    print(ds.identifier, ds.title.get("en"))
+results = store.search("labour force survey", kinds=("dataset",), limit=10)
+for hit in results.items:
+    print(hit.score, hit.payload.identifier, hit.payload.title.get("en"))
 
 # Fuzzy search catches typos and spelling variations
 results = store.search("consumr price", fuzzy=1)
@@ -330,11 +327,11 @@ print(store.index_layout)
 #  "fr": {"table": "search_fr__000001", "rows": 1173, "stemmer": "French"}}
 ```
 
-The check worth running after a rebuild: every language you expect is present,
-and each names the stemmer you expect. A language missing here is one whose
-rows were never tagged with it upstream. A `stemmer` of `None` means that
-language is indexed unstemmed because no Snowball stemmer exists for it —
-weaker, but never wrong the way borrowing another language's stemmer would be.
+After a rebuild, check that every language you expect is present and names
+the stemmer you expect. A missing language is one whose rows were never tagged
+with it upstream. A `stemmer` of `None` means no Snowball stemmer exists for
+that language, so it is indexed unstemmed: queries miss inflected forms, and
+no word is stemmed by another language's rules.
 
 Unlike `embedding_metadata`, this is populated for BM25-only catalogs, which
 write no `embeddings.json` at all.
@@ -544,7 +541,7 @@ Recursively traverse `target_id` links downward. Returns a `QueryBuilder` over
 all descendant datasets in the catalog.
 
 ```python
-# Impact analysis: what breaks if CL_GEO changes?
+# Impact analysis: datasets affected by a change to CL_GEO
 affected = store.dataset("CL_GEO").downstream(relationship="uses_classification").collect()
 
 # Chain filters after traversal
@@ -642,8 +639,9 @@ labels = store.codelists.batch_labels(pairs, lang="en")
 
 ## QueryBuilder
 
-`QueryBuilder[T]` is returned by `store.query()`. All methods return `self`
-for chaining.
+`QueryBuilder[T]` is returned by `store.query()`. Builders are immutable: each
+method returns a new `QueryBuilder` and leaves the original unchanged, so
+calls chain.
 
 ### `.filter`
 

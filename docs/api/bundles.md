@@ -7,8 +7,7 @@ its `search/` index, and a `bundle.manifest.json` once it is published
 
 The DuckLake catalog file embeds an absolute `data_path` recorded at write
 time. Call it the **stamp**. It does two jobs at once: it locates the
-observation parquet, and it is what DuckLake compares against at ATTACH
-time. Everything on this page follows from that.
+observation parquet, and DuckLake compares against it at ATTACH time.
 
 ## The deployments
 
@@ -18,14 +17,14 @@ time. Everything on this page follows from that.
 | **Split**           | local                     | object storage      | **the stamp, and nothing else** |
 | **Sync-then-serve** | pulled local at pod start | object storage      | nobody, until you rebind        |
 
-The distinction matters because the two ends want opposite things. For a
+The two ends need opposite handling. For a
 co-located bundle the stamp carries no information — it is derivable from
 where the bundle sits — so a stale value is noise and rewriting it is
 always safe. For a split bundle the stamp is the *only* record of where
 the data lives, and overwriting it costs a re-sync to recover.
 
-A consumer handed a bundle path cannot tell these apart by looking. The
-bundle can, immediately and cheaply — so `open_bundle` asks it.
+A bundle path alone does not show which deployment it is. The stamp and the
+bundle's contents do, and `open_bundle` reads both before it attaches.
 
 ## `open_bundle`
 
@@ -94,8 +93,8 @@ with sc.open_bundle(uri, data=sc.Embedded(), access_mode="read_only") as cat:
 
 `azure_credentials` is supplied by the deployment, never baked in. The
 bundle declares **where** the data is; the deployment supplies **how to
-authenticate**. Keeping those separate is what lets "just point at the
-bundle" work without the bundle becoming a credential store.
+authenticate**. A bundle can therefore be copied and shared without
+carrying secrets.
 
 ## `inspect_bundle`
 
@@ -111,7 +110,7 @@ only, no write lock, changes nothing.
     It fails on the first query that reads observations. Metadata-only
     queries — `count(*)`, `facets()` — answer correctly from the catalog
     either way. So a misconfigured pod can start, attach, pass a health
-    check, serve counts, and only then fall over.
+    check and serve counts, and fail on its first observation query.
 
     Run `inspect_bundle` at application startup to turn that into a
     startup failure.
@@ -262,7 +261,7 @@ byte-copying it and rewriting the copy, returning the copy's path.
 
 | Command                                | Does                                                  |
 |:---------------------------------------|:------------------------------------------------------|
-| `statcat bundle explain <dir>`           | What does this bundle say, and what would an open do? |
+| `statcat bundle explain <dir>`           | Print the stamp, the layout, and what an open would do. |
 | `statcat bundle rebind <dir> --to <uri>` | Point it at where the data actually is.               |
 | `statcat bundle attach-cmd <dir>`        | Print the `ATTACH` for ad-hoc `duckdb` CLI use.       |
 | `statcat bundle check <dir>`             | Check a published bundle; exits 1 on any finding.     |
@@ -284,9 +283,9 @@ reason `normalize_lake_data_path` does.
 ## What has to stay local
 
 Only `parquet/` may be remote. `meta.duckdb`, `lake.ducklake`, and
-`search/` are local to the reader. That invariant is what reduces a split
-bundle to a single variable, and everything above assumes it.
+`search/` are local to the reader. This page assumes that throughout: it
+makes the stamp the only location a split bundle records.
 
 Lifting it — a bundle whose catalog files also live on object storage,
-attached in place with no sync step — works at the DuckDB layer already
-but is not yet supported by statcatlib. See issue #121.
+attached in place with no sync step — works at the DuckDB layer, and
+statcatlib does not support it yet.
