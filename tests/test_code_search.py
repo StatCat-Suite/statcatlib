@@ -135,8 +135,9 @@ class TestCollectCodeTexts:
 
     def test_max_codes_per_codelist_filters(self) -> None:
         store = _build_store_with_sdmx()
-        # Both codelists have 2 codes, so max=1 should skip them all
-        items = store._collect_code_texts(max_codes_per_codelist=1)
+        # Both codelists have 2 codes, so max=1 should skip them all, and say so.
+        with pytest.warns(UserWarning, match="skipped 2 codelist"):
+            items = store._collect_code_texts(max_codes_per_codelist=1)
         assert len(items) == 0
 
     def test_empty_without_sdmx(self) -> None:

@@ -465,6 +465,8 @@ just fmt                       # ruff format + ruff check --fix
 just check-docstrings          # Google sections, no RST roles, pydoclint
 just check-any                 # the `Any` ratchet (tools/count_any.py)
 just check-indexes             # only public PyPI named in tracked files; uv.lock is gitignored
+just coverage                  # unit + integration with coverage; fails under 85% (pyproject.toml)
+just test-live                 # the `live` tier: real HTTP calls to SDMX endpoints
 ```
 
 ### `just ci` is the gate, and it runs locally
@@ -477,6 +479,11 @@ merges on a green `just ci`.
 The gate selects tests by marker (`-m unit`, then `-m integration`), so **every
 test file needs a `pytestmark`**: a file without one never runs in `just ci`
 (GH-8). `live` (network) is the only tier left out.
+
+pytest runs with `strict = true` and `filterwarnings = ["error"]`, and no
+ignore list. A test that sets up a situation statcatlib warns about asserts
+the warning with `pytest.warns(match=...)`; one that only needs the code path
+avoids the warning the way a real caller would (e.g. passing `model_name`).
 
 **The pre-push hook is the real gate**: `just hooks-install` points
 `core.hooksPath` at `.githooks`, and every `git push` runs `just ci` first.

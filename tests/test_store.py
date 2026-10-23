@@ -402,7 +402,7 @@ class TestEncoderNarrowing:
         assert as_vector([1, 2]) == [1.0, 2.0]
         assert as_vector((1.5,)) == [1.5]
 
-    @pytest.mark.parametrize("bad", ["abc", b"abc", 5, None])
+    @pytest.mark.parametrize("bad", ["abc", b"abc", 5, None], ids=["str", "bytes", "int", "none"])
     def test_rejects_non_iterables_and_strings(self, bad):
         from statcatlib.store.store import as_vector
 

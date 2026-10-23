@@ -30,3 +30,9 @@ site/
 # resolve against pyproject.toml. Committing the lockfile would leak
 # whichever package index the local environment resolved against.
 uv.lock
+
+# Coverage output (`just coverage`)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
