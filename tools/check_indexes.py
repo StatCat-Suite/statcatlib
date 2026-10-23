@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -195,7 +196,7 @@ def directive_value(tail: str, *, flag: bool) -> str | None:
             value = match.group("value")
             break
     if value is None and tail.startswith(("http://", "https://")):
-        value = tail.split()[0]
+        value = tail.split(maxsplit=1)[0]
     if value is None:
         return None
     looks_indexed = "://" in value or "." in value or _VARIABLE.match(value)
@@ -223,52 +224,65 @@ def scan_text(path: str, text: str) -> list[Finding]:
             if _TABLE_HEADER.match(line):
                 in_index_table = False
             else:
-                url_match = _URL_KEY.match(line)
-                if url_match:
-                    url = url_match.group("url")
-                    hosts = hosts_in(url)
-                    if not hosts or not all(is_public(h) for h in hosts):
-                        findings.append(Finding(path, number, "uv index table names a non-public index", line))
+                findings.extend(_index_table_finding(path, number, line))
                 continue
-
-        match = _DIRECTIVE.search(line)
-        if not match:
-            continue
-
-        # A non-public URL is a finding wherever it appears, prose included:
-        # "install from https://mirror…/simple" leaks the same host a config
-        # key would.
-        private = [h for h in hosts_in(line) if not is_public(h)]
-        if private:
-            findings.append(
-                Finding(path, number, f"index directive names a non-public host: {', '.join(private)}", line)
-            )
-            continue
-
-        if _COMMENT.match(line):
-            continue
-
-        value = directive_value(line[match.end() :], flag=match.group("name").startswith("-"))
-        if value is None or hosts_in(value):
-            # Nothing assigned (prose), or a public URL already cleared above.
-            continue
-        if _VARIABLE.match(value):
-            findings.append(Finding(path, number, "index directive with no readable host — cannot be verified", line))
-        elif not is_public(value):
-            findings.append(Finding(path, number, f"index directive names a non-public host: {value}", line))
+        findings.extend(_directive_finding(path, number, line))
 
     return findings
 
 
+def _index_table_finding(path: str, number: int, line: str) -> list[Finding]:
+    """A `url = …` line inside a uv index table that names a non-public index."""
+    url_match = _URL_KEY.match(line)
+    if not url_match:
+        return []
+    hosts = hosts_in(url_match.group("url"))
+    if hosts and all(is_public(h) for h in hosts):
+        return []
+    return [Finding(path, number, "uv index table names a non-public index", line)]
+
+
+def _directive_finding(path: str, number: int, line: str) -> list[Finding]:
+    """An index directive on `line` that names a non-public host, or none it can read."""
+    match = _DIRECTIVE.search(line)
+    if not match:
+        return []
+
+    # A non-public URL is a finding wherever it appears, prose included:
+    # "install from https://mirror…/simple" leaks the same host a config
+    # key would.
+    private = [h for h in hosts_in(line) if not is_public(h)]
+    if private:
+        return [Finding(path, number, f"index directive names a non-public host: {', '.join(private)}", line)]
+
+    if _COMMENT.match(line):
+        return []
+
+    value = directive_value(line[match.end() :], flag=match.group("name").startswith("-"))
+    if value is None or hosts_in(value):
+        # Nothing assigned (prose), or a public URL already cleared above.
+        return []
+    if _VARIABLE.match(value):
+        return [Finding(path, number, "index directive with no readable host — cannot be verified", line)]
+    if not is_public(value):
+        return [Finding(path, number, f"index directive names a non-public host: {value}", line)]
+    return []
+
+
+def _git(root: Path, *args: str, check: bool) -> subprocess.CompletedProcess[str]:
+    """Run git in *root*, with git resolved from PATH to a full path."""
+    git = shutil.which("git")
+    if git is None:
+        sys.stderr.write("check_indexes: git is not on PATH\n")
+        raise SystemExit(2)
+    # S603 asks for a literal argument list; the executable is a resolved path
+    # and the arguments are this module's own constants.
+    return subprocess.run([git, *args], cwd=root, capture_output=True, text=True, check=check)  # noqa: S603
+
+
 def tracked_files(root: Path) -> list[str]:
     """Repo-relative paths of every tracked file, via `git ls-files`."""
-    out = subprocess.run(
-        ["git", "ls-files", "-z"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    out = _git(root, "ls-files", "-z", check=True)
     return [p for p in out.stdout.split("\0") if p]
 
 
@@ -287,13 +301,7 @@ def _read_text(path: Path) -> str | None:
 
 def _lock_is_ignored(root: Path) -> bool:
     """Whether `uv.lock` would be refused by `.gitignore`."""
-    result = subprocess.run(
-        ["git", "check-ignore", "-q", "uv.lock"],
-        cwd=root,
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
+    return _git(root, "check-ignore", "-q", "uv.lock", check=False).returncode == 0
 
 
 def structural_findings(paths: Sequence[str], *, lock_ignored: bool) -> list[Finding]:
@@ -344,25 +352,31 @@ def survey(root: Path) -> list[Finding]:
 
 
 def main() -> int:
+    """Survey the tracked files and report; with ``--check``, exit 1 on any finding.
+
+    Returns:
+        The process exit code.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Exit 1 if anything was found.")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
     findings = survey(root)
+    out = sys.stdout
 
     if not findings:
-        print(f"index check: clean — {len(tracked_files(root))} tracked files, no non-public index named")
+        out.write(f"index check: clean — {len(tracked_files(root))} tracked files, no non-public index named\n")
         return 0
 
-    print(f"index check: {len(findings)} finding(s)\n")
+    out.write(f"index check: {len(findings)} finding(s)\n\n")
     for finding in findings:
-        print(finding.render())
-    print(
+        out.write(f"{finding.render()}\n")
+    out.write(
         "\nOnly public indexes may be named in this repository "
         f"({', '.join(sorted(PUBLIC_INDEX_HOSTS))}). A private mirror belongs "
         "in your local environment — uv reads UV_INDEX / UV_DEFAULT_INDEX from "
-        "the shell, and nothing there is committed."
+        "the shell, and nothing there is committed.\n"
     )
     return 1 if args.check else 0
 

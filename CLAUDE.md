@@ -464,7 +464,7 @@ stating it.
 ```bash
 just ci                        # the gate: index guard + lint + fmt + docstrings + Any + typecheck + unit and integration tests + docs
 just typecheck                 # pyrefly over src/ and tests/
-just lint                      # ruff check src tests
+just lint                      # ruff check src tests tools
 just fmt                       # ruff format + ruff check --fix
 just check-docstrings          # Google sections, no RST roles, pydoclint
 just check-any                 # the `Any` ratchet (tools/count_any.py)

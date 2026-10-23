@@ -1,6 +1,6 @@
 """Composable filter objects for Catalog queries.
 
-Usage::
+Usage:
 
     import statcatlib.query as q
 
@@ -630,8 +630,7 @@ def within(
             ``q.hcode.ancestors``, which excludes the node itself.
         codelist_urn: Optional codelist URN to disambiguate same-named dimensions across DSDs.
 
-    Example::
-
+    Example:
         store.query(sc.AggregateDataset).filter(
             q.within("REF_AREA", "ON", hierarchy=h_geo_statistical_urn)
         )
@@ -653,8 +652,13 @@ def has_dimensions(dims: list[str]) -> SdmxDimensionFilter | _NoOpFilter:
     JOINs through ``sdmx.dataflow → sdmx.dsd_component``.
     An empty list matches all datasets.
 
-    Example::
+    Args:
+        dims: The dimension ids every matching DSD must have.
 
+    Returns:
+        The filter, or one that matches everything when *dims* is empty.
+
+    Example:
         store.query(sc.AggregateDataset).filter(q.has_dimensions(["GEO", "SEX"])).execute()
     """
     if not dims:
@@ -676,8 +680,14 @@ def distribution(**kwargs: object) -> ExistsFilter:
         .filter(q.distribution(format="CSV"))
         .filter(q.distribution(format="JSON"))
 
-    Example::
+    Args:
+        **kwargs: Column values one distribution must all match: ``format``,
+            ``media_type``, ``service_type`` or ``endpoint_url``.
 
+    Returns:
+        An EXISTS filter over the dataset's distributions.
+
+    Example:
         store.query(sc.BaseDataset).filter(q.distribution(media_type="text/csv")).execute()
     """
     service_keys = {"service_type", "endpoint_url"}
@@ -709,8 +719,13 @@ def has_service(**kwargs: object) -> ExistsFilter:
 
     Supported keys: ``service_type``, ``endpoint_url``.
 
-    Example::
+    Args:
+        **kwargs: Column values the data service must all match.
 
+    Returns:
+        An EXISTS filter over the dataset's distributions and their services.
+
+    Example:
         store.query(sc.BaseDataset).filter(
             q.has_service(endpoint_url="https://example.com/sdmx")
         ).execute()
@@ -849,8 +864,14 @@ def publishes(*inner_filters: PositionalFilter, **kwargs: object) -> ExistsFilte
     positional arguments, and/or dataset-level conditions as keyword arguments
     (``kind``, ``status``).
 
-    Example::
+    Args:
+        *inner_filters: Filters a published dataset must match.
+        **kwargs: Dataset columns a published dataset must match.
 
+    Returns:
+        An EXISTS filter over the agent's datasets.
+
+    Example:
         # Agents that publish aggregate datasets about Ontario
         store.query(sc.Agent).filter(
             q.publishes(q.has_code("GEO", "ON"), kind="aggregate")
@@ -865,8 +886,14 @@ def serves(*inner_filters: PositionalFilter, **kwargs: object) -> ExistsFilter:
     Pass ``ExistsFilter`` objects as positional arguments and/or dataset-level
     conditions as keyword arguments (``kind``, ``status``).
 
-    Example::
+    Args:
+        *inner_filters: Filters a served dataset must match.
+        **kwargs: Dataset columns a served dataset must match.
 
+    Returns:
+        An EXISTS filter over the service's datasets.
+
+    Example:
         # DataServices that serve datasets with a GEO dimension
         store.query(sc.DataService).filter(q.serves(q.has_dimensions(["GEO"]))).all()
     """
@@ -881,8 +908,14 @@ def serves(*inner_filters: PositionalFilter, **kwargs: object) -> ExistsFilter:
 def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
     """Filter datasets that have a spatial coverage matching *label*.
 
-    Example::
+    Args:
+        label: The spatial coverage label, matched exactly.
+        lang: The language of *label*.
 
+    Returns:
+        An EXISTS filter over the dataset's spatial coverage.
+
+    Example:
         store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
     """
     return ExistsFilter(
@@ -894,8 +927,14 @@ def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
 def has_keyword(keyword: str, *, lang: str = "en") -> ExistsFilter:
     """Filter datasets that have a keyword matching *keyword*.
 
-    Example::
+    Args:
+        keyword: The keyword, matched exactly.
+        lang: The language of *keyword*.
 
+    Returns:
+        An EXISTS filter over the dataset's keywords.
+
+    Example:
         store.query(sc.BaseDataset).filter(q.has_keyword("employment")).execute()
     """
     return ExistsFilter(
@@ -907,8 +946,14 @@ def has_keyword(keyword: str, *, lang: str = "en") -> ExistsFilter:
 def title_contains(text: str, *, lang: str = "en") -> MapFilter:
     """Filter datasets whose title contains *text* (case-insensitive).
 
-    Example::
+    Args:
+        text: The text to find, anywhere in the title.
+        lang: Which language's title to search.
 
+    Returns:
+        A filter on the dataset's title in *lang*.
+
+    Example:
         store.query(sc.BaseDataset).filter(q.title_contains("GDP")).execute()
     """
     return MapFilter(column="title", key=lang, value=text, op="ilike")
@@ -917,8 +962,14 @@ def title_contains(text: str, *, lang: str = "en") -> MapFilter:
 def description_contains(text: str, *, lang: str = "en") -> MapFilter:
     """Filter datasets whose description contains *text* (case-insensitive).
 
-    Example::
+    Args:
+        text: The text to find, anywhere in the description.
+        lang: Which language's description to search.
 
+    Returns:
+        A filter on the dataset's description in *lang*.
+
+    Example:
         store.query(sc.BaseDataset).filter(q.description_contains("exchange")).execute()
     """
     return MapFilter(column="description", key=lang, value=text, op="ilike")

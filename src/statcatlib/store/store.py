@@ -3275,8 +3275,10 @@ class Catalog:
         the caller's responsibility — the encoder name is opaque to
         statcatlib.
 
-        Example::
+        Args:
+            model: The encoder, the one `embedding_model_name` names.
 
+        Example:
             store = Catalog("data/catalog").open()
             if store.embedding_model_name:
                 from sentence_transformers import SentenceTransformer

@@ -11,7 +11,7 @@ default:
 
 [group('dev')]
 lint:
-    uv run ruff check src tests
+    uv run ruff check src tests tools
 
 # pyrefly at `preset = "all"` minus a documented deny-list (pyrefly.toml),
 # the only type checker (GH-7).
@@ -22,52 +22,16 @@ typecheck:
 
 [group('dev')]
 checkfmt:
-    uv run ruff format --check src tests
+    uv run ruff format --check src tests tools
 
-# Guard: docstrings are Google-style, with no Sphinx/RST role markup
+# Four arms, in tools/check_docstrings.py and tested in
+# tests/test_check_docstrings.py (GH-9): no Sphinx/RST markup, no NumPy
+# section underlines, `Args:` as the only argument-section name, and pydoclint
+# in full with [tool.pydoclint]'s settings.
+# Guard: docstrings are plain Google style
 [group('dev')]
 check-docstrings:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # No ruff rule covers this: pydocstyle checks a docstring's *structure*
-    # (summary line, blank lines, punctuation) and never reads its markup, so
-    # `convention = "google"` sat declared and unenforced for the life of the
-    # file. Banning a markup dialect is a house policy, not a correctness
-    # property, so it is a grep rather than a linter.
-    bad=$(grep -rnE ':(class|meth|func|attr|mod|data|exc|obj|ref):`' src/statcatlib --include='*.py' || true)
-    if [[ -n "${bad}" ]]; then
-        echo "error: Sphinx/RST roles in docstrings — use plain backticks:" >&2
-        echo "${bad}" | sed 's/^/  /' >&2
-        exit 1
-    fi
-    # Google spells the argument section `Args:`. `Parameters:` is the NumPy /
-    # Sphinx spelling and pydoclint parses it well enough that DOC003 stays
-    # quiet, so it needs saying here — three of these survived the #105 sweep
-    # precisely because they carry a colon and no underline.
-    params=$(grep -rnE '^[[:space:]]*(Parameters|Arguments|Params):[[:space:]]*$' \
-        src/statcatlib --include='*.py' || true)
-    if [[ -n "${params}" ]]; then
-        echo "error: Google spells this section 'Args:':" >&2
-        echo "${params}" | sed 's/^/  /' >&2
-        exit 1
-    fi
-    # Docstring sections are Google (`Args:`), never NumPy underlines. Matched
-    # as a section *name* followed by an underline — a bare rule under free
-    # prose is a heading in a module docstring, which is fine and common here.
-    numpy=$(grep -rn -A1 -E '^\s*(Parameters|Returns|Raises|Yields|Attributes|Warns|Other Parameters):?\s*$' \
-        src/statcatlib --include='*.py' | grep -E '^\S+-\s*-{3,}\s*$' || true)
-    if [[ -n "${numpy}" ]]; then
-        echo "error: NumPy-style section underlines — use Google sections:" >&2
-        echo "${numpy}" | sed 's/^/  /' >&2
-        exit 1
-    fi
-    # pydoclint, in full. It catches what the greps cannot — a docstring whose
-    # *shape* is not Google (DOC003) and one that disagrees with the signature
-    # it documents (missing args, undocumented raises, a return section that
-    # is not there). #105 scoped this to DOC003 because 55 findings stood in
-    # the way; #108 cleared them, so it now runs unfiltered. Settings live in
-    # [tool.pydoclint].
-    uv run pydoclint --quiet src/statcatlib
+    uv run python tools/check_docstrings.py --check
 
 # Guard: `Any` in src/ must not grow (#109). ANN401 cannot see inside a
 # generic argument, so this ratchet is what guards `dict[str, Any]`.
@@ -106,8 +70,8 @@ hooks-install:
 # Format code
 [group('dev')]
 fmt:
-    uv run ruff format src tests
-    uv run ruff check --fix src tests
+    uv run ruff format src tests tools
+    uv run ruff check --fix src tests tools
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 

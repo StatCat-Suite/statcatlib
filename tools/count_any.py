@@ -79,7 +79,7 @@ def _code_lines(text: str) -> list[str]:
     blanked = list(lines)
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except (tokenize.TokenError, IndentationError, SyntaxError):
+    except tokenize.TokenError, IndentationError, SyntaxError:
         return lines
     for tok in tokens:
         if tok.type is tokenize.COMMENT:

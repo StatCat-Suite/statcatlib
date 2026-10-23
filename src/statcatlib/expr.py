@@ -5,7 +5,7 @@ any SQL.  They are context-free objects — like ``pl.col()`` in Polars — and
 can be reused across ``.enrich()``, ``.filter()``, and ``.sort_by()`` on any
 collection scope.
 
-Usage::
+Usage:
 
     import statcatlib as sc
 

@@ -134,8 +134,14 @@ def is_concept_in_scheme(scheme: ConceptScheme, notation: str) -> bool:
     Pure-Python — no DuckDB or any other storage involved.
     Useful for validation pipelines that operate on in-memory domain objects.
 
-    Example::
+    Args:
+        scheme: The concept scheme.
+        notation: The concept's notation.
 
+    Returns:
+        Whether *scheme* lists *notation* among its concepts.
+
+    Example:
         valid = is_concept_in_scheme(product_type_scheme, dataset.dataset_type.notation)
     """
     return notation in scheme.concepts
