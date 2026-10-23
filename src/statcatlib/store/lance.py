@@ -1028,7 +1028,7 @@ class LanceIndex:
                 if table is not None and table in names:
                     self._langs[str(lang)] = _LanguageIndex(self._db, str(lang), table)
         if not self._langs and _TABLE in names:
-            # Pre-#101 catalog: one table, every language, one English
+            # Catalog built before pinaxlib 5.23.0: one table, every language, one English
             # stemmer. Served read-only so an existing bundle keeps
             # working; build_index() replaces it with per-language tables.
             self._legacy = self._db.open_table(_TABLE)
@@ -1307,7 +1307,7 @@ class LanceIndex:
         for name in previous.values():
             with contextlib.suppress(Exception):
                 self._db.drop_table(name)
-        # A rebuild supersedes any pre-#101 table; drop it so the two
+        # A rebuild supersedes any pre-pinaxlib-5.23.0 table; drop it so the two
         # layouts can never both answer queries.
         if self._legacy is not None:
             with contextlib.suppress(Exception):

@@ -351,7 +351,7 @@ def test_build_index_idempotent(tmp_path):
 def test_build_index_creates_vector_ann_index(tmp_path, model):
     """build_index() must create an ANN index on the 'embedding' column.
 
-    Regression for #90: create_index() was called without
+    Regression: create_index() was called without
     vector_column_name="embedding", so LanceDB raised on the default
     "vector" column and contextlib.suppress swallowed it — leaving every
     bundle with only an FTS index and forcing brute-force vector scans.
@@ -376,7 +376,7 @@ def test_build_index_creates_vector_ann_index(tmp_path, model):
 
 
 # ---------------------------------------------------------------------------
-# Ranked projections (#65)
+# Ranked projections
 # ---------------------------------------------------------------------------
 
 
@@ -484,7 +484,7 @@ def test_search_scalars_first(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Semantic search scores (#66)
+# Semantic search scores
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +511,7 @@ def test_hybrid_search_populates_scores(store_with_model):
 
 
 # ---------------------------------------------------------------------------
-# BM25 query strategy — AND/OR operator and stopword handling (#68)
+# BM25 query strategy — AND/OR operator and stopword handling
 # ---------------------------------------------------------------------------
 
 
@@ -649,7 +649,7 @@ def test_standalone_search_operator(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# entity_type filter + dedup in LanceIndex (#82)
+# entity_type filter + dedup in LanceIndex
 # ---------------------------------------------------------------------------
 
 
@@ -765,7 +765,7 @@ def test_semantic_search_excludes_code_rows_by_default(tmp_path, model):
 
 
 # ---------------------------------------------------------------------------
-# Asymmetric-model document/query prefixes (#81)
+# Asymmetric-model document/query prefixes
 # ---------------------------------------------------------------------------
 
 
@@ -888,7 +888,7 @@ def test_build_index_can_set_prefixes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Graceful BM25 degradation when LanceDB index missing (#77)
+# Graceful BM25 degradation when LanceDB index missing
 # ---------------------------------------------------------------------------
 
 
@@ -948,7 +948,7 @@ def test_querybuilder_hybrid_returns_empty_when_lance_missing(tmp_path, model):
 
 
 # ---------------------------------------------------------------------------
-# Fuzziness as int on QueryBuilder/Store search (#78)
+# Fuzziness as int on QueryBuilder/Store search
 # ---------------------------------------------------------------------------
 
 
@@ -1342,7 +1342,7 @@ def test_open_tolerates_malformed_meta(tmp_path, model):
 class TestExplicitSchema:
     """The Lance table is created under a declared schema, not an inferred one.
 
-    Declaring it is what keeps the per-language tables of #101 from
+    Declaring it is what keeps the per-language tables from
     drifting apart, and it fixes one live defect on the way: a batch in
     which *every* row is unembedded while a model is configured used to
     infer a null-typed embedding column, after which the ANN index could
@@ -1422,7 +1422,7 @@ class TestExplicitSchema:
 
 
 class TestPerLanguageStemming:
-    """Each language's corpus is stemmed with its own Snowball rules (#101).
+    """Each language's corpus is stemmed with its own Snowball rules.
 
     Before per-language tables there was one FTS index over one shared
     ``text`` column, built with LanceDB's defaults — ``language='English'``,
@@ -1514,7 +1514,7 @@ class TestPerLanguageStemming:
 class TestLegacyIndexFallback:
     """A catalog built before per-language tables keeps working.
 
-    Pre-#101 bundles have a single ``search`` table holding every
+    Bundles built before pinaxlib 5.23.0 have a single ``search`` table holding every
     language. Rebuilding is what earns the correct stemmers, but an
     existing bundle must not go dark in the meantime.
     """
@@ -1573,7 +1573,7 @@ class TestLegacyIndexFallback:
 
 
 class TestPerLanguageStopwords:
-    """Stopwords are stripped in the query's own language (#101).
+    """Stopwords are stripped in the query's own language.
 
     Applied as one merged set, a French stopword that is also an English
     content word disappeared from English queries.
@@ -1601,7 +1601,7 @@ class TestPerLanguageStopwords:
 
 
 class TestAtomicRebuild:
-    """A rebuild swaps in whole or not at all (#101).
+    """A rebuild swaps in whole or not at all.
 
     Per-language tables turned one drop-and-create into N, so a failure
     partway through could leave some languages rebuilt and others stale.
@@ -1848,7 +1848,7 @@ class TestIndexLayoutProperty:
 
 
 class TestLegacyIndexWarning:
-    """Reading a pre-#101 index warns that its stemming is wrong.
+    """Reading a pre-pinaxlib-5.23.0 index warns that its stemming is wrong.
 
     The index still answers — an existing bundle must not go dark on a
     library upgrade — but silently serving English-stemmed French would
@@ -1892,7 +1892,7 @@ class TestLegacyIndexWarning:
 
 
 # ---------------------------------------------------------------------------
-# ANN threshold counts vectors, not rows (#102)
+# ANN threshold counts vectors, not rows
 # ---------------------------------------------------------------------------
 
 
@@ -1911,7 +1911,7 @@ _VEC = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
 @pytest.mark.unit
 class TestAnnThresholdCountsVectors:
-    """The ANN gate must measure embedded rows, not table rows (#102).
+    """The ANN gate must measure embedded rows, not table rows.
 
     A table mixing embedded rows with ``fts_only`` ones is mostly NULL in
     the embedding column. Counting rows clears the threshold on exactly
@@ -1967,7 +1967,7 @@ class TestAnnThresholdCountsVectors:
         assert ("text",) in index_columns
 
     def test_sparse_table_is_indexed_exactly_rather_than_skipped(self, tmp_path):
-        """The #102 shape: 300 vectors in 6,000 rows. Index, but an exact one.
+        """A sparse table, 300 vectors in 6,000 rows, gets an exact index.
 
         The original diagnosis blamed NULL rows for poisoning IVF
         training. Measured, they do not: recall@10 was 20.0% on a dense
@@ -2026,13 +2026,13 @@ class TestAnnThresholdCountsVectors:
 
 
 # ---------------------------------------------------------------------------
-# Warn on a pre-#102 quantised vector index (#103)
+# Warn on a quantised vector index from before pinaxlib 5.24.0
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 class TestQuantisedIndexWarning:
-    """A pre-#102 index keeps serving at ~78% recall with nothing to say so.
+    """A pre-pinaxlib-5.24.0 index keeps serving at ~78% recall with nothing to say so.
 
     The warning has to distinguish "lossy index" from "no index", which
     the manifest cannot do — it only began recording ``ann`` in version
@@ -2047,7 +2047,7 @@ class TestQuantisedIndexWarning:
         idx = LanceIndex(tmp_path / "search")
         idx.add_bulk(self._sparse_rows(300, 6000), embedding_dim=len(_VEC))
         idx.build_index()
-        # Downgrade to what a pre-#102 build left behind.
+        # Downgrade to what a pre-pinaxlib-5.24.0 build left behind.
         require_table(idx).create_index(
             metric="cosine", vector_column_name="embedding", index_type="IVF_PQ", replace=True
         )
@@ -2109,7 +2109,7 @@ class TestQuantisedIndexWarning:
         assert "en, fr" in stale[0]
 
     def test_one_warning_carries_both_defects(self, tmp_path):
-        """A pre-#101 bundle predates #102 too — the case for combining.
+        """An index older than per-language tables also has a quantised vector index.
 
         Its single legacy table is stemmed as English *and* carries a
         quantised vector index. Warning about the stemming alone would
@@ -2197,7 +2197,7 @@ class TestSearchRowMatchesSchema:
 
 
 class TestAsymmetricPrefixWarnings:
-    """`build_index` warns where a prefix mismatch would quietly hurt recall (#81).
+    """`build_index` warns where a prefix mismatch would quietly hurt recall.
 
     Both cases produce vectors whose document and query sides sit in different
     regions of the space. Nothing raises — recall is merely worse — which is

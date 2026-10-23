@@ -1,5 +1,5 @@
 """Tests for the ``statcat build-index`` CLI, focused on the
-``--codelist-policy`` flag added for issue #96.
+``--codelist-policy`` flag.
 
 The library-level guarantees (policy bypasses the size cap, forces
 ``embedding=None``, etc.) are covered by

@@ -60,7 +60,7 @@ class TestPut:
 
 
 class TestExtras:
-    """Round-trip and rejection for `extras` (#114).
+    """Round-trip and rejection for `extras`.
 
     None of this existed before, which is why a field advertised as
     ``dict[str, Any]`` stored ``str(value)`` for four minor releases
@@ -96,7 +96,7 @@ class TestExtras:
         ids=["int", "float", "bool", "none", "list", "dict"],
     )
     def test_non_string_values_are_refused(self, value: object):
-        """Each of these used to be silently stringified (#114)."""
+        """Each of these used to be silently stringified."""
         s = sc.Catalog().open()
         ds = sc.OpenDataset(identifier="X", title=_i("X"), description=_i("d"))
         ds.extras = _untyped({"k": value})
@@ -163,10 +163,7 @@ class TestGet:
 class TestSearch:
     """`Catalog.search` over an indexed catalog.
 
-    Skipped since v3 behind a reason that stopped being true; revived in
-    #117. `search()` yields `Hit` wrappers, so the entity is on `.payload` —
-    the old bodies read it directly and would have raised had the marker ever
-    come off.
+    `search()` yields `Hit` wrappers, so the entity is on `.payload`.
     """
 
     def test_search_by_title(self, indexed_store: sc.Catalog):

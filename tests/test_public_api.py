@@ -32,7 +32,7 @@ class TestImports:
         assert callable(sc.query.has_code)
 
     def test_valid_include_rels_is_public(self) -> None:
-        """Documented as the list of valid `.include()` names, so it must be reachable (#113)."""
+        """Documented as the list of valid `.include()` names, so it must be reachable."""
         import statcatlib as sc
 
         assert "VALID_INCLUDE_RELS" in sc.__all__

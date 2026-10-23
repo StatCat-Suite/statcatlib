@@ -24,7 +24,7 @@ def untyped(value: object) -> Any:
     Some tests exist to prove that passing the wrong type *fails* — that a
     `ClassVar` cannot be assigned, that `put()` rejects a non-string. A type
     checker is right to object to those call sites, so the intent is stated
-    here once rather than as a suppression at each of them (#116).
+    here once rather than as a suppression at each of them.
     """
     return value
 
@@ -36,7 +36,7 @@ def require_index(store: sc.Catalog) -> LanceIndex:
     reaches for it has already built one. Narrowing here rather than with an
     `assert` at each of the call sites keeps the reason in one place — and
     gives a failure that names the cause instead of an `AttributeError` on
-    `None` (#116).
+    `None`.
     """
     index = store._lance
     assert index is not None, "store has no search index — call build_index() first"
@@ -137,8 +137,8 @@ def _stat_ds(
 
 #: Declared as `sc.Dataset`, the union of the concrete kinds, because that is
 #: what `put()` accepts. `list[sc.BaseDataset]` was wrong the moment the
-#: signature narrowed (!82): every object here is concrete, but the
-#: annotation promised a base class `put()` does not take (#116).
+#: signature narrowed: every object here is concrete, but the
+#: annotation promised a base class `put()` does not take.
 FIXTURE_DATASETS: list[sc.Dataset] = [
     _stat_ds(
         "EXR",
@@ -223,7 +223,7 @@ def indexed_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.Catal
     Separate from `store` because `search()` needs somewhere to put
     ``search/``; an in-memory catalog has nowhere. That is why the search
     tests were skipped rather than failing — removing the marker alone would
-    not have made them pass (#117).
+    not have made them pass.
 
     Module-scoped: `build_index` is the expensive part, and the tests only
     read.

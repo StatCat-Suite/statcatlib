@@ -125,7 +125,7 @@ class TestCollectCodeTexts:
         assert any("Géographie" in t for t in fr_texts)
 
     def test_structured_columns_populated(self) -> None:
-        """Code rows must carry dimension_id/code_id alongside the labels (#83)."""
+        """Code rows must carry dimension_id/code_id alongside the labels."""
         store = _build_store_with_sdmx()
         items = store._collect_code_texts()
         canada = next(r for r in items if r["lang"] == "en" and r["code_label"] == "Canada")
@@ -172,7 +172,7 @@ class TestBuildIndexWithCodes:
 
 
 class TestCodesScope:
-    """Tests for cat.codes.find() (#83 / #95)."""
+    """Tests for cat.codes.find()."""
 
     def test_find_locates_label(self, tmp_path: pathlib.Path) -> None:
         store = Catalog(tmp_path / "catalog").open()
@@ -222,7 +222,7 @@ class TestCodesScope:
         assert any(h.payload.code_label == "Canada" for h in scoped)
 
     def test_find_returns_empty_without_index(self, tmp_path: pathlib.Path) -> None:
-        """Without a built index, codes.find degrades gracefully (#77)."""
+        """Without a built index, codes.find degrades gracefully."""
         store = Catalog(tmp_path / "catalog").open()
         ingest_sdmx(store, _make_registry())
         store._lance = None
@@ -240,7 +240,7 @@ class TestCodesScope:
 
 
 class TestEmbedCodes:
-    """Tests for the embed_codes flag (#84)."""
+    """Tests for the embed_codes flag."""
 
     def _stub_model(self):
         import math
