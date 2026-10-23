@@ -325,6 +325,12 @@ each language's stemmer and row count, surfaced as `Catalog.index_layout`
 — the thing to check after a build, and populated for BM25-only catalogs,
 which write no `embeddings.json` at all.
 
+`index.json` records `lance._MANIFEST_VERSION`. Bump it only when an existing
+field changes meaning or shape; a new field does not bump it. `Catalog.open()`
+refuses a manifest version above this build's with `IncompatibleCatalogError`
+(`_refuse_unreadable_index`, GH-40). That refusal is stricter than GH-3's
+warn-and-serve rule, which covers stale indexes in a format this build reads.
+
 Indexes built before pinaxlib v5.23.0 (a single `search` table, everything stemmed
 as English) are still served, with a warning, until `build_index()`
 rebuilds them. The reverse does not hold: **pinaxlib older than v5.23.0

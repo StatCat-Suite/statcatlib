@@ -181,7 +181,21 @@ reports each one (§6).
 
 Version 1 stored each language's table name as a bare string where version 2
 stores a `LanguageLayout`, and statcatlib still reads both. A reader reads
-the fields it knows and ignores the rest. **A statcatlib older than pinaxlib
+the fields it knows and ignores the rest.
+
+A writer bumps `version` only when an existing field changes meaning or
+shape, as version 2 did to each `languages` entry. A new field leaves
+`version` as it is, because readers ignore fields they do not know. A reader
+therefore MUST refuse a manifest whose `version` is above the newest it
+reads, or that records none, since it would serve that index wrongly.
+statcatlib's `Catalog.open()` raises `IncompatibleCatalogError` before
+running any DDL, naming the version and the statcatlib release in
+`written_by`. This is stricter than a stale index, which statcatlib serves
+with a warning (§5), because a stale index is in a format the reader reads.
+A version bump therefore requires every reader to upgrade before it serves
+an index built at the new version.
+
+**A statcatlib older than pinaxlib
 5.23.0 finds no table named `search` in a newer index and returns zero hits
 without an error**, so a deployment MUST upgrade the library before it serves
 a bundle built with a newer one.
@@ -320,6 +334,8 @@ and otherwise reports every finding:
 | datasets | `statcat.dataset` holds the section's `datasets` | continues |
 | dataflow links | every `sdmx_dataflow_urn` names a stored dataflow | continues, one finding per dataset |
 | search present | `search/` holds an index exactly when the section declares one, and `index.json` exists | continues |
+| index version | `index.json` records a version this build reads (§4.1) | skips the search rows below |
+| declared version | the section's `index_version` is the version `index.json` records | continues |
 | languages | the index has exactly the declared languages | continues, one finding per language |
 | stemmers | each language's table uses the declared stemmer | continues |
 | rows | each language's table holds the declared rows | continues |

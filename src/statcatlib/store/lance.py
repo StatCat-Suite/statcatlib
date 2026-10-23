@@ -67,6 +67,12 @@ _TABLE_PREFIX = "search_"
 #: generation. A crash therefore leaves the old index whole and serving,
 #: with the half-built tables merely orphaned.
 _MANIFEST_FILE = "index.json"
+#: The newest manifest version this build reads; it reads every version from
+#: 1 up to this one. Bump it only when an existing field changes meaning or
+#: shape, as version 2 did to each ``languages`` entry. A new field does not
+#: bump it, because older readers ignore fields they do not know. A reader
+#: meeting a higher version refuses the catalog (GH-40), so a bump means
+#: every reader must upgrade before it serves an index built at it.
 _MANIFEST_VERSION = 2
 
 #: Rows *carrying a vector* that a language's table needs before an ANN
@@ -177,6 +183,15 @@ def _as_layout(entry: object) -> LanguageLayout | None:
         "ann": _as_opt_str(entry.get("ann")),
         "stemmer": _as_opt_str(entry.get("stemmer")),
     }
+
+
+def _load_manifest(path: Path) -> dict[str, object] | None:
+    """Parse ``index.json`` in *path*, or ``None`` when it is absent or corrupt."""
+    try:
+        data = json.loads((path / _MANIFEST_FILE).read_text())
+    except OSError, ValueError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _statcatlib_version() -> str:
@@ -1012,11 +1027,13 @@ class LanceIndex:
         self._langs: dict[str, _LanguageIndex] = {}
         self._legacy: lancedb.table.Table | None = None
         self._generation = 0
+        self._version: int | None = None
         self._annotations: IndexAnnotations | None = None
 
         names = set(self._db.list_tables().tables)
         manifest = self._read_manifest()
         if manifest is not None:
+            self._version = _as_int(manifest.get("version")) or None
             self._generation = _as_int(manifest.get("generation"))
             self._annotations = _as_annotations(manifest.get("annotations"))
             languages = manifest.get("languages")
@@ -1082,6 +1099,36 @@ class LanceIndex:
 
     # -- manifest ------------------------------------------------------
 
+    @staticmethod
+    def unreadable_version(path: str | Path) -> str | None:
+        """Describe the manifest at *path* when this build cannot read its version.
+
+        Reads only ``index.json``, so it needs no lancedb and opens no table.
+        An absent or corrupt manifest passes, as it does in `_read_manifest`.
+
+        Args:
+            path: The ``search/`` directory.
+
+        Returns:
+            ``None`` when the manifest records a version from 1 to
+            `_MANIFEST_VERSION`, or there is no readable manifest; otherwise
+            the version it records and the statcatlib that wrote it.
+        """
+        manifest = _load_manifest(Path(path))
+        if manifest is None:
+            return None
+        version = manifest.get("version")
+        if isinstance(version, int) and not isinstance(version, bool) and 1 <= version <= _MANIFEST_VERSION:
+            return None
+        recorded = f"version {version}" if version is not None else "no version"
+        written_by = manifest.get("written_by")
+        return f"{_MANIFEST_FILE} records {recorded}, written by statcatlib {written_by or 'unknown'}"
+
+    @property
+    def version(self) -> int | None:
+        """The manifest version ``index.json`` records; ``None`` without a manifest."""
+        return self._version
+
     def _read_manifest(self) -> dict[str, object] | None:
         """Return the parsed manifest, or ``None`` when absent or corrupt.
 
@@ -1089,11 +1136,7 @@ class LanceIndex:
         as an error: the tables are still on disk, and refusing to open
         would strand a catalog over a file the next rebuild rewrites.
         """
-        try:
-            data = json.loads((self._path / _MANIFEST_FILE).read_text())
-        except OSError, ValueError:
-            return None
-        return data if isinstance(data, dict) else None
+        return _load_manifest(self._path)
 
     def _write_manifest(self, indexes: dict[str, _LanguageIndex], generation: int) -> None:
         """Atomically point the index at *indexes*.
@@ -1109,13 +1152,12 @@ class LanceIndex:
         ``embeddings.json`` at all.
         """
         payload: _Manifest = {
-            # A reader meeting a manifest version above its own knows the
-            # index was written by a newer statcatlib and can say so. It does
-            # not help statcatlib older than the manifest itself — those look
-            # for a table named "search", find none, and return no hits
-            # silently — which is why deploying the library ahead of any
-            # bundle built with it is a hard ordering constraint, not a
-            # preference.
+            # A reader meeting a manifest version above its own refuses the
+            # catalog (`unreadable_version`, GH-40). A statcatlib older than
+            # the manifest itself cannot: it looks for a table named
+            # "search", finds none, and returns no hits silently. Deploying
+            # the library ahead of any bundle built with it is therefore a
+            # hard ordering constraint.
             "version": _MANIFEST_VERSION,
             "written_by": _statcatlib_version(),
             "generation": generation,

@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from statcatlib.store.lance import (
         Bm25HitRow,
         IndexAnnotations,
-        LanceIndex,
         LanguageLayout,
         SearchRow,
         VectorHitRow,
@@ -62,6 +61,7 @@ from statcatlib.query import (
     PositionalFilter,
 )
 from statcatlib.store import schema as _catalog_schema
+from statcatlib.store.lance import LanceIndex
 from statcatlib.store.row import Row
 from statcatlib.store.scopes import (
     CodelistScope,
@@ -151,12 +151,13 @@ class IncompatibleIndexError(ValueError):
 
 
 class IncompatibleCatalogError(RuntimeError):
-    """Raised on open when the catalog was stored at another schema version.
+    """Raised on open when the catalog was stored at a version this build does not read.
 
-    Two cases. The ``statcat`` schema was written by a statcatlib with another
-    `schema.SCHEMA_VERSION` (`_refuse_statcat_schema_mismatch`), or the
+    Three cases. The ``statcat`` schema was written by a statcatlib with
+    another `schema.SCHEMA_VERSION` (`_refuse_statcat_schema_mismatch`); the
     ``sdmx`` schema by an sdmxlib with another store schema
-    (`_refuse_sdmx_schema_rebuild`).
+    (`_refuse_sdmx_schema_rebuild`); or ``search/index.json`` by a statcatlib
+    with a newer manifest version (`_refuse_unreadable_index`).
 
     sdmxlib treats its store as a cache: on a schema-version mismatch,
     `LocalRegistry` drops the ``sdmx`` schema and rebuilds it empty. Here
@@ -209,6 +210,32 @@ def _refuse_statcat_schema_mismatch(conn: duckdb.DuckDBPyConnection) -> None:
         f"this catalog's statcat schema is version {stored}, and this build of "
         f"statcatlib uses version {_catalog_schema.SCHEMA_VERSION}. Rebuild the catalog from its "
         f"sources with this version, or open it with the statcatlib release that built it."
+    )
+    raise IncompatibleCatalogError(msg)
+
+
+def _refuse_unreadable_index(search_dir: Path) -> None:
+    """Refuse to open a catalog whose search index has a manifest version this build does not read.
+
+    A manifest version is bumped only when an existing field changes meaning,
+    so this build would serve such an index wrongly. Refusing is stricter
+    than the warning a stale index gets (GH-3): a stale index is in a format
+    this build reads, so its results are only out of date (GH-40).
+
+    Args:
+        search_dir: The catalog's ``search/`` directory, which may not exist.
+
+    Raises:
+        IncompatibleCatalogError: ``index.json`` records a version above
+            ``lance._MANIFEST_VERSION``, or none.
+    """
+    found = LanceIndex.unreadable_version(search_dir)
+    if found is None:
+        return
+    msg = (
+        f"this catalog's search index cannot be read by this build of statcatlib: {found}. "
+        f"Open the catalog with that statcatlib release or a later one, or delete {search_dir} "
+        "and rebuild it with build_index()."
     )
     raise IncompatibleCatalogError(msg)
 
@@ -2835,7 +2862,8 @@ class Catalog:
                 ...
 
         Raises `IncompatibleCatalogError` when the catalog's ``statcat``
-        schema is another version than this statcatlib's, or its SDMX
+        schema is another version than this statcatlib's, its search index
+        records a manifest version this statcatlib does not read, or its SDMX
         structure was stored by an sdmxlib with another store schema, which
         this one would drop on open. The connection is closed again first.
 
@@ -2907,17 +2935,20 @@ class Catalog:
         return self
 
     def _refuse_schema_mismatch(self, conn: duckdb.DuckDBPyConnection) -> None:
-        """Run `_refuse_statcat_schema_mismatch` on the connection `open` just made.
+        """Run `_refuse_statcat_schema_mismatch` and `_refuse_unreadable_index` before `open` runs DDL.
 
         Args:
-            conn: That connection, which this catalog owns.
+            conn: The connection `open` just made, which this catalog owns.
 
         Raises:
             IncompatibleCatalogError: The ``statcat`` schema is another
-                version. *conn* is closed first, as `_open_registry` does.
+                version, or the search index one this build does not read.
+                *conn* is closed first, as `_open_registry` does.
         """
         try:
             _refuse_statcat_schema_mismatch(conn)
+            if self._bundle_dir is not None:
+                _refuse_unreadable_index(self._bundle_dir / "search")
         except IncompatibleCatalogError:
             conn.close()
             self._conn = None

@@ -774,7 +774,14 @@ def _check_search(root: Path, declared: object) -> Iterator[Finding]:
     except ImportError:
         yield Finding(STATCAT_SECTION, _SEARCH_DIRNAME, "cannot check the search index without statcatlib[search]")
         return
+    if (found := LanceIndex.unreadable_version(search_dir)) is not None:
+        detail = f"{found}, which this build does not read: check it with that release, or rebuild with build_index()"
+        yield Finding(STATCAT_SECTION, f"{_SEARCH_DIRNAME}/{_INDEX_MANIFEST}", detail)
+        return
     index = LanceIndex(search_dir)
+    if (declared_version := declared.get("index_version")) != index.version:
+        detail = f"the manifest declares index_version {declared_version}, {_INDEX_MANIFEST} records {index.version}"
+        yield Finding(STATCAT_SECTION, MANIFEST_NAME, detail)
     layout = index.describe()
     for lang in sorted(set(languages) | set(layout)):
         yield from _check_language(index, lang, layout.get(lang), languages.get(lang))
@@ -810,9 +817,11 @@ def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Fi
       build reads;
     - the catalog holds the datasets the section counts, and every dataset
       linked to a dataflow names one the registry holds;
-    - ``search/`` is present exactly when the section declares an index,
-      with the declared languages, each stemmed as declared and holding the
-      declared rows, and no table that ``index.json`` does not name;
+    - ``search/`` is present exactly when the section declares an index;
+      ``index.json`` records a version this build reads, the one the section
+      declares; the index has the declared languages, each stemmed as
+      declared and holding the declared rows, and no table that
+      ``index.json`` does not name;
     - the store's annotations of the types the index read are the ones it was
       built from, so an overlay folded in since shows up as a stale index.
 
