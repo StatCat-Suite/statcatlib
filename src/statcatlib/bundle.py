@@ -64,7 +64,7 @@ from sdmxlib.bundle import (
 from sdmxlib.bundle import check_bundle as sdmx_check_bundle
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator
+    from collections.abc import Callable, Generator, Iterator
 
     from sdmxlib import LocalRegistry
 
@@ -736,10 +736,12 @@ def _check_catalog_rows(conn: duckdb.DuckDBPyConnection, section: Mapping[str, o
         yield Finding(STATCAT_SECTION, identifier, f"links {urn}, which the registry does not hold")
 
 
-def _check_index_annotations(conn: duckdb.DuckDBPyConnection, declared: object) -> Iterator[Finding]:
+def _check_index_annotations(
+    conn: duckdb.DuckDBPyConnection,
+    declared: object,
+    annotation_fingerprint: Callable[[duckdb.DuckDBPyConnection, list[str]], str],
+) -> Iterator[Finding]:
     """The store holds the annotations the index was built from: no overlay folded in since."""
-    from statcatlib.store.store import annotation_fingerprint  # noqa: PLC0415
-
     subject = f"{_SEARCH_DIRNAME} annotations"
     if not isinstance(declared, Mapping) or not isinstance(types := declared.get("types"), list):
         yield Finding(
@@ -803,8 +805,9 @@ def _check_language(index: LanceIndex, lang: str, found: LanguageLayout | None, 
 def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Finding]:
     """The ``statcat`` check `check_bundle` adds to sdmxlib's.
 
-    - the ``statcat`` schema is in ``meta.duckdb``, and the manifest has a
-      ``statcat`` section in a format this build reads;
+    - the ``statcat`` schema is in ``meta.duckdb`` at the version this build
+      reads, and the manifest has a ``statcat`` section in a format this
+      build reads;
     - the catalog holds the datasets the section counts, and every dataset
       linked to a dataflow names one the registry holds;
     - ``search/`` is present exactly when the section declares an index,
@@ -821,12 +824,17 @@ def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Fi
     Returns:
         Everything found wrong with the catalog's part of the bundle.
     """
+    from statcatlib.store.store import annotation_fingerprint, statcat_schema_mismatch  # noqa: PLC0415
+
     conn = reg.connection
     has_schema = conn.execute(
         """SELECT count(*) FROM information_schema.tables WHERE table_schema = 'statcat' AND table_name = 'dataset'"""
     ).fetchone()
     if not has_schema or not has_schema[0]:
         return [Finding(STATCAT_SECTION, "meta.duckdb", "no statcat schema: not a statcat catalog")]
+    if (stored := statcat_schema_mismatch(conn)) is not None:
+        detail = f"statcat schema version {stored}, not the one this build reads: rebuild the catalog"
+        return [Finding(STATCAT_SECTION, "statcat._meta", detail)]
     section = manifest.extensions.get(STATCAT_SECTION)
     if section is None:
         return [Finding(STATCAT_SECTION, MANIFEST_NAME, "no statcat section: publish with statcatlib's publish_bundle")]
@@ -836,7 +844,7 @@ def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Fi
     findings = [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
     search = section.get("search")
     if isinstance(search, Mapping):
-        findings += _check_index_annotations(conn, search.get("annotations"))
+        findings += _check_index_annotations(conn, search.get("annotations"), annotation_fingerprint)
     return findings
 
 

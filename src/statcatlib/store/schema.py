@@ -43,7 +43,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import duckdb
 
-_SCHEMA_VERSION = "2.0"
+#: The ``statcat`` schema this build writes and reads, recorded in ``statcat._meta``.
+#: `Catalog.open` refuses a catalog stamped with another (GH-39), so bumping it means
+#: rebuilding every catalog.
+SCHEMA_VERSION = "2.0"
 
 # ── DDL ────────────────────────────────────────────────────────────────
 
@@ -55,7 +58,6 @@ CREATE TABLE IF NOT EXISTS _meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO _meta VALUES ('schema_version', '2.0');
 
 -- ── Layer 1: Dataset spine ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS dataset (
@@ -363,6 +365,11 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     for raw_stmt in _SCHEMA_DDL.split(";"):
         if clean := raw_stmt.strip():
             cursor.execute(clean)
+    # Stamped once, when the schema is created; a later open never restamps it.
+    cursor.execute(
+        "INSERT OR IGNORE INTO _meta VALUES ('schema_version', $version)",
+        {"version": SCHEMA_VERSION},
+    )
 
     return cursor
 
