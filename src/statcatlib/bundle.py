@@ -45,7 +45,7 @@ from __future__ import annotations
 import errno
 import json
 import shutil
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
@@ -53,7 +53,17 @@ from typing import TYPE_CHECKING, Literal
 
 import duckdb
 from attrs import field, frozen
-from sdmxlib.bundle import MANIFEST_NAME, Finding, Manifest, Producer, Provenance, Report, write_manifest
+from sdmxlib.bundle import (
+    MANIFEST_NAME,
+    Finding,
+    Manifest,
+    Overlay,
+    OverlayEntry,
+    Producer,
+    Provenance,
+    Report,
+    write_manifest,
+)
 from sdmxlib.bundle import check_bundle as sdmx_check_bundle
 
 if TYPE_CHECKING:
@@ -80,6 +90,7 @@ __all__ = [
     "inspect_bundle",
     "normalize_lake_data_path",
     "open_bundle",
+    "overlay_affects_search",
     "publish_bundle",
     "read_current_data_path",
 ]
@@ -596,7 +607,8 @@ def open_bundle(
 STATCAT_SECTION = "statcat"
 
 #: Version of the ``statcat`` section. Bumped when its fields change meaning.
-STATCAT_SECTION_FORMAT = 1
+#: 2 added ``search.annotations``, the annotations the index was built from.
+STATCAT_SECTION_FORMAT = 2
 
 _SEARCH_DIRNAME = "search"
 _INDEX_MANIFEST = "index.json"
@@ -633,6 +645,7 @@ def _search_section(cat: Catalog, search_dir: Path) -> dict[str, object] | None:
         "index_version": index_manifest.get("version"),
         "embedding_model": cat.embedding_model_name,
         "languages": {lang: {"rows": entry["rows"], "stemmer": entry["stemmer"]} for lang, entry in layout.items()},
+        "annotations": cat.index_annotations,
     }
 
 
@@ -728,6 +741,24 @@ def _check_catalog_rows(conn: duckdb.DuckDBPyConnection, section: Mapping[str, o
         yield Finding(STATCAT_SECTION, identifier, f"links {urn}, which the registry does not hold")
 
 
+def _check_index_annotations(conn: duckdb.DuckDBPyConnection, declared: object) -> Iterator[Finding]:
+    """The store holds the annotations the index was built from: no overlay folded in since."""
+    from statcatlib.store.store import annotation_fingerprint  # noqa: PLC0415
+
+    subject = f"{_SEARCH_DIRNAME} annotations"
+    if not isinstance(declared, Mapping) or not isinstance(types := declared.get("types"), list):
+        yield Finding(
+            STATCAT_SECTION, subject, "the index records no annotation fingerprint: rebuild with build_index()"
+        )
+        return
+    if annotation_fingerprint(conn, [str(t) for t in types]) != declared.get("fingerprint"):
+        detail = (
+            f"annotations of type {', '.join(map(str, types))} differ from those the index was built from "
+            "(an overlay folded in?): rebuild with build_index()"
+        )
+        yield Finding(STATCAT_SECTION, subject, detail)
+
+
 def _check_search(root: Path, declared: object) -> Iterator[Finding]:
     """The search index: present exactly when declared, with the declared layout."""
     search_dir = root / _SEARCH_DIRNAME
@@ -780,7 +811,9 @@ def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Fi
       linked to a dataflow names one the registry holds;
     - ``search/`` is present exactly when the section declares an index,
       with the declared languages, each stemmed as declared and holding the
-      declared rows.
+      declared rows;
+    - the store's annotations of the types the index read are the ones it was
+      built from, so an overlay folded in since shows up as a stale index.
 
     Args:
         root: The bundle directory.
@@ -802,7 +835,11 @@ def check_catalog(root: Path, manifest: Manifest, reg: LocalRegistry) -> list[Fi
     if section.get("format") != STATCAT_SECTION_FORMAT:
         detail = f"statcat section format {section.get('format')!r}, this build reads {STATCAT_SECTION_FORMAT}"
         return [Finding(STATCAT_SECTION, MANIFEST_NAME, detail)]
-    return [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
+    findings = [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
+    search = section.get("search")
+    if isinstance(search, Mapping):
+        findings += _check_index_annotations(conn, search.get("annotations"))
+    return findings
 
 
 def check_bundle(path: str | Path, *, references: bool = True) -> Report:
@@ -822,3 +859,28 @@ def check_bundle(path: str | Path, *, references: bool = True) -> Report:
         What was checked and what was found.
     """
     return sdmx_check_bundle(path, references=references, extensions={STATCAT_SECTION: check_catalog})
+
+
+def overlay_affects_search(overlay: Overlay, types: Collection[str] | None = None) -> tuple[OverlayEntry, ...]:
+    """The entries of *overlay* that change what the search index should hold.
+
+    An overlay applied at serve time never reaches statcatlib's index, and one
+    folded into a bundle needs ``build_index()`` before search reflects it.
+    Either way, an entry acting on an annotation type the index reads is a
+    change search will not see on its own. Call this where overlays are
+    loaded, to log or refuse them. Static: it needs no bundle.
+
+    Args:
+        overlay: The overlay document.
+        types: The annotation types the index reads. ``None`` means
+            `SEARCH_ANNOTATION_TYPES`, what `Catalog.build_index` reads by
+            default; pass ``cat.index_annotations["types"]`` for an index
+            built otherwise.
+
+    Returns:
+        Those entries, in document order; empty, and so falsy, when there are none.
+    """
+    from statcatlib.store.store import SEARCH_ANNOTATION_TYPES  # noqa: PLC0415
+
+    wanted = set(SEARCH_ANNOTATION_TYPES if types is None else types)
+    return tuple(entry for entry in overlay.entries if entry.type in wanted)

@@ -26,6 +26,7 @@ from statcatlib.store.store import (
     DatasetsScope,
     EmbeddingMetadata,
     Hit,
+    SEARCH_ANNOTATION_TYPES,
     SEARCH_CONTEXT_ANNOTATION_TYPE,
     SEARCH_EXCLUDE_ANNOTATION_TYPE,
     IncompatibleCatalogError,

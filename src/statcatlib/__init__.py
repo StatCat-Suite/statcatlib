@@ -81,6 +81,7 @@ from statcatlib.store import (
     DimensionsScope,
     EmbeddingMetadata,
     Hit,
+    SEARCH_ANNOTATION_TYPES,
     SEARCH_CONTEXT_ANNOTATION_TYPE,
     SEARCH_EXCLUDE_ANNOTATION_TYPE,
     IncompatibleCatalogError,
@@ -98,6 +99,7 @@ from statcatlib.store import (
 from statcatlib.store.sentinel import NotLoadedError, is_unloaded
 
 __all__ = [
+    "SEARCH_ANNOTATION_TYPES",
     "SEARCH_CONTEXT_ANNOTATION_TYPE",
     "SEARCH_EXCLUDE_ANNOTATION_TYPE",
     "VALID_INCLUDE_RELS",

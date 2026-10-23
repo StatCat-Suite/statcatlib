@@ -267,6 +267,16 @@ directory fails the files check. So nothing on the open or search path may
 write to a bundle — the FTS index is reused as found, never rebuilt by a
 query (GH-3).
 
+**Annotation overlays and search** — `build_index()` reads
+`SEARCH_ANNOTATION_TYPES` (`statcat:searchExclude`, `statcat:searchContext`,
+`skos:altLabel`) and records their `annotation_fingerprint` in
+`search/index.json` (`Catalog.index_annotations`; `statcat` section format
+2). An overlay folded into the store changes the fingerprint: `open()`
+**warns** and `check_bundle` reports a finding, until `build_index()` is run.
+Never rebuild automatically and never make the open fail — a decision
+recorded on GH-3. Serve-time overlays are flagged statically by
+`overlay_affects_search`.
+
 statcatlib creates its own tables via `store/schema.py:create_schema(conn)` which
 creates the `statcat` schema and returns a cursor with
 `search_path='statcat'`. sdmxlib's `LocalRegistry` (reachable as `cat.registry`)

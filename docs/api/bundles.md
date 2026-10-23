@@ -162,17 +162,18 @@ The `statcat` section records:
 
 | Field                | Meaning                                                              |
 |:---------------------|:---------------------------------------------------------------------|
-| `format`             | The section's own version, `1`.                                      |
+| `format`             | The section's own version, `2`.                                      |
 | `statcatlib_version` | The statcatlib that published it.                                    |
 | `datasets`           | Rows in `statcat.dataset`.                                           |
-| `search`             | `null` when no index is built; else its `index_version`, `embedding_model`, and each language's `rows` and `stemmer`. |
+| `search`             | `null` when no index is built; else its `index_version`, `embedding_model`, each language's `rows` and `stemmer`, and `annotations`: the annotation `types` the index read and their `fingerprint`. |
 
 `check_bundle` runs sdmxlib's checks (manifest, files, lake, bindings,
 structural references) and then the `statcat` check: the schema is there,
 the dataset count matches, every `sdmx_dataflow_urn` names a stored
 dataflow, and `search/` is present exactly when declared, each language
-stemmed as declared and holding the declared rows. `references=False`
-skips the structural check, the costly one.
+stemmed as declared and holding the declared rows, and the store's
+annotations of the index's types matching its fingerprint.
+`references=False` skips the structural check, the costly one.
 
 !!! warning "Publish after `build_index()`, check before `rebind`"
 
@@ -182,6 +183,41 @@ skips the structural check, the costly one.
     change `lake.ducklake`). Run the check where a bundle is built or
     received, before deploy-time rebinding, and never on the serving path.
     Opening and searching a bundle, read-only or not, changes nothing.
+
+### Annotation overlays and search
+
+`build_index()` reads three annotation types: `statcat:searchExclude`
+keeps a code out of search, `statcat:searchContext` adds context to its
+text, and `skos:altLabel` adds synonyms (`sc.SEARCH_ANNOTATION_TYPES`).
+An annotation overlay touching one of them changes what the index should
+hold, and **nothing rebuilds the index for you**. A rebuild is always an
+explicit `build_index()`, never something an open does in a pod.
+
+- **Folded overlays** (`sdmxlib.bundle.fold_overlays`) are detected. The
+  index records a fingerprint of the annotations it was built from, so
+  until `build_index()` and `publish_bundle` are run again, every
+  `Catalog.open()` **warns** and `check_bundle` reports a finding. The
+  open warns rather than fails: a stale index should not take structure
+  queries and observations down with it. Turn the warning into an error
+  with `warnings.filterwarnings` if you want it strict.
+- **Serve-time overlays** (`apply_overlays` in sdmxlib-rest) never reach
+  the bundle, so search does not see them. `overlay_affects_search(overlay)`
+  returns the entries that would need a rebuild to reach search; call it
+  where overlays are loaded, to log or refuse them.
+
+```python
+from sdmxlib.bundle import read_overlay
+
+from statcatlib.bundle import overlay_affects_search
+
+if entries := overlay_affects_search(read_overlay("overlays/geo.json")):
+    raise SystemExit(f"{len(entries)} entries change search: fold them and run build_index()")
+```
+
+Overlays of any other type (display hints, layouts, default selections)
+leave search alone and need no rebuild.
+
+### Synthetic bundles
 
 `statcatlib.testing.synthetic_catalog(path, shape, seed=)` builds a
 published bundle of any shape from `sdmxlib.testing.Shape`: very large
