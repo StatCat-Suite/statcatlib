@@ -211,6 +211,9 @@ store.search(
 ) -> SearchResult[Hit[Any]]
 ```
 
+[How search works](../search.md) explains what is indexed, the
+per-language tables, BM25, vectors and fusion.
+
 BM25 full-text search across every indexed entity kind, RRF-merged.
 Results are relevance-ranked. Not type-generic — use `query(...).search(text)`
 to narrow by dataset kind.
