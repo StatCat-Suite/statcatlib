@@ -4,7 +4,7 @@ Scopes represent positions in the catalog graph.  Navigation builds new
 scopes without executing SQL; only terminal methods (``.collect()``,
 ``.count()``) hit the database.
 
-Usage::
+Usage:
 
     store.themes["https://example.com/themes"].collect()  # ItemList[ConceptRef]
     store.themes["https://example.com/themes"]["13"].collect()  # Concept
@@ -1132,8 +1132,16 @@ class DatasetScope:
 
         Supported edges: ``"codelist"``.
 
-        Example::
+        Args:
+            edge: The kind of entity the datasets share.
 
+        Returns:
+            A query over the datasets linked to this one through *edge*.
+
+        Raises:
+            ValueError: *edge* is not a supported edge type.
+
+        Example:
             store.dataset("id").related("codelist").include("publisher").limit(10).collect()
         """
         from statcatlib.model.dataset import BaseDataset  # noqa: PLC0415
@@ -1164,8 +1172,14 @@ class DatasetScope:
 
         Gremlin equivalent: ``g.V(id).repeat(in('derivedFrom')).times(depth)``
 
-        Example::
+        Args:
+            relationship: Follow only lineage edges of this relationship; all of them when ``None``.
+            depth: How many lineage hops to follow.
 
+        Returns:
+            A query over this dataset's ancestors, to *depth* hops.
+
+        Example:
             store.dataset("id").upstream(depth=3).include("publisher").collect()
         """
         from statcatlib.model.dataset import BaseDataset  # noqa: PLC0415
@@ -1208,8 +1222,14 @@ class DatasetScope:
 
         Gremlin equivalent: ``g.V(id).repeat(out('derivedFrom')).times(depth)``
 
-        Example::
+        Args:
+            relationship: Follow only lineage edges of this relationship; all of them when ``None``.
+            depth: How many lineage hops to follow.
 
+        Returns:
+            A query over this dataset's descendants, to *depth* hops.
+
+        Example:
             store.dataset("id").downstream().include("publisher").collect()
         """
         from statcatlib.model.dataset import BaseDataset  # noqa: PLC0415

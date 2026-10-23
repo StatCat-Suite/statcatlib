@@ -18,8 +18,10 @@ _cache: dict[str, _UnloadedType] = {}
 class NotLoadedError(AttributeError):
     """Raised when accessing a relationship that was not loaded in this query.
 
-    Example::
+    Args:
+        field: The relationship that was not loaded, as `include` names it.
 
+    Example:
         ds = store.query(BaseDataset).include("publisher").first()
         ds.themes  # NotLoadedError: 'themes' was not loaded.
         #   Add 'themes' to .include() or call .full().

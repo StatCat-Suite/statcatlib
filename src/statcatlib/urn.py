@@ -48,8 +48,15 @@ def _build(package: str, artefact_class: str, agency: str, artefact_id: str, ver
 def codelist(agency: str, id: str, version: str = "1.0") -> str:  # noqa: A002
     """Build a codelist URN string.
 
-    Example::
+    Args:
+        agency: The maintenance agency's id.
+        id: The codelist's id.
+        version: Its version.
 
+    Returns:
+        The URN, as SDMX spells it.
+
+    Example:
         sc.urn.codelist("SDMX", "CL_GEO", "1.0")
         # → "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=SDMX:CL_GEO(1.0)"
     """
@@ -59,8 +66,15 @@ def codelist(agency: str, id: str, version: str = "1.0") -> str:  # noqa: A002
 def dataflow(agency: str, id: str, version: str = "1.0") -> str:  # noqa: A002
     """Build a dataflow URN string.
 
-    Example::
+    Args:
+        agency: The maintenance agency's id.
+        id: The dataflow's id.
+        version: Its version.
 
+    Returns:
+        The URN, as SDMX spells it.
+
+    Example:
         sc.urn.dataflow("ESTAT", "NAMA_10_GDP", "1.0")
         # → "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=ESTAT:NAMA_10_GDP(1.0)"
     """
@@ -70,8 +84,15 @@ def dataflow(agency: str, id: str, version: str = "1.0") -> str:  # noqa: A002
 def data_structure(agency: str, id: str, version: str = "1.0") -> str:  # noqa: A002
     """Build a data structure definition URN string.
 
-    Example::
+    Args:
+        agency: The maintenance agency's id.
+        id: The data structure definition's id.
+        version: Its version.
 
+    Returns:
+        The URN, as SDMX spells it.
+
+    Example:
         sc.urn.data_structure("ESTAT", "DSD_NAMA_10_GDP", "1.0")
         # → "urn:sdmx:org.sdmx.infomodel.datastructure.DataStructure=ESTAT:DSD_NAMA_10_GDP(1.0)"
     """
@@ -81,8 +102,15 @@ def data_structure(agency: str, id: str, version: str = "1.0") -> str:  # noqa: 
 def concept_scheme(agency: str, id: str, version: str = "1.0") -> str:  # noqa: A002
     """Build a concept scheme URN string.
 
-    Example::
+    Args:
+        agency: The maintenance agency's id.
+        id: The concept scheme's id.
+        version: Its version.
 
+    Returns:
+        The URN, as SDMX spells it.
+
+    Example:
         sc.urn.concept_scheme("SDMX", "CS_FREQ", "1.0")
         # → "urn:sdmx:org.sdmx.infomodel.conceptscheme.ConceptScheme=SDMX:CS_FREQ(1.0)"
     """
@@ -92,17 +120,18 @@ def concept_scheme(agency: str, id: str, version: str = "1.0") -> str:  # noqa: 
 def parse(urn: str) -> SdmxUrn[object]:
     """Parse a URN string into its components.
 
-    Returns an ``SdmxUrn`` object with ``.agency``, ``.id``, ``.version``,
-    ``.package``, and ``.artefact_class`` attributes.
+    Args:
+        urn: An SDMX URN string. One that is not valid raises `ValueError`.
 
-    Example::
+    Returns:
+        The parsed URN, with ``.agency``, ``.id``, ``.version``, ``.package``
+        and ``.artefact_class``.
 
+    Example:
         parsed = sc.urn.parse("urn:sdmx:org.sdmx.infomodel.codelist.Codelist=SDMX:CL_GEO(1.0)")
         parsed.agency  # "SDMX"
         parsed.id  # "CL_GEO"
         parsed.version  # "1.0"
         str(parsed)  # round-trips to original URN string
-
-    Raises ``ValueError`` if the string is not a valid SDMX URN.
     """
     return SdmxUrn.parse(urn)
