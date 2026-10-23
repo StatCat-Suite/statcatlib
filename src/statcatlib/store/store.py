@@ -1834,6 +1834,7 @@ class QueryBuilder[T]:
         "_offset",
         "_scalar_col",
         "_search_fuzziness",
+        "_search_lang",
         "_search_operator",
         "_select_cols",
         "_select_lang",
@@ -1855,6 +1856,7 @@ class QueryBuilder[T]:
         hybrid_text: str | None = None,
         search_operator: str = "or",
         search_fuzziness: int = 0,
+        search_lang: str = "en",
         sort_fields: list[_SortSpec] | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -1874,6 +1876,7 @@ class QueryBuilder[T]:
         self._hybrid_text = hybrid_text
         self._search_operator = search_operator
         self._search_fuzziness = search_fuzziness
+        self._search_lang = search_lang
         self._sort_fields = sort_fields or []
         self._limit = limit
         self._offset = offset
@@ -1900,6 +1903,7 @@ class QueryBuilder[T]:
             "hybrid_text": self._hybrid_text,
             "search_operator": self._search_operator,
             "search_fuzziness": self._search_fuzziness,
+            "search_lang": self._search_lang,
             "sort_fields": list(self._sort_fields),
             "limit": self._limit,
             "offset": self._offset,
@@ -1930,12 +1934,15 @@ class QueryBuilder[T]:
         """Restrict results to a pre-computed list of identifiers."""
         return self._clone(from_ids=ids)
 
-    def search(self, text: str, *, operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]:
+    def search(self, text: str, *, lang: str = "en", operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]:
         """Add full-text search. Requires LanceDB.
 
         Args:
-            text: The search text. Tokenised and stemmed with the index
-                language's rules before matching.
+            text: The search text. Tokenised and stemmed with *lang*'s rules
+                before matching.
+            lang: The language whose search table answers the query. Each
+                language has its own table, so a French query needs
+                ``lang="fr"``. A language with no table matches nothing.
             operator: How to join multi-term queries: ``"or"`` (default) matches any term; ``"and"``
                 requires all terms.
             fuzzy: Levenshtein edit distance for fuzzy matching: ``0`` (default, exact match), ``1``, or
@@ -1945,11 +1952,20 @@ class QueryBuilder[T]:
             A new `QueryBuilder` with the search text applied. The original is
             unchanged — builders are immutable.
         """
-        return self._clone(text=text, search_operator=operator, search_fuzziness=fuzzy)
+        return self._clone(text=text, search_lang=lang, search_operator=operator, search_fuzziness=fuzzy)
 
-    def hybrid_search(self, text: str) -> QueryBuilder[T]:
-        """Add hybrid BM25 + semantic search. Requires LanceDB."""
-        return self._clone(hybrid_text=text)
+    def hybrid_search(self, text: str, *, lang: str = "en") -> QueryBuilder[T]:
+        """Add hybrid BM25 + semantic search. Requires LanceDB.
+
+        Args:
+            text: The search text.
+            lang: The language whose search table answers both the BM25 and
+                the vector query, as for `search`.
+
+        Returns:
+            A new `QueryBuilder` with the search text applied.
+        """
+        return self._clone(hybrid_text=text, search_lang=lang)
 
     def sort_by(
         self,
@@ -2107,6 +2123,7 @@ class QueryBuilder[T]:
             self._offset,
             self._facet_fields,
             include_rels=self._include_rels,
+            search_lang=self._search_lang,
         )
 
     def _resolve_search_ids(self) -> list[str] | None:
@@ -2125,6 +2142,7 @@ class QueryBuilder[T]:
             self._sort_fields,
             self._limit,
             self._offset,
+            search_lang=self._search_lang,
         )
 
     def collect(self) -> list[T]:
@@ -2235,6 +2253,7 @@ class QueryBuilder[T]:
             self._offset,
             [],
             include_rels=self._include_rels,
+            search_lang=self._search_lang,
         ).total
 
     def exists(self) -> bool:
@@ -2252,6 +2271,7 @@ class QueryBuilder[T]:
                 [],
                 limit=1,
                 offset=0,
+                search_lang=self._search_lang,
             )
             return len(ranked_ids) > 0
         return self._store._execute_exists(  # noqa: SLF001
@@ -6457,6 +6477,7 @@ class Catalog:
         facet_fields: list[str],
         *,
         include_rels: frozenset[str] | None = None,
+        search_lang: str = "en",
     ) -> SearchResult[T]:
         # Entity types (Agent, DataService, Distribution) use flat-column queries
         if cls in _ENTITY_SPECS:
@@ -6491,6 +6512,7 @@ class Catalog:
                 from_ids=from_ids,
                 operator=search_operator,
                 fuzziness=search_fuzziness,
+                lang=search_lang,
             )
         else:
             qr = self._run_filter_query(
@@ -6596,6 +6618,7 @@ class Catalog:
         from_ids: list[str] | None = None,  # noqa: ARG002
         operator: str = "or",
         fuzziness: int = 0,
+        lang: str = "en",
     ) -> _QueryResult:
         """Execute a search query using LanceDB.
 
@@ -6612,12 +6635,13 @@ class Catalog:
             if self._embedding_model is None:
                 msg = "hybrid_search requires an embedding_model"
                 raise RuntimeError(msg)
-            rrf_scores = self._rrf_rank(text, operator=operator, fuzziness=fuzziness)
+            rrf_scores = self._rrf_rank(text, lang=lang, operator=operator, fuzziness=fuzziness)
             search_ids = sorted(rrf_scores, key=lambda i: rrf_scores[i], reverse=True)
             scores = rrf_scores
         else:
             bm25_hits = self._lance.bm25_search(
                 text,
+                lang=lang,
                 limit=200,
                 operator=operator,
                 fuzziness=fuzziness,
@@ -6667,6 +6691,8 @@ class Catalog:
         sort_fields: list[_SortSpec],
         limit: int | None,
         offset: int,
+        *,
+        search_lang: str = "en",
     ) -> list[str]:
         """Run a search query with relational filters and return ranked IDs."""
         search_text = hybrid_text if hybrid_text is not None else text
@@ -6693,6 +6719,7 @@ class Catalog:
             offset=offset,
             operator=search_operator,
             fuzziness=search_fuzziness,
+            lang=search_lang,
         )
         return qr.rows
 

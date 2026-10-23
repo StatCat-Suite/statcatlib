@@ -15,6 +15,7 @@ import pytest
 from sdmxlib import InternationalString as I18n
 
 import statcatlib as sc
+import statcatlib.query as q
 from statcatlib.store.lance import LanceIndex, SearchRow, _dedupe_by_id, _entity_type_clause, _prepare_query
 from tests.conftest import concept_of, require_index, require_table, search_table
 
@@ -2277,3 +2278,51 @@ class TestAsymmetricPrefixWarnings:
         with sc.Catalog(path, embedding_model=_StubModel()) as reopened:
             assert reopened.document_prefix == ""
             assert reopened.query_prefix == ""
+
+
+class TestQueryBuilderSearchLang:
+    """``QueryBuilder.search`` and ``hybrid_search`` read the table *lang* names (GH-60).
+
+    Each language has its own search table. Before ``lang`` both methods always
+    read the English one, so a French query combined with filters found nothing.
+    The datasets carry French text only, so the English table holds none of them.
+    """
+
+    @staticmethod
+    def _french_store(tmp_path, model=None):
+        store = sc.Catalog(str(tmp_path / "fr"), embedding_model=model).open()
+        for identifier, title, description in [
+            ("chomage-qc", "Taux de chômage au Québec", "Enquête sur la population active"),
+            ("chomage-on", "Taux de chômage en Ontario", "Enquête sur la population active"),
+            ("loyers-qc", "Loyers moyens au Québec", "Enquête sur le logement"),
+        ]:
+            store.put(sc.OpenDataset(identifier=identifier, title=I18n(fr=title), description=I18n(fr=description)))
+        store.build_index()
+        return store
+
+    def test_search_with_a_filter_reads_the_french_table(self, tmp_path):
+        store = self._french_store(tmp_path)
+        query = store.query(sc.BaseDataset).filter(q.title_contains("Québec", lang="fr")).search("chômage", lang="fr")
+        assert [ds.identifier for ds in query.collect()] == ["chomage-qc"]
+        assert query.count() == 1
+        assert query.exists()
+
+    def test_search_defaults_to_the_english_table(self, tmp_path):
+        store = self._french_store(tmp_path)
+        query = store.query(sc.BaseDataset).search("chômage")
+        assert query.collect() == []
+        assert not query.exists()
+
+    def test_hybrid_search_with_a_filter_reads_the_french_table(self, tmp_path, model):
+        store = self._french_store(tmp_path, model)
+        query = store.query(sc.BaseDataset).filter(q.title_contains("Québec", lang="fr"))
+        assert {ds.identifier for ds in query.hybrid_search("chômage", lang="fr").collect()} == {
+            "chomage-qc",
+            "loyers-qc",
+        }
+        assert query.hybrid_search("chômage").collect() == []
+
+    def test_lang_survives_later_chaining(self, tmp_path):
+        store = self._french_store(tmp_path)
+        query = store.query(sc.BaseDataset).search("chômage", lang="fr").sort_by("identifier").limit(5)
+        assert {ds.identifier for ds in query.collect()} == {"chomage-qc", "chomage-on"}
