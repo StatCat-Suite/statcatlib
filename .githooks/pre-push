@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Local CI gate. Hosted CI only builds docs (.github/workflows/docs.yml),
-# so `just ci` runs here instead — lockcheck + lint + format + typecheck + tests.
+# so `just ci` runs here instead: index guard, lint, format, docstrings, the
+# Any ratchet, typecheck, unit and integration tests, and the strict docs build.
 #
 # Install: just hooks-install
 # Bypass:  git push --no-verify   (use sparingly, and say why)

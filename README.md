@@ -5,7 +5,9 @@
 > take that into account before adopting it.
 
 **statcatlib** is a Python library for building, managing, and querying
-statistical metadata catalogs. Formerly published as `statcatlib`.
+statistical metadata catalogs. Formerly published as `pinaxlib`.
+
+**Documentation:** <https://statcat-suite.github.io/statcatlib/>
 
 Inspired by DCAT and the broader landscape of metadata standards (SDMX, DDI),
 statcatlib provides a general-purpose engine for catalog storage, discovery, and

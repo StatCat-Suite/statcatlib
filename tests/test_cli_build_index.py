@@ -21,6 +21,8 @@ from statcatlib.cli import _parse_codelist_policy, _parse_reference_metadata_ble
 
 runner = CliRunner()
 
+pytestmark = pytest.mark.unit
+
 
 class TestParseReferenceMetadataBlend:
     def test_path_only_uses_default_max_chars(self) -> None:
