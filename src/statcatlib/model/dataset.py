@@ -119,7 +119,7 @@ class AggregateDataset(BaseDataset):
     num_series: int | None = None
     # SDMX link: FK into sdmxlib's dataflows.urn in the shared DuckDB
     sdmx_dataflow_urn: str | None = None
-    # Pivot axis dimension for ingest_data(). None = auto-detect from DSD.
+    # Default pivot axis for readers, recorded by ingest_data(). None = the DSD's MeasureDimension.
     measure_dim: str | None = None
 
 

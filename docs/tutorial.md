@@ -125,8 +125,9 @@ filtered by publisher, status, keyword, title, and other metadata fields.
 
 `ingest_sdmx()` writes SDMX structural artifacts (codelists, DSDs, dataflows)
 into the shared DuckDB and creates an `AggregateDataset` catalog record for each
-dataflow. `ingest_data()` then streams the observation data to a wide Parquet file
-and attaches it as a DCAT `Distribution`.
+dataflow. `ingest_data()` then writes the observation data for one dataflow into
+the bundle's DuckLake and binds the table to the dataflow, so it reads back
+through `store.registry.obs(...)`.
 
 ```mermaid
 sequenceDiagram
@@ -135,7 +136,7 @@ sequenceDiagram
     participant ingest_sdmx
     participant ingest_data
     participant DuckDB
-    participant Parquet
+    participant DuckLake
 
     App->>RestRegistry: get(urn, resolve=True)
     RestRegistry->>RestRegistry: fetch Dataflow + DSD + codelists
@@ -143,9 +144,10 @@ sequenceDiagram
     ingest_sdmx->>DuckDB: store.registry.ingest() → writes structural tables
     ingest_sdmx->>DuckDB: store.put([...]) → writes AggregateDataset rows
     App->>ingest_data: ingest_data(store, reg, identifier)
-    ingest_data->>Parquet: pivot_to() → streams SDMX-CSV → wide Parquet
-    ingest_data->>DuckDB: store.put() → adds Distribution to catalog record
+    ingest_data->>DuckLake: reg.obs(flow).frame() → writes the long table
+    ingest_data->>DuckDB: store.registry.add(binding) → binds table to dataflow
     App->>DuckDB: store.query(...)
+    App->>DuckLake: store.registry.obs(flow) → reads observations
 ```
 
 ### Ingest a single dataflow
@@ -199,9 +201,9 @@ Themes passed here are `ConceptRef` pointers. Store the corresponding
 
 ### Ingest observation data
 
-`ingest_data()` streams the actual observation data for one dataflow to a wide
-Parquet file and links it to the catalog record as a DCAT `Distribution`. In
-catalog folder mode, `parquet_dir` is managed automatically:
+`ingest_data()` fetches the observation data for one dataflow and writes it into
+the bundle's DuckLake, one row per observation, under `parquet/`. It needs a
+folder-mode catalog:
 
 ```python
 with sc.Catalog("my_catalog") as store:
@@ -209,20 +211,18 @@ with sc.Catalog("my_catalog") as store:
         reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
         sc.ingest_sdmx(store, reg.registry)
 
-        # Writes my_catalog/parquet/ESTAT/NAMA_10_GDP_1.0.parquet
-        # measure_dim names the dimension whose codes become column headers
+        # Writes the table estat.df_nama_10_gdp_1_0 and returns its name.
+        # measure_dim records the default pivot axis for readers.
         sc.ingest_data(store, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
 ```
 
-`ingest_data()` accepts `(latest)` as the version — it resolves to the highest
-stored version automatically. The call is idempotent: re-running replaces the
-existing Parquet distribution without duplicating it.
+`ingest_data()` accepts `(latest)` as the version and resolves it to the highest
+stored version. Re-running it replaces the table and its binding.
 
 !!! note "Structural vs. observation queries"
-    `ingest_sdmx` is all you need for catalog-level discovery. Filtering by
-    `has_code("geo", "DE")` joins sdmxlib's structural tables — no Parquet
-    required. `ingest_data` is only needed when you want to hand off to Polars
-    for the actual numbers.
+    `ingest_sdmx` is all you need for catalog-level discovery: filtering by
+    `has_code("geo", "DE")` joins sdmxlib's structural tables and reads no
+    observations. Run `ingest_data` when you need the numbers themselves.
 
 ## 4. Ingest from CKAN
 
@@ -593,56 +593,36 @@ for r in rows:
     print(r["source_id"], "→", r["target_id"], r["activity_label"])
 ```
 
-## 13. Observation data with Polars
+## 13. Reading observations
 
-Once `ingest_data()` has run, the Parquet file lives on the dataset as a
-`Distribution`. Find it by media type and hand off to Polars — statcatlib does not
-depend on Polars, so install it separately (any Parquet reader works):
+`ingest_data()` binds its table to the dataflow, so the co-located sdmxlib
+registry reads it back. `store.registry.obs(flow)` returns a lazy query in
+sdmxlib's query language; nothing is read until a terminal such as `.frame()`
+or `.pivot()`:
 
 ```python
-import polars as pl
+import sdmxlib as sl
 
 ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+flow = sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn)
+obs = store.registry.obs(flow)
 
-parquet = next(
-    d for d in ds.distributions if d.media_type == "application/parquet"
-)
-obs = pl.scan_parquet(parquet.download_url)   # lazy — nothing read yet
+# Long layout: one row per observation, a column per dimension and measure
+annual_de = obs.filter(obs.col("freq") == "A", obs.col("geo") == "DE").frame()
+
+# Wide layout: one column per code of the pivot axis ingest_data recorded
+wide = obs.filter(obs.col("geo") == "DE").pivot(on=ds.measure_dim)
 ```
 
-`scan_parquet` is lazy: nothing is read until a terminal operation. Chain Polars
-expressions freely:
-
-```python
-# Annual German GDP in current prices
-annual_de = (
-    obs
-    .filter(pl.col("freq") == "A", pl.col("geo") == "DE")
-    .filter(pl.col("unit") == "CP_MEUR")
-    .select("TIME_PERIOD", "B1GQ")   # B1GQ = GDP at market prices
-    .sort("TIME_PERIOD")
-    .collect()
-)
-
-# Cross-country comparison, latest year per country
-latest_by_country = (
-    obs
-    .filter(pl.col("freq") == "A", pl.col("unit") == "CP_MEUR")
-    .sort("TIME_PERIOD", descending=True)
-    .group_by("geo").first()
-    .select("geo", "TIME_PERIOD", "B1GQ")
-    .sort("B1GQ", descending=True)
-    .collect()
-)
-```
-
-statcatlib handles discovery and never loads observation data into memory.
-Polars, or any Parquet reader, reads the numbers.
+Both terminals return a `polars.DataFrame`, typed from the DSD: codes come back
+as their codelist's `pl.Enum`. Hand the frame to Polars for anything further,
+for example `annual_de.lazy().sort("TIME_PERIOD")`.
 
 ## 14. Persistent catalog workflow
 
-For a catalog that survives restarts, use a folder path. Both the structural
-graph and all distribution links survive close/reopen — no re-ingest needed:
+For a catalog that survives restarts, use a folder path. The structural graph,
+the observation tables and their bindings all survive close and reopen, so no
+re-ingest is needed:
 
 ```python
 # First run — ingest
@@ -652,11 +632,11 @@ with sc.Catalog("my_catalog") as store:
         sc.ingest_sdmx(store, reg.registry)
         sc.ingest_data(store, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
 
-# Subsequent runs — query and read Parquet, no network
+# Subsequent runs — query and read observations, no network
 with sc.Catalog("my_catalog") as store:
     ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
-    parquet = next(d for d in ds.distributions if d.media_type == "application/parquet")
-    obs = pl.scan_parquet(parquet.download_url)
+    obs = store.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
+    wide = obs.pivot(on=ds.measure_dim)
 ```
 
 ## Putting it all together
@@ -664,7 +644,6 @@ with sc.Catalog("my_catalog") as store:
 A complete multi-source catalog:
 
 ```python
-import polars as pl
 import sdmxlib as sl
 import statcatlib as sc
 import statcatlib.query as q

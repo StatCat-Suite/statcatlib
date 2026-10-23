@@ -36,14 +36,14 @@ graph LR
         CL[codes / codelists]
     end
 
-    subgraph Observation["Observation layer — Polars / Parquet"]
+    subgraph Observation["Observation layer — DuckLake tables"]
         OBS[observation data]
     end
 
     DS -->|sdmx_dataflow_urn| DF
     DF -->|dsd_urn| DSD
     DSD -->|codelist_urn| CL
-    DS -->|Distribution / download_url| OBS
+    DF -->|DataflowBinding| OBS
     LN -->|source_id / target_id| DS
 
     style Discovery  stroke:#4a6cf7,stroke-width:2px
@@ -59,9 +59,10 @@ LFS microdata" run here.
 `code`) owned by sdmxlib, ingested into the same DuckDB connection in the `sdmx` schema. Structural
 filters (`has_code`, `has_dimensions`) JOIN directly into these tables.
 
-**Observation layer** — the actual numbers. `ingest_data()` streams SDMX
-observation data to a wide Parquet file and links it to the catalog record as a
-DCAT `Distribution`. Polars reads the file; statcatlib reads no observation values.
+**Observation layer** — the actual numbers. `ingest_data()` writes a dataflow's
+observations to a DuckLake table, one row per observation, and registers an
+sdmxlib `DataflowBinding` for it. `store.registry.obs(flow)` reads them back as a
+Polars frame, long or pivoted.
 
 ## The materialized graph
 
