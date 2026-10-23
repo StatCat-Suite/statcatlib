@@ -1,14 +1,14 @@
 # Domain Model
 
 statcatlib's domain model is a set of Python `attrs` classes aligned with
-DCAT-AP and StatDCAT-AP. All classes use `@define` (mutable). No RDF runtime
-is used — the DCAT-AP and PROV-O vocabularies inform the structure, but the
-representation is plain Python.
+DCAT-AP and StatDCAT-AP. All classes use `@define` (mutable). The DCAT-AP and
+PROV-O vocabularies shape the classes, which are plain Python with no RDF
+runtime.
 
 ## Dataset hierarchy
 
-All datasets inherit from `BaseDataset`. The `kind` field is a string literal
-that discriminates the union:
+All datasets inherit from `BaseDataset`. Each variant's `kind` class variable
+is a string literal that discriminates the union:
 
 ```
 BaseDataset (abstract — do not instantiate directly)
@@ -64,7 +64,6 @@ class BaseDataset:
     identifier: str                                      # REQUIRED — unique key
     title: InternationalString                           # REQUIRED
     description: InternationalString                     # REQUIRED
-    kind: str                                            # discriminator (set by subclass)
 
     publisher: Agent | None = None
     contact_point: ContactPoint | None = None
@@ -94,10 +93,10 @@ class BaseDataset:
 ```
 
 `extras` is string-to-string, not `dict[str, Any]`. It is stored in a
-`MAP(VARCHAR, VARCHAR)` column, so a non-string value cannot be returned as
-what went in — `put()` raises `TypeError` rather than coercing, because
-coercing turned `None` into the string `"None"` and said nothing about it.
-Encode structured values yourself:
+`MAP(VARCHAR, VARCHAR)` column, so a non-string value could not be read back
+as what went in. `put()` raises `TypeError` for one; coercing would store
+`None` as the string `"None"` without a word. Encode structured values
+yourself:
 
 ```python
 ds.extras = {"provenance": json.dumps({"run": 7, "clean": True})}
@@ -115,7 +114,7 @@ manual curation, or any source that doesn't fit a more specific variant.
 ```python
 @define
 class OpenDataset(BaseDataset):
-    kind: Literal["open"] = "open"
+    kind: ClassVar[Literal["open"]] = "open"
 ```
 
 **Example:**
@@ -142,7 +141,7 @@ link to its SDMX structural metadata (DSD, codelists) via `sdmx_dataflow_urn`.
 ```python
 @define
 class AggregateDataset(BaseDataset):
-    kind: Literal["aggregate"] = "aggregate"
+    kind: ClassVar[Literal["aggregate"]] = "aggregate"
     dimension_names: list[InternationalString] = []  # human-readable dimension labels
     num_series: int | None = None                    # total number of series
     sdmx_dataflow_urn: str | None = None            # FK → sdmxlib dataflows.urn
@@ -180,7 +179,7 @@ DDI (Data Documentation Initiative) concepts expressed in DCAT-AP.
 ```python
 @define
 class MicrodataDataset(BaseDataset):
-    kind: Literal["microdata"] = "microdata"
+    kind: ClassVar[Literal["microdata"]] = "microdata"
     variables: list[Variable] = []
     sample_size: int | None = None
     universe: str | None = None
@@ -243,7 +242,7 @@ spatial resolution metadata.
 ```python
 @define
 class GeospatialDataset(BaseDataset):
-    kind: Literal["geospatial"] = "geospatial"
+    kind: ClassVar[Literal["geospatial"]] = "geospatial"
     crs: str | None = None                         # e.g. "EPSG:4326"
     spatial_resolution: str | None = None          # e.g. "1:50000"
     feature_types: list[str] = []                  # e.g. ["province", "census_division"]
@@ -287,7 +286,7 @@ and publication type.
 ```python
 @define
 class PublicationDataset(BaseDataset):
-    kind: Literal["publication"] = "publication"
+    kind: ClassVar[Literal["publication"]] = "publication"
     authors: list[str] = []
     doi: str | None = None
     isbn: str | None = None

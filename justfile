@@ -33,6 +33,13 @@ checkfmt:
 check-docstrings:
     uv run python tools/check_docstrings.py --check
 
+# Fail on the two Writing style rules a pattern can check exactly (GH-28): a
+# Markdown heading that is a question, and a fixed list of colon reveals and
+# hook clauses. The rest of the rules need a reader; see CLAUDE.md.
+[group('dev')]
+check-prose:
+    uv run python tools/check_prose.py --check
+
 # Guard: `Any` in src/ must not grow (#109). ANN401 cannot see inside a
 # generic argument, so this ratchet is what guards `dict[str, Any]`.
 [group('dev')]
@@ -56,7 +63,7 @@ check-indexes:
 
 # index guard + lint + format + docstrings + Any-ratchet + type check
 [group('dev')]
-check: check-indexes lint checkfmt check-docstrings check-any typecheck
+check: check-indexes lint checkfmt check-docstrings check-prose check-any typecheck
 
 # Install the pre-push hook that runs `just ci` (hosted CI only builds docs)
 [group('dev')]

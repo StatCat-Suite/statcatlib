@@ -5,7 +5,7 @@
 > take that into account before adopting it.
 
 **statcatlib** is a Python library for building, managing, and querying
-statistical metadata catalogs. Formerly published as `pinaxlib`.
+statistical metadata catalogs.
 
 **Documentation:** <https://statcat-suite.github.io/statcatlib/>
 
@@ -27,9 +27,9 @@ statcatlib materializes remote catalog and structural metadata into a local
 DuckDB database and exposes a fluent Python API for discovery queries —
 filtering by publisher, theme, dimension, code, free text, or provenance lineage.
 
-**The catalog is a materialized graph.** Rather than federated queries across
-separate REST endpoints, ingest pulls the full structural model into one database.
-SQL JOINs are the graph traversal. No network round-trips at query time.
+**The catalog is a materialized graph.** Ingest pulls the full structural model
+into one database, SQL JOINs are the graph traversal, and a query makes no
+network calls.
 
 ## Installation
 
@@ -51,7 +51,7 @@ import statcatlib as sc
 import statcatlib.query as q
 import sdmxlib as sl
 
-# Creates my_catalog/bundle.duckdb and my_catalog/parquet/
+# Creates my_catalog/ with meta.duckdb, lake.ducklake and parquet/
 with sc.Catalog("my_catalog").open() as store:
     with sl.RestRegistry(sl.Provider.ESTAT) as reg:
         reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
@@ -251,7 +251,7 @@ Use `.include()` to declare exactly which relationships to batch-load — the re
 are set to an `UNLOADED` sentinel:
 
 ```python
-# Only load publisher and themes — 3 queries instead of ~17
+# Load publisher, themes and keywords only: 3 queries instead of ~17
 results = (
     store.query(sc.BaseDataset)
     .filter(status="published")
@@ -261,7 +261,7 @@ results = (
     .all()
 )
 
-# Explicit full hydration — useful to make the cost visible at the call site
+# Explicit full hydration shows the cost at the call site
 results = store.query(sc.BaseDataset).filter(...).full().all()
 
 # get() always loads everything — no include() needed
@@ -381,7 +381,7 @@ just hooks-install
 ```
 
 ```bash
-just ci                # full gate: index guard + lint + format + docstrings + Any ratchet + both type checkers + unit tests + strict docs build
+just ci                # full gate: index guard + lint + format + docstrings + prose + Any ratchet + pyrefly + unit and integration tests + strict docs build
 just test              # unit tests
 just test-integration  # integration tests (no network)
 just test-live         # live tests against real SDMX endpoints

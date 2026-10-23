@@ -5,20 +5,20 @@ It is designed for statistical agencies, open data portals, and research
 institutions working with DCAT-AP, StatDCAT-AP, CKAN, SDMX, and PROV-O
 conventions.
 
-## What problem does it solve?
+## The discovery problem
 
 Statistical agencies and open data portals publish datasets through a mix of
 APIs: SDMX REST endpoints, CKAN portals, institutional REST services. Finding
 the right dataset requires knowing which agency publishes it, what dimensions
 it covers, what geographic codes are available, whether it is current, and
-where it fits in the production chain. This discovery problem is what
-statcatlib solves: it materializes metadata from one or more sources into a
-local database and exposes a rich query API on top of it.
+where it fits in the production chain. statcatlib materializes that metadata
+from one or more sources into a local database and answers these questions
+with queries against it.
 
 ## The three layers
 
-statcatlib is built around a clean separation between discovery, structure, and
-observation data.
+statcatlib keeps discovery, structure and observation data in three separate
+layers.
 
 ```mermaid
 graph LR
@@ -61,7 +61,7 @@ filters (`has_code`, `has_dimensions`) JOIN directly into these tables.
 
 **Observation layer** — the actual numbers. `ingest_data()` streams SDMX
 observation data to a wide Parquet file and links it to the catalog record as a
-DCAT `Distribution`. Polars reads the file; statcatlib stays out of the numbers.
+DCAT `Distribution`. Polars reads the file; statcatlib reads no observation values.
 
 ## The materialized graph
 
@@ -76,8 +76,8 @@ in SQL:
 | Named graph | `kind` column on `dataset` (`open`, `aggregate`, `microdata`, `geospatial`, `publication`) |
 | prov:wasDerivedFrom | `lineage.source_id → lineage.target_id` |
 
-Instead of querying federated endpoints at runtime, statcatlib materializes the
-full graph on ingest. SQL JOINs then traverse it at local speed.
+statcatlib materializes the full graph on ingest, so a query traverses it with
+local SQL JOINs and calls no endpoint.
 
 ## Architecture
 
@@ -93,7 +93,7 @@ graph LR
 
     subgraph sdmxlib
         SLMODEL["model\nDataflow, DataStructure\nCodelist, Code"]
-        SLSTORAGE["storage\ncreate_tables()\ningest_registry()"]
+        SLSTORAGE["LocalRegistry\nsdmx schema\ningest()"]
         SLREST["RestRegistry\nfetch from SDMX REST"]
     end
 
@@ -120,7 +120,6 @@ classDiagram
         +str identifier
         +InternationalString title
         +InternationalString description
-        +str kind
         +Agent publisher
         +list~Concept~ themes
         +Frequency frequency
@@ -294,6 +293,6 @@ Lineage traversal follows PROV-O semantics:
 # All upstream sources, transitively
 store.dataset("gdp-chained-dollars").upstream(depth=5)
 
-# Impact analysis: what depends on this classification?
+# Impact analysis: datasets that depend on this classification
 store.dataset("CL_GEO").downstream(relationship="uses_classification")
 ```

@@ -233,7 +233,7 @@ All filters compose with AND semantics. There is no OR filter — use separate
 queries and merge results in Python when needed.
 
 ```python
-# All three conditions must hold: GEO dimension, frequency quarterly, CSV available
+# Every condition must hold: GEO=DE, GEO and FREQ dimensions, a CSV distribution, ECB, current
 store.query(sc.AggregateDataset).filter(
     q.has_code("geo", "DE"),
     q.has_dimensions(["geo", "freq"]),
