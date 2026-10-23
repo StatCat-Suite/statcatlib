@@ -141,7 +141,7 @@ def test_the_spec_names_the_formats_this_build_writes() -> None:
     assert f"The section format: `{STATCAT_SECTION_FORMAT}` for this page." in text
     assert f"The manifest version: `{lance._MANIFEST_VERSION}` for this page." in text
     assert f"The sidecar version: `{_EMBEDDINGS_META_VERSION}` for this page." in text
-    assert f'`schema_version`, `"{schema._SCHEMA_VERSION}"` for this page' in text
+    assert f'`schema_version`, `"{schema.SCHEMA_VERSION}"` for this page' in text
 
 
 def test_the_spec_names_every_annotation_type_the_index_reads() -> None:

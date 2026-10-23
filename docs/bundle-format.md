@@ -53,8 +53,13 @@ not repeated here.
 `catalog_theme_taxonomy`, `lineage` and `_meta`. Multilingual text is a
 `MAP(VARCHAR, VARCHAR)` from language tag to string.
 
-- `statcat._meta` records `schema_version`, `"2.0"` for this page. statcatlib
-  writes it and does not yet check it on open.
+- `statcat._meta` records `schema_version`, `"2.0"` for this page, written
+  once when the schema is created. A reader MUST refuse a catalog that
+  records another version, or none, before running any DDL on it:
+  `create_schema` adds missing tables and leaves existing ones alone, so an
+  older catalog would otherwise fail later, on the first query that reads a
+  column added since. `Catalog.open()`, `from_connection()` and
+  `publish_bundle` raise `IncompatibleCatalogError`.
 - A dataset whose `sdmx_dataflow_urn` is set MUST name a dataflow the `sdmx`
   schema holds. That column is the only link from the catalog into sdmxlib's
   tables; statcatlib copies no structure.
@@ -303,12 +308,13 @@ shell, prints each finding, and exits 1 if there is any; `--no-references`
 skips sdmxlib's costly `references` check. Run it where a bundle is built or
 received, never on the path that serves it.
 
-The `statcat` check stops at the first of its first three rows that fails,
+The `statcat` check stops at the first of its first four rows that fails,
 and otherwise reports every finding:
 
 | check | passes when | on failure |
 | --- | --- | --- |
 | schema | `meta.duckdb` holds `statcat.dataset` | stops |
+| schema version | `statcat._meta` records the version this build reads (§2) | stops |
 | section | the manifest has a `statcat` section | stops |
 | format | the section's `format` is `2` | stops |
 | datasets | `statcat.dataset` holds the section's `datasets` | continues |

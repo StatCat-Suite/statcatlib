@@ -259,6 +259,11 @@ One DuckDB file, two schema owners:
   sdmxlib refuses too (`sl.StoreSchemaError`, sdmxlib GH-57); the guard
   stays because it runs first and names the catalog, not the cache.
 
+  The `statcat` schema has the same guard (`_refuse_statcat_schema_mismatch`,
+  GH-39): `statcat._meta` records `schema.SCHEMA_VERSION` when the schema is
+  created, and an open refuses any other value before running DDL. Bumping
+  `SCHEMA_VERSION` therefore also means rebuilding every catalog.
+
 **Bundle contract** — sdmxlib owns `bundle.manifest.json`
 (`sdmxlib.bundle`, sdmxlib GH-56): a `token` per publication, which caches
 key on, and a sha256 per file. statcatlib adds a `statcat` extension

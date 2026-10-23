@@ -151,7 +151,12 @@ class IncompatibleIndexError(ValueError):
 
 
 class IncompatibleCatalogError(RuntimeError):
-    """Raised on open when the catalog's ``sdmx`` schema is another sdmxlib's.
+    """Raised on open when the catalog was stored at another schema version.
+
+    Two cases. The ``statcat`` schema was written by a statcatlib with another
+    `schema.SCHEMA_VERSION` (`_refuse_statcat_schema_mismatch`), or the
+    ``sdmx`` schema by an sdmxlib with another store schema
+    (`_refuse_sdmx_schema_rebuild`).
 
     sdmxlib treats its store as a cache: on a schema-version mismatch,
     `LocalRegistry` drops the ``sdmx`` schema and rebuilds it empty. Here
@@ -160,6 +165,52 @@ class IncompatibleCatalogError(RuntimeError):
     every dataset pointing at nothing, and structural queries answering
     empty rather than failing.
     """
+
+
+def statcat_schema_mismatch(conn: duckdb.DuckDBPyConnection) -> str | None:
+    """The ``statcat`` schema version *conn* records, when it is not this build's.
+
+    Args:
+        conn: A connection that may hold a ``statcat`` schema.
+
+    Returns:
+        ``None`` when the schema is at `schema.SCHEMA_VERSION` or absent;
+        otherwise the recorded version, or ``"unrecorded"`` when
+        ``statcat._meta`` holds none.
+    """
+    if not _catalog_schema.schema_exists(conn):
+        return None
+    stored = _catalog_schema.get_schema_version(conn)
+    if stored == _catalog_schema.SCHEMA_VERSION:
+        return None
+    return stored or "unrecorded"
+
+
+def _refuse_statcat_schema_mismatch(conn: duckdb.DuckDBPyConnection) -> None:
+    """Refuse to open a catalog whose ``statcat`` schema is another version.
+
+    Runs before `create_schema`, so an older catalog is refused before any DDL
+    touches it. ``CREATE TABLE IF NOT EXISTS`` would add its missing tables
+    and leave the existing ones as they are, so a column added since would
+    surface as a `duckdb.BinderException` on the first query that reads it. A
+    connection with no ``statcat`` schema yet has nothing to check.
+
+    Args:
+        conn: The catalog's connection, before the schema is created or opened.
+
+    Raises:
+        IncompatibleCatalogError: ``statcat._meta`` records another version,
+            or none.
+    """
+    stored = statcat_schema_mismatch(conn)
+    if stored is None:
+        return
+    msg = (
+        f"this catalog's statcat schema is version {stored}, and this build of "
+        f"statcatlib uses version {_catalog_schema.SCHEMA_VERSION}. Rebuild the catalog from its "
+        f"sources with this version, or open it with the statcatlib release that built it."
+    )
+    raise IncompatibleCatalogError(msg)
 
 
 def _refuse_sdmx_schema_rebuild(conn: duckdb.DuckDBPyConnection) -> None:
@@ -2783,9 +2834,10 @@ class Catalog:
             with Catalog("my_catalog").open() as cat:
                 ...
 
-        Raises `IncompatibleCatalogError` when the catalog's SDMX structure
-        was stored by an sdmxlib with another store schema, which this one
-        would drop on open. The connection is closed again first.
+        Raises `IncompatibleCatalogError` when the catalog's ``statcat``
+        schema is another version than this statcatlib's, or its SDMX
+        structure was stored by an sdmxlib with another store schema, which
+        this one would drop on open. The connection is closed again first.
 
         Returns:
             This catalog, open.
@@ -2800,6 +2852,7 @@ class Catalog:
         if self._embedding_model is not None and self._bundle_dir is None:
             msg = "embedding_model requires a folder-mode catalog (pass a path, not ':memory:')"
             raise ValueError(msg)
+        self._refuse_schema_mismatch(self._conn)
         # Schema setup runs once on the shared connection; the returned
         # cursor is discarded because each thread builds its own via the
         # ``_c`` property (DDL persists on the connection itself).
@@ -2852,6 +2905,23 @@ class Catalog:
                     if not self._query_prefix:
                         self._query_prefix = meta.query_prefix
         return self
+
+    def _refuse_schema_mismatch(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """Run `_refuse_statcat_schema_mismatch` on the connection `open` just made.
+
+        Args:
+            conn: That connection, which this catalog owns.
+
+        Raises:
+            IncompatibleCatalogError: The ``statcat`` schema is another
+                version. *conn* is closed first, as `_open_registry` does.
+        """
+        try:
+            _refuse_statcat_schema_mismatch(conn)
+        except IncompatibleCatalogError:
+            conn.close()
+            self._conn = None
+            raise
 
     def _open_registry(self, conn: duckdb.DuckDBPyConnection) -> sdmxlib.LocalRegistry:
         """Compose the sdmxlib `LocalRegistry` on *conn*, once the guard allows it.
@@ -3011,9 +3081,9 @@ class Catalog:
         has no on-disk ``data/`` directory to host the Lance index.
 
         As `open` does, this raises `IncompatibleCatalogError` when the
-        connection's SDMX structure was stored by an sdmxlib with another
-        store schema, which this one would drop. *conn* is left open then:
-        the caller owns it.
+        connection's ``statcat`` schema is another version, or its SDMX
+        structure was stored by an sdmxlib with another store schema, which
+        this one would drop. *conn* is left open then: the caller owns it.
 
         Args:
             conn: The connection to wrap. Left open by `close`.
@@ -3046,6 +3116,7 @@ class Catalog:
         instance._bulk_depth = 0  # noqa: SLF001
         instance._lance = None  # noqa: SLF001
         instance._cursor_local = threading.local()  # noqa: SLF001
+        _refuse_statcat_schema_mismatch(conn)
         if read_only:
             _ = _catalog_schema.open_schema_readonly(conn)
         else:
