@@ -3,6 +3,51 @@
 All notable changes to this project will be documented in this file.
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-10-23
+
+Moves to sdmxlib 0.72, which owns the bundle manifest
+(`bundle.manifest.json`, sdmxlib GH-56). sdmxlib 0.72 keeps store schema
+2.48, so catalogs built by 0.9.x open without a rebuild.
+
+**Publish a bundle with `statcatlib.bundle.publish_bundle`, after
+`build_index()`.** It writes sdmxlib's manifest with a `statcat` section,
+and `check_bundle` / `statcat bundle check` checks the bundle against it.
+The manifest lists every file with its sha256, so anything written
+afterwards fails the check, including `statcat bundle rebind`: check before
+rebinding. **A builder that writes its own `bundle.manifest.json` now has
+its bundle refused by sdmxlib's `LocalRegistry.bundle`, and so by
+sdmxlib-rest.** Republish it with `publish_bundle`. statcatlib's own
+`open_bundle` does not read the manifest.
+
+**Run `build_index()` once on an existing catalog before publishing it.**
+The index now records a fingerprint of the annotations it was built from
+(`statcat:searchExclude`, `statcat:searchContext`, `skos:altLabel`).
+`check_bundle` reports an index built without one. When an overlay folded
+into the store changes those annotations, `Catalog.open()` warns, and keeps
+warning until the index is rebuilt. Nothing rebuilds it automatically.
+
+Searching a catalog no longer rewrites its search index: the first query in
+each process used to rebuild it, so serving workers re-indexed on startup.
+
+### Bug Fixes
+
+- Ship the actual Apache-2.0 licence text
+- **search:** Reuse a built FTS index instead of rebuilding it on the first query
+
+### Documentation
+
+- **bundle:** Publishing and checking a bundle
+
+### Features
+
+- **search:** Detect a stale index when overlays change its annotations (GH-3)
+- **testing:** `synthetic_catalog` builds published statcat bundles of any shape (GH-3)
+- **bundle:** `publish_bundle`, `check_bundle` and `statcat bundle check` (GH-3)
+
+### Dependencies
+
+- Require sdmxlib 0.72.0 for its bundle manifest and checker
+
 ## [0.9.1] — 2026-10-22
 
 `ingest_data()` can fetch observations from Eurostat, which 0.9.0
