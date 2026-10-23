@@ -183,7 +183,7 @@ class TestVariantKinds:
 
 
 class TestKindIsAClassVar:
-    """`kind` is derived from the class, not stored on the instance (#112)."""
+    """`kind` is derived from the class, not stored on the instance."""
 
     def test_readable_on_the_class_without_an_instance(self):
         assert sc.AggregateDataset.kind == "aggregate"

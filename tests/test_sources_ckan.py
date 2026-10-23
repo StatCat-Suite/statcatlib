@@ -496,7 +496,7 @@ class TestIngestCkan:
         assert len(datasets) == 1
 
     def test_dataset_is_searchable_after_ingest(self, httpx_mock: HTTPXMock, tmp_path: Path):
-        """An ingested CKAN dataset is findable by title (#117).
+        """An ingested CKAN dataset is findable by title.
 
         Folder-backed, because `search()` needs somewhere to put ``search/``
         and must be given an index to read — which is why this was skipped

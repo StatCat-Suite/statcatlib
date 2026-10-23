@@ -26,7 +26,7 @@ class TestPathStyleOpen:
         assert (tmp_path / "cat" / "meta.duckdb").exists()
 
     def test_does_not_create_parquet_subdir(self, tmp_path: Path) -> None:
-        """An empty ``parquet/`` is a lie about the layout (#120).
+        """An empty ``parquet/`` is a lie about the layout.
 
         DuckLake creates its own DATA_PATH directory on first write, so
         making one here bought nothing — and it destroyed a real signal:

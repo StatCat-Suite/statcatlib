@@ -1,6 +1,6 @@
 """Tests for ``Catalog(..., read_only=True)`` — multi-worker safe opens.
 
-Issue #88: opening a folder catalog read-write takes an exclusive DuckDB
+Opening a folder catalog read-write takes an exclusive DuckDB
 file lock, which prevents running multiple uvicorn workers against the
 same bundle. ``read_only=True`` opens the DuckDB connection with
 ``read_only=True``, ATTACHes the DuckLake sidecar ``READ_ONLY``, and
@@ -59,7 +59,7 @@ class TestReadOnlyOpen:
             assert {d.identifier for d in rows} == {"DS-1", "DS-2"}
 
     def test_no_exclusive_lock(self, tmp_path: Path) -> None:
-        """Issue #88: read_only=True must not take the DuckDB exclusive lock.
+        """read_only=True must not take the DuckDB exclusive lock.
 
         Repro is cross-process (uvicorn workers), but the underlying
         symptom is observable in-process by opening a second raw DuckDB

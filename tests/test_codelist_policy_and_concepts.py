@@ -1,4 +1,4 @@
-"""Tests for CodelistIndexPolicy and concept indexing (issue #95).
+"""Tests for CodelistIndexPolicy and concept indexing.
 
 Covers:
 - CodelistIndexPolicy(mode="fts_only") bypasses max_codes_per_codelist
@@ -228,7 +228,7 @@ class TestCodelistIndexPolicy:
         assert len(items_no_policy) == len(items_empty_policy)
 
     def test_fts_only_builds_at_a_realistic_embedding_width(self, tmp_path: pathlib.Path) -> None:
-        """A table mixing vectors and deliberate NULLs must build on lancedb >= 0.36 (#125).
+        """A table mixing vectors and deliberate NULLs must build on lancedb >= 0.36.
 
         lancedb now counts a NULL vector as wrong-width and rejects it under
         its default ``on_bad_vectors="error"``. Without a target schema it

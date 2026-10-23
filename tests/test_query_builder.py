@@ -14,7 +14,7 @@ class TestChaining:
         assert all(ds.status == "current" for ds in result.items)
 
     def test_filter_and_search(self, indexed_store: sc.Catalog):
-        """Filter and BM25 search compose (#117).
+        """Filter and BM25 search compose.
 
         Uses the indexed fixture: `QueryBuilder.search` needs a built index,
         which the in-memory `store` cannot have. Unlike `Catalog.search`,

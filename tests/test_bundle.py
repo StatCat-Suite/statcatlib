@@ -1,4 +1,4 @@
-"""Unit tests for portable bundle support — issues #94, #98, #120."""
+"""Unit tests for portable bundle support."""
 
 from __future__ import annotations
 
@@ -200,7 +200,7 @@ class TestOpenBundle:
 
 
 class TestNoStrayParquetDir:
-    """#120: the mkdir poisoned the discriminator it should have fed."""
+    """Opening creates no ``parquet/``: an empty one would make a split bundle look co-located."""
 
     def test_open_does_not_create_parquet_dir(self, tmp_path: Path) -> None:
         bundle = _make_bundle(tmp_path / "cat")
@@ -316,11 +316,7 @@ class TestNotADuckLake:
 
 
 class TestReadCurrentDataPath:
-    """The probe, promoted from private in #98.
-
-    Consumers were reaching for `_read_current_data_path` or reimplementing
-    it; both are worse than exporting the one that already existed.
-    """
+    """`read_current_data_path`, the public probe for the stamp."""
 
     def test_accepts_the_bundle_directory(self, tmp_path: Path) -> None:
         """Callers should not have to know the lake is called lake.ducklake."""
@@ -344,13 +340,13 @@ class TestReadCurrentDataPath:
 
 
 class TestAutoPolicy:
-    """#120: the default reads the stamp and dispatches, rather than assuming."""
+    """`Auto`, the default, reads the stamp and dispatches on it."""
 
     def test_remote_stamp_is_honoured_not_overwritten(self, tmp_path: Path) -> None:
         """The inversion of ``test_the_default_would_have_overwritten_it``.
 
-        Under #98 this exact sequence destroyed the only record of where a
-        split bundle's data lived. The default now leaves it alone.
+        Overwriting the stamp here would destroy the only record of where a
+        split bundle's data lives. The default leaves it alone.
         """
         bundle = _make_bundle(tmp_path / "cat")
         remote = "abfss://acct.dfs.core.windows.net/container/prefix/"
@@ -364,8 +360,7 @@ class TestAutoPolicy:
     def test_resolvable_local_stamp_outside_the_bundle_is_honoured(self, tmp_path: Path) -> None:
         """Resolve-first covers what scheme-sniffing would miss.
 
-        Parquet on a local mount that is not ``<bundle>/parquet/`` — the
-        case #98 said only an explicit sentinel could express.
+        Parquet on a local mount that is not ``<bundle>/parquet/``.
         """
         bundle = _make_bundle_with_data(tmp_path / "cat")
         mount = tmp_path / "mnt"
@@ -500,7 +495,7 @@ _OBS_SUM = sum(range(10000))
 
 
 class TestExplicitPathOverridesStamp:
-    """An explicit DATA_PATH need not restate the stamp (#126)."""
+    """An explicit DATA_PATH need not restate the stamp."""
 
     def test_at_absolute_spelling_of_a_relative_stamp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         bundle = _make_bundle_with_data(tmp_path / "cat")

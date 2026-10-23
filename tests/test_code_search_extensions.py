@@ -274,7 +274,7 @@ def _attach_footnote(
 
 
 class TestReferenceMetadataBlend:
-    """Blended footnote text is selected per language (#100).
+    """Blended footnote text is selected per language.
 
     Same shape as the altLabel fix: a localised value folds into its own
     language's row alone, while a value with no language at all (a bare
@@ -385,7 +385,7 @@ class TestSearchContextBlending:
     """statcat:searchContext annotations fold into the per-language corpus.
 
     Context text is selected per language — the disambiguation fix for
-    same-label codes under different universes (#61). Language-tagged
+    same-label codes under different universes. Language-tagged
     altLabels now behave the same way; see :class:`TestAltLabelBlending`.
     """
 

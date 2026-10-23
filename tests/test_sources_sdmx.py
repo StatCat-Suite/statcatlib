@@ -102,7 +102,7 @@ def indexed_sdmx_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.
 
     `search()` needs somewhere to put ``search/``; the in-memory fixture
     above has nowhere, which is why `TestFTS` was skipped rather than
-    failing (#117).
+    failing.
     """
     pytest.importorskip("lancedb", reason="search needs statcatlib[search]")
     path = tmp_path_factory.mktemp("sdmx_indexed") / "catalog"
@@ -290,7 +290,7 @@ class TestFTS:
         assert result.total >= 1
         # `search()` yields `Hit` wrappers; the entity is on `.payload`.
         # This read the entity directly and would have raised if the class
-        # were ever unskipped — see the stale skip above (#117).
+        # were ever unskipped — see the stale skip above.
         assert any(
             "DF_TEST" in hit.payload.identifier for hit in result.items if isinstance(hit.payload, sc.BaseDataset)
         )
@@ -344,7 +344,7 @@ class TestPersistentStorage:
 
 
 # ---------------------------------------------------------------------------
-# Multi-Hierarchy ingest — issue #93 item 1
+# Multi-Hierarchy ingest
 # ---------------------------------------------------------------------------
 #
 # Models the CL_GEOGRAPHY admin-vs-statistical case from
@@ -356,9 +356,8 @@ class TestPersistentStorage:
 # The claim under test: statcatlib.ingest_sdmx() plumbs Hierarchy artefacts
 # from an InMemoryRegistry through sdmxlib's Registry.ingest() into
 # sdmx.hierarchy_node with populated parent_path / depth /
-# ancestor_ids. No statcatlib-side hierarchy code needed — this confirms that
-# item 1 of #93 ("codelist loader reads sibling Hierarchy
-# artefacts") is effectively a no-op because sdmxlib already does it.
+# ancestor_ids. No statcatlib-side hierarchy code is needed: sdmxlib's
+# ingest already reads sibling Hierarchy artefacts.
 # Mirrors the SDMX-ML 3.0 round-trip fixture in sdmxlib at
 # tests/fixtures/sdmx_ml30/with_multiple_hierarchies.xml.
 
@@ -472,7 +471,7 @@ class TestHierarchyIngest:
             assert row is not None, f"missing node {node_id} in {hierarchy_urn}"
             parent = row[0]
             # Not `str(row[0])`: a NULL parent must stay `None`, not
-            # become the string "None" — the #114 defect, in a test.
+            # become the string "None".
             return None if parent is None else str(parent)
 
         # A parent is named by its path, not its leaf id: sdmxlib keys a
@@ -529,11 +528,11 @@ class TestHierarchyIngest:
 
 
 # ---------------------------------------------------------------------------
-# Hierarchy-aware q.has_code — issue #93 items 2 + 3
+# Hierarchy-aware q.has_code
 # ---------------------------------------------------------------------------
 #
-# Today's q.has_code('GEO', 'ON') is an exact-match filter. Items 2 + 3 of
-# #93 expand it to accept an sdmxlib code predicate, so a caller can find
+# q.has_code('GEO', 'ON') is an exact-match filter. It also accepts a code
+# descent, so a caller can find
 # datasets that have ANY descendant of a root code on a given dimension
 # under a chosen SDMX 3.0 Hierarchy — the canonical
 # use case ("small areas in this province").

@@ -1,6 +1,6 @@
 """Concurrent query safety on a single Catalog instance.
 
-Regression for #89: the catalog used to share one DuckDB cursor across all
+Regression: the catalog used to share one DuckDB cursor across all
 callers, so concurrent ``execute()`` calls from threads (e.g. FastAPI's
 threadpool dispatching ``def`` route handlers) corrupted the cursor's
 pending-result state and raised

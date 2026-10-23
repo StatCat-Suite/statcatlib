@@ -41,7 +41,7 @@ def estat_search_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.
     Separate from `estat_store` because `search()` needs a folder — an
     in-memory catalog has nowhere to put ``search/``. That is why the test
     below was skipped rather than failing: removing the marker alone would
-    not have made it pass (#115).
+    not have made it pass.
 
     The point of ingesting live rather than reusing a fixture catalog is
     that every other search test builds its documents itself. Nothing else
@@ -108,7 +108,7 @@ class TestEstatSearch:
         assert result.total >= 1
 
     def test_index_layout_records_every_language(self, estat_search_store: sc.Catalog):
-        """A build that writes no table returns zero hits *silently* (#115).
+        """A build that writes no table returns zero hits *silently*.
 
         `index_layout` is what distinguishes "indexed, no match" from
         "never indexed", so it is asserted separately from the hit count
