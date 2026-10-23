@@ -1,5 +1,9 @@
 # statcatlib development tasks
 
+# A gitignored `.env` sets per-machine variables: `UV_PUBLISH_TOKEN` for
+# `release-5-pypi`, chiefly. Loaded, never printed.
+set dotenv-load
+
 default:
     @just --list
 
@@ -170,9 +174,9 @@ release-1-preview:
 [group('release')]
 release-2-changelog VERSION='':
     #!/usr/bin/env bash
-    # By default git-cliff determines the next version from commit messages.
-    # Pass VERSION to pin (e.g. when a "!" breaking-change marker would push
-    # an unwanted major bump):
+    # By default git-cliff determines the next version from commit messages;
+    # pre-1.0, a "!" breaking change bumps the minor (cliff.toml). Pass
+    # VERSION to pin anyway:
     #   just release-2-changelog              # auto
     #   just release-2-changelog 0.9.0        # pin
     #
@@ -253,7 +257,12 @@ release-4-merge:
     NOTES=$(just release-notes "${VER}")
     gh release create "${VER}" --verify-tag --title "${VER}" --notes "${NOTES}"
     git branch -D "${BRANCH}"
-    git push origin --delete "${BRANCH}"
+    # The repo deletes a merged PR's branch itself ("delete branch on merge"),
+    # so the remote one is usually gone already. Deleting it regardless failed
+    # this step after the tag and release were made (0.10.0).
+    if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null; then
+        git push origin --delete "${BRANCH}"
+    fi
     git switch --detach "${VER}"
     echo "Released ${VER} on GitHub; checked out at the tag"
     echo "Next: just release-5-pypi"
@@ -273,7 +282,7 @@ release-notes VERSION:
     fi
     printf '%s\n' "${NOTES}"
 
-# Step 5 — Build and publish to PyPI (requires UV_PUBLISH_TOKEN env var)
+# Step 5 — Build and publish to PyPI (UV_PUBLISH_TOKEN, from the environment or .env)
 [group('release')]
 release-5-pypi:
     #!/usr/bin/env bash

@@ -22,8 +22,9 @@ Designed for developers working with statistical and open data catalogs
   and StatDCAT-AP's statistical extensions, but the internal representation is
   Pythonic attrs classes — no RDF runtime, no triple stores.
 - **sdmxlib is a dependency, not the other way around.** sdmxlib knows nothing
-  about statcatlib. sdmxlib's Python model types are used in `sources/sdmx.py`
-  during ingest; they do not appear in the catalog domain model.
+  about statcatlib. The catalog domain model (`model/`) takes only
+  `InternationalString` from it; sdmxlib's SDMX model types (`Dataflow`,
+  `DataStructure`, `Code`, …) never appear in a domain model field.
 - **Query surface matters as much as the model.** This library powers chatbots,
   CLI tools, and analytical workflows. The query API must support full-text
   search, faceted filtering, structural queries (dimensions, codes), and
@@ -348,12 +349,92 @@ Under the hood:
    linking to the stored dataflow row, then `store.put(datasets)` inside a
    `with store.bulk_load():` block.
 
-`sources/sdmx.py` is the ONLY file that imports sdmxlib. sdmxlib Python types
-are used here during ingest and do not appear anywhere else in statcatlib.
+Where statcatlib uses sdmxlib:
+
+- `model/` imports only `InternationalString`, a pure value type.
+- `sources/sdmx.py` uses the SDMX model types to build catalog records
+  during ingest.
+- `store/`, `query.py` and `urn.py` use the registry (`LocalRegistry`), the
+  query DSL (`sl.q`), URNs and the storage schema version.
+- `bundle.py` and `testing.py` build on `sdmxlib.bundle` and
+  `sdmxlib.testing`.
+
+## Writing style
+
+These rules cover all prose written for this repo: comments, docstrings,
+documentation, CHANGELOG and `docs/upgrading.md` entries, commit messages,
+issues, PRs and milestones. The section is shared across the StatCat-Suite
+repos (GH-58); change it in all three or none.
+
+Write in plain language. State claims directly, in the order the reader
+needs them. Use subject-verb-object sentences, concrete nouns, and the
+actual number, name, or mechanism instead of an allusion to it.
+
+Follow these rules from Strunk & White:
+
+- Put statements in positive form.
+- Use definite, specific, concrete language.
+- Omit needless words.
+
+Avoid these constructions everywhere (sentences, headings, titles, lists):
+
+- Contrast by negation: "not X, but Y", "it's not about X, it's about Y",
+  "X isn't the problem; Y is". State Y. Mention X only if someone
+  actually holds that view.
+- Hook clauses that read like half a question: "what X doesn't tell you",
+  "the part nobody mentions", "the evidence Y lacks", "why this matters".
+  State the fact the clause points at.
+- Colon reveals: "The real issue: ...", "Here's the thing: ...",
+  "The short version: ...". Drop the setup and write the sentence.
+- Punchline structure: ending a sentence or list on a twist, a dramatic
+  final item, or a short fragment for emphasis.
+- Rhetorical questions that the text then answers.
+- Framing work or ideas by what is missing when you can name what is
+  present or proposed.
+
+Titles (milestones, issues, PRs, headings):
+
+- Name the deliverable or scope as a plain noun phrase or imperative.
+  A reader should know from the title alone what gets merged or decided.
+- Use a colon only to separate a component name from the work item
+  (e.g. "Query DSL: add DuckDB backend"), never to introduce a hook.
+
+Examples:
+
+```text
+Bad:  Conformance evidence: what the green checks do not prove
+Good: Conformance: add negative and edge-case test fixtures
+
+Bad:  Query DSL: a second backend, and the evidence the first one lacks
+Good: Query DSL: add second backend; add validation tests for SQL backend
+
+Bad:  The green checks tell you less than you'd think.
+Good: The green checks only cover valid inputs; there are no tests
+      for malformed DSDs or constraint violations.
+
+Bad:  The problem isn't performance — it's correctness.
+Good: The cache returns stale codelists after a version bump.
+
+Bad:  Here's what the benchmark doesn't show: cold-start latency.
+Good: The benchmark measures warm queries only; cold-start latency
+      is untested.
+```
+
+Before finishing, reread the output. Rewrite any sentence that delays its
+point, contrasts with a claim nobody made, or alludes to a fact instead of
+stating it.
 
 ## SQL style
 
-- Always use triple-quoted strings for SQL
+- **Quote style follows the prevailing Python SQL convention** (SQLAlchemy,
+  psycopg, asyncpg, Django ORM), as sdmxlib's does:
+  - Single-line SQL → regular double-quoted `"..."` / `f"..."`.
+  - Multi-line SQL → triple-quoted `"""..."""` / `f"""..."""`.
+  - The split is on line count, not on length. A 120-character one-liner stays
+    in `"..."`; a 30-character two-liner uses `"""..."""`.
+  - An earlier version of this file said "always triple-quote". sdmxlib
+    dropped that rule, and this file followed (GH-11). Existing single-line
+    SQL in `"""..."""` is aligned as the code around it is touched.
 - Always use parameterized queries (`$name` style preferred) for values
 - Never use f-strings or concatenation to interpolate values into SQL
 - For dynamic WHERE clause composition, build a list of clause strings
@@ -370,7 +451,7 @@ are used here during ingest and do not appear anywhere else in statcatlib.
 - **Storage**: `duckdb`
 - **Search**: `lancedb` (optional, BM25 FTS via Tantivy + ANN vector index)
 - **HTTP**: `httpx`
-- **SDMX dependency**: `sdmxlib` (only in `sources/sdmx.py`)
+- **SDMX dependency**: `sdmxlib` (ingest, store, query and bundles; the domain model takes only `InternationalString`)
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.
 

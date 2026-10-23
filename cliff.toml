@@ -1,57 +1,63 @@
+# Copied verbatim from sdmxlib's cliff.toml (suite baseline, GH-10). Keep the two identical.
 [changelog]
 header = """
 # Changelog\n
-All notable changes to this project will be documented in this file.
-Versions follow [Semantic Versioning](https://semver.org/).\n
+All notable changes to this project will be documented in this file.\n
 """
 body = """
 {% if version %}\
-## [{{ version | trim_start_matches(pat="v") }}] — {{ timestamp | date(format="%Y-%m-%d") }}
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% else %}\
-## [Unreleased]
+    ## [Unreleased]
 {% endif %}\
 {% for group, commits in commits | group_by(attribute="group") %}
-### {{ group }}
-{% for commit in commits %}
-- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
-{{ commit.message | upper_first }}\
-{% if commit.breaking %} (**breaking**){% endif %}\
-{% endfor %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}**{{ commit.scope }}**: {% endif %}\
+          {{ commit.message | upper_first }}\
+    {% endfor %}
 {% endfor %}\n
 """
-footer = ""
 trim = true
+footer = ""
 
 [git]
 conventional_commits = true
-filter_unconventional = true
+filter_unconventional = false
 split_commits = false
-
-commit_preprocessors = [
-    { pattern = "^Merge branch.*", replace = "chore(merge): ${0}" },
-]
-
+commit_preprocessors = []
 commit_parsers = [
-    { message = "^feat",     group = "Features" },
-    { message = "^fix",      group = "Bug Fixes" },
-    { message = "^perf",     group = "Performance" },
-    { message = "^refactor", group = "Refactoring" },
-    { message = "^docs",     group = "Documentation" },
-    { message = "^ci",       skip = true },
-    { message = "^test",     skip = true },
-    { message = "^chore\\(release\\)", skip = true },
-    { message = "^chore",    skip = true },
-    { body = ".*security",   group = "Security" },
+  # Breaking changes first, and in their own group. They rendered
+  # indistinguishably from everything else — `fix(json)!: SDMX-JSON no longer
+  # carries isFinal` sat in "Bug Fixes" looking like a routine fix — so a
+  # reader of a 52-break release had no way to find what would bite them
+  # (v0.50.0). Matched on the conventional-commit `!` marker, before the
+  # type-based rules below, since first match wins.
+  { message = "^\\w+(\\([^)]*\\))?!:", group = "Breaking Changes" },
+  { message = "^feat", group = "Features" },
+  { message = "^model", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^doc", group = "Documentation" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^test", group = "Testing" },
+  { message = "^ci", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore", group = "Miscellaneous" },
+  { body = ".*security", group = "Security" },
+  { message = "^Merge", skip = true },
+  { message = ".*", skip = true },
 ]
-
-protect_breaking_commits = true
-filter_commits = true
-tag_pattern = "v?[0-9].*"
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v[0-9]*"
 skip_tags = ""
 ignore_tags = ""
 topo_order = false
-sort_commits = "newest"
+sort_commits = "oldest"
 
 [bump]
-features_always_bump_minor = true
-breaking_always_bump_major = true
+# Pre-1.0, a breaking change bumps the minor, not the major: 0.71.0 + a
+# `fix!` is 0.72.0. git-cliff's default proposed 1.0.0 for 0.71.0's release,
+# which had to be pinned by hand (`just release-2-changelog 0.71.0`).
+breaking_always_bump_major = false
