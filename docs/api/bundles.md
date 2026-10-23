@@ -142,7 +142,8 @@ manifest format is sdmxlib's (`sdmxlib.bundle`, from sdmxlib 0.72): a fresh
 `token` per publication, which caches and ETags key on, and a sha256 for
 every file. A statcat bundle is an sdmxlib bundle plus the `statcat`
 schema and `search/`, so statcatlib adds a `statcat` section describing
-them, and checks that sit on top of sdmxlib's.
+them, and checks that sit on top of sdmxlib's. [The statcat bundle
+format](../bundle-format.md) specifies all of it field by field.
 
 ```python
 from sdmxlib.bundle import Producer

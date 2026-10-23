@@ -49,6 +49,7 @@ markdown_extensions:
 nav:
   - Overview: index.md
   - Tutorial: tutorial.md
+  - Bundle Format: bundle-format.md
   - API Reference:
     - Catalog: api/store.md
     - Bundles: api/bundles.md
