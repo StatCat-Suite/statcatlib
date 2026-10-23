@@ -40,7 +40,7 @@ check-docstrings:
 check-prose:
     uv run python tools/check_prose.py --check
 
-# Guard: `Any` in src/ must not grow (#109). ANN401 cannot see inside a
+# Guard: `Any` in src/ must not grow. ANN401 cannot see inside a
 # generic argument, so this ratchet is what guards `dict[str, Any]`.
 [group('dev')]
 check-any:

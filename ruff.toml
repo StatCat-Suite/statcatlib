@@ -55,7 +55,7 @@ ignore = [
 [lint.per-file-ignores]
 # Init files: allow re-exports and unordered imports
 "__init__.py" = ["E402", "F401", "I"]
-# ── Narrow scopes, replacing blanket ignores (#106) ────────────────────────
+# ── Narrow scopes, replacing blanket ignores ──────────────────────────────
 # Each of these was a project-wide ignore. Measured, every finding sits in one
 # place, so the rule is now ON everywhere else and new code gets caught.
 #

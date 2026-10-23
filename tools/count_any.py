@@ -1,4 +1,4 @@
-"""Count `Any` in `src/` and fail if it moves off the recorded baseline (#109).
+"""Count `Any` in `src/` and fail if it moves off the recorded baseline.
 
 ## Why this exists
 
@@ -203,7 +203,7 @@ def main() -> int:
     if args.write:
         _BASELINE.write_text(
             "# Occurrences of the type `Any` in src/, excluding comments,\n"
-            "# docstrings and imports. Walked down by #109; raising it needs a\n"
+            "# docstrings and imports. Lower it with --write; raising it needs a\n"
             "# reason in the commit message. See tools/count_any.py.\n"
             f"{total}\n",
             encoding="utf-8",
@@ -225,7 +225,7 @@ def main() -> int:
         print(  # noqa: T201
             f"error: `Any` in src/ rose to {total}, above the baseline of {baseline}.\n"
             f"       ANN401 does not see inside generic arguments, so this ratchet is\n"
-            f"       the only thing guarding `dict[str, Any]` and friends (#109).\n"
+            f"       the only thing guarding `dict[str, Any]` and friends.\n"
             f"       Fix the new one, or lower it deliberately with --write.\n",
             file=sys.stderr,
         )
