@@ -2326,3 +2326,66 @@ class TestQueryBuilderSearchLang:
         store = self._french_store(tmp_path)
         query = store.query(sc.BaseDataset).search("chômage", lang="fr").sort_by("identifier").limit(5)
         assert {ds.identifier for ds in query.collect()} == {"chomage-qc", "chomage-on"}
+
+
+class _FarFromCensusModel(_StubModel):
+    """Embeds text mentioning "Census" farthest from every other text, the query included."""
+
+    @override
+    def _encode_one(self, text: str) -> list[float]:
+        return [1.0, 0.0] + [0.0] * (self.DIM - 2) if "Census" in text else [0.0, 1.0] + [0.0] * (self.DIM - 2)
+
+
+class TestSearchRanksOnlyFilteredDatasets:
+    """``QueryBuilder`` search ranks the datasets that pass its filters (GH-59).
+
+    It used to take the top 200 matches across the catalog and filter those,
+    so a match ranked past 200 was never returned. Here 250 datasets match
+    "population" and the one the filter keeps, with the longest text, ranks
+    last.
+    """
+
+    _N = 250
+
+    @classmethod
+    def _store(cls, tmp_path, model=None):
+        store = sc.Catalog(str(tmp_path / "pool"), embedding_model=model).open()
+        datasets = [
+            sc.OpenDataset(
+                identifier=f"pop-{i:03d}",
+                title=I18n(en=f"Population {i}"),
+                description=I18n(en="Population estimates"),
+            )
+            for i in range(cls._N - 1)
+        ]
+        datasets.append(
+            sc.OpenDataset(
+                identifier="o'brien-census",
+                title=I18n(en="Census of agriculture, farms, crops, livestock, machinery and land use"),
+                description=I18n(en="Farm operators, land tenure, irrigation and the rural population"),
+                status="current",
+            )
+        )
+        with store.bulk_load():
+            store.put(datasets)
+        store.build_index()
+        return store
+
+    def test_the_filtered_match_ranks_past_the_pool(self, tmp_path):
+        store = self._store(tmp_path)
+        unfiltered = store.query(sc.OpenDataset).search("population").collect()
+        assert "o'brien-census" not in [ds.identifier for ds in unfiltered]
+
+    def test_search_finds_a_filtered_match_ranked_last(self, tmp_path):
+        query = self._store(tmp_path).query(sc.OpenDataset).filter(status="current").search("population")
+        assert [ds.identifier for ds in query.collect()] == ["o'brien-census"]
+        assert query.count() == 1
+        assert query.exists()
+
+    def test_hybrid_search_finds_a_filtered_match_ranked_last(self, tmp_path):
+        query = self._store(tmp_path, _FarFromCensusModel()).query(sc.OpenDataset).filter(status="current")
+        assert [ds.identifier for ds in query.hybrid_search("population").collect()] == ["o'brien-census"]
+
+    def test_paging_reaches_past_the_pool(self, tmp_path):
+        query = self._store(tmp_path).query(sc.OpenDataset).search("population")
+        assert len(query.offset(240).limit(20).collect()) == self._N - 240

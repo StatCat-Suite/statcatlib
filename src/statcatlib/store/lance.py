@@ -633,10 +633,15 @@ def _entity_type_clause(entity_type: str | Sequence[str] | None) -> str:
 
 
 def _in_clause(column: str, values: Sequence[str] | None) -> str:
-    """Build an ``IN`` fragment for *column*, or empty string when unset."""
+    """Build an ``IN`` fragment for *column*, or empty string when unset.
+
+    LanceDB's ``where`` takes a SQL string with no parameter binding, so each
+    value is a string literal with its single quotes doubled. A dataset
+    identifier from CKAN can contain one.
+    """
     if not values:
         return ""
-    rendered = ", ".join(f"'{v}'" for v in values)
+    rendered = ", ".join("'" + v.replace("'", "''") + "'" for v in values)
     return f"{column} IN ({rendered})"
 
 
@@ -1398,6 +1403,7 @@ class LanceIndex:
         operator: str = "or",
         fuzziness: int = 0,
         entity_type: str | Sequence[str] | None = None,
+        id_filter: Sequence[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Return ``[(identifier, bm25_score), …]`` ordered by BM25 relevance.
 
@@ -1419,6 +1425,8 @@ class LanceIndex:
             entity_type: Restrict matches to one or more ``entity_type`` values (e.g. ``"open"`` or
                 ``("open", "aggregate")``). When ``None`` (default), all row kinds are eligible — including
                 code rows.
+            id_filter: Rank only rows whose ``id`` is in this set. The filter is applied before ranking,
+                so *limit* counts rows that pass it.
 
         Returns:
             ``[(identifier, score), …]`` ordered by descending BM25 score,
@@ -1435,7 +1443,7 @@ class LanceIndex:
             limit=oversample,
             operator=operator,
             fuzziness=fuzziness,
-            filters=[_entity_type_clause(entity_type)],
+            filters=[_entity_type_clause(entity_type), _in_clause("id", id_filter)],
         )
         return _dedupe_by_id(((r["id"], r["_score"]) for r in rows), keep="max")[:limit]
 
@@ -1515,6 +1523,7 @@ class LanceIndex:
         lang: str = "en",
         limit: int = 100,
         entity_type: str | Sequence[str] | None = None,
+        id_filter: Sequence[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Return ``[(identifier, distance), …]`` ordered by vector distance.
 
@@ -1534,6 +1543,7 @@ class LanceIndex:
             entity_type: Restrict matches to one or more ``entity_type`` values (e.g. ``"open"`` or
                 ``("open", "aggregate")``). When ``None`` (default), all row kinds are eligible — including
                 code rows.
+            id_filter: Rank only rows whose ``id`` is in this set, as for `bm25_search`.
 
         Returns:
             ``[(identifier, distance), …]`` ordered by ascending distance,
@@ -1548,7 +1558,7 @@ class LanceIndex:
             embedding,
             columns=None,
             limit=oversample,
-            filters=[_entity_type_clause(entity_type)],
+            filters=[_entity_type_clause(entity_type), _in_clause("id", id_filter)],
         )
         return _dedupe_by_id(((r["id"], r["_distance"]) for r in rows), keep="min")[:limit]
 

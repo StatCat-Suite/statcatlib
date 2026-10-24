@@ -101,6 +101,19 @@ _DATASET_CLASSES = (OpenDataset, AggregateDataset, MicrodataDataset, GeospatialD
 # rankings. Built from the classes, so the two cannot drift.
 _DATASET_ENTITY_TYPES: tuple[str, ...] = DATASET_KINDS
 
+# How many candidates `QueryBuilder.search` and `hybrid_search` rank, at
+# least: the index ranks max(_SEARCH_POOL, offset + limit) of the datasets
+# that pass the query's filters.
+_SEARCH_POOL = 200
+
+
+def _search_kinds(cls: type) -> tuple[str, ...]:
+    """The index ``entity_type`` values a search for *cls* may return: its ``kind``, or every dataset kind."""
+    if issubclass(cls, _DATASET_CLASSES):
+        return (cls.kind,)
+    return _DATASET_ENTITY_TYPES
+
+
 # Sidecar file that records which embedding model + prefixes produced the
 # vector index in ``<catalog>/search/``.  Written by ``build_index`` and read
 # back by ``open()`` so callers don't have to remember which model to load.
@@ -3854,13 +3867,17 @@ class Catalog:
         oversample: int = 200,
         operator: str = "or",
         fuzziness: int = 0,
+        entity_type: Sequence[str] = _DATASET_ENTITY_TYPES,
+        id_filter: Sequence[str] | None = None,
     ) -> dict[str, float]:
         """Compute RRF-merged identifier ranking from vector + BM25 hits."""
         assert self._lance is not None  # noqa: S101
         assert self._embedding_model is not None  # noqa: S101
 
         query_vec: list[float] = as_vector(self._embedding_model.encode(self._query_prefix + text))
-        vec_hits = self._lance.search(query_vec, lang=lang, limit=oversample, entity_type=_DATASET_ENTITY_TYPES)
+        vec_hits = self._lance.search(
+            query_vec, lang=lang, limit=oversample, entity_type=entity_type, id_filter=id_filter
+        )
         vec_rank: dict[str, int] = {ident: i + 1 for i, (ident, _) in enumerate(vec_hits)}
 
         bm25_hits = self._lance.bm25_search(
@@ -3869,7 +3886,8 @@ class Catalog:
             limit=oversample,
             operator=operator,
             fuzziness=fuzziness,
-            entity_type=_DATASET_ENTITY_TYPES,
+            entity_type=entity_type,
+            id_filter=id_filter,
         )
         bm25_rank: dict[str, int] = {ident: i + 1 for i, (ident, _) in enumerate(bm25_hits)}
 
@@ -6513,6 +6531,7 @@ class Catalog:
                 operator=search_operator,
                 fuzziness=search_fuzziness,
                 lang=search_lang,
+                kinds=_search_kinds(cls),
             )
         else:
             qr = self._run_filter_query(
@@ -6619,8 +6638,20 @@ class Catalog:
         operator: str = "or",
         fuzziness: int = 0,
         lang: str = "en",
+        kinds: Sequence[str] = _DATASET_ENTITY_TYPES,
     ) -> _QueryResult:
         """Execute a search query using LanceDB.
+
+        The SQL filters run first and the search ranks only the datasets
+        that pass them (GH-59), so a match ranked low against the whole
+        catalog is still found. The index ranks at most `_SEARCH_POOL`
+        candidates, or ``offset + limit`` if that is larger, and ``total``
+        counts the matches among them.
+
+        *kinds* restricts the index's ``entity_type``, which holds the
+        dataset's ``kind``. When the SQL filters exclude no dataset of those
+        kinds, no identifier list is sent: on a 50,000-dataset index a full
+        list made a BM25 query 70 times slower.
 
         When the LanceDB index is unavailable (lancedb not installed, or
         ``build_index()`` has not been called yet), returns an empty
@@ -6631,21 +6662,43 @@ class Catalog:
         if self._lance is None:
             return _QueryResult(total=0, rows=[], scores={})
 
+        id_filter: list[str] | None = None
+        if where_clause:
+            allowed_sql = f"SELECT DISTINCT d.identifier FROM dataset d {join_clause} {where_clause}"
+            allowed = [r[0] for r in self._c.execute(allowed_sql, params).fetchall()]
+            if not allowed:
+                return _QueryResult(total=0, rows=[], scores={})
+            kind_placeholders = ", ".join("?" * len(kinds))
+            in_scope_sql = f"SELECT count(*) FROM dataset WHERE kind IN ({kind_placeholders})"
+            (in_scope,) = self._c.execute(in_scope_sql, list(kinds)).fetchall()[0]
+            if len(allowed) < in_scope:
+                id_filter = allowed
+
+        pool = max(_SEARCH_POOL, offset + limit) if limit is not None else _SEARCH_POOL
         if search_type == "hybrid":
             if self._embedding_model is None:
                 msg = "hybrid_search requires an embedding_model"
                 raise RuntimeError(msg)
-            rrf_scores = self._rrf_rank(text, lang=lang, operator=operator, fuzziness=fuzziness)
+            rrf_scores = self._rrf_rank(
+                text,
+                lang=lang,
+                oversample=pool,
+                operator=operator,
+                fuzziness=fuzziness,
+                entity_type=kinds,
+                id_filter=id_filter,
+            )
             search_ids = sorted(rrf_scores, key=lambda i: rrf_scores[i], reverse=True)
             scores = rrf_scores
         else:
             bm25_hits = self._lance.bm25_search(
                 text,
                 lang=lang,
-                limit=200,
+                limit=pool,
                 operator=operator,
                 fuzziness=fuzziness,
-                entity_type=_DATASET_ENTITY_TYPES,
+                entity_type=kinds,
+                id_filter=id_filter,
             )
             search_ids = [h[0] for h in bm25_hits]
             scores = {h[0]: h[1] for h in bm25_hits}
@@ -6653,7 +6706,8 @@ class Catalog:
         if not search_ids:
             return _QueryResult(total=0, rows=[], scores={})
 
-        # Apply relational filters to search results
+        # Re-apply the filters to the hits: the index is a snapshot, and can
+        # hold datasets the store has since changed or deleted.
         placeholders = ", ".join("?" * len(search_ids))
         extra_where = f"d.identifier IN ({placeholders})"
         if where_clause:
@@ -6662,11 +6716,7 @@ class Catalog:
             combined_where = f"WHERE {extra_where}"
 
         all_params = [*params, *search_ids]
-        count_sql = f"SELECT COUNT(*) FROM dataset d {join_clause} {combined_where}"
         fetch_sql = f"SELECT d.identifier FROM dataset d {join_clause} {combined_where}"
-
-        count_row = self._c.execute(count_sql, all_params).fetchone()
-        total = int(count_row[0]) if count_row else 0
         rows = self._c.execute(fetch_sql, all_params).fetchall()
 
         # Preserve search rank order
@@ -6676,7 +6726,7 @@ class Catalog:
 
         page_start = offset
         page_end = (offset + limit) if limit is not None else None
-        return _QueryResult(total=total, rows=ordered[page_start:page_end], scores=filtered_scores)
+        return _QueryResult(total=len(ordered), rows=ordered[page_start:page_end], scores=filtered_scores)
 
     def _ranked_ids_from_search(
         self,
@@ -6720,6 +6770,7 @@ class Catalog:
             operator=search_operator,
             fuzziness=search_fuzziness,
             lang=search_lang,
+            kinds=_search_kinds(cls),
         )
         return qr.rows
 
