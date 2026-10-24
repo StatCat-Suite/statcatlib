@@ -159,11 +159,18 @@ results = (
 )
 ```
 
-The search runs first: `search()` takes the top 200 BM25 matches, and
-`hybrid_search()` fuses the top 200 from each technique. The filters then keep
-the candidates that match, in search order. A dataset that matches the filters
-but ranks outside those candidates is not returned, so a narrow filter with a
-broad query can return fewer results than exist.
+The filters run first, in SQL, and the search ranks only the datasets that pass
+them, so a narrow filter with a broad query still finds every match.
+`search()` takes the top 200 BM25 matches among those datasets, and
+`hybrid_search()` fuses the top 200 from each technique. A page that reaches
+further, such as `.offset(240).limit(20)`, raises the count to `offset + limit`.
+`total` counts the matches among those candidates.
+
+The filtered identifiers reach LanceDB as an `id IN (...)` prefilter. When the
+filters keep every dataset of the queried kind, as `query(sc.AggregateDataset)`
+with no `.filter()` does, statcatlib sends no list. On a 50,000-dataset index a
+list of all 50,000 identifiers made a BM25 query take 140 ms, against 2 ms
+without one; a list of 1,000 took 6 ms.
 
 Both methods take `lang`, which names the table to search and defaults to
 `"en"`. A French query with filters needs `lang="fr"`:
