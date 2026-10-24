@@ -2121,7 +2121,7 @@ class QueryBuilder[T]:
         Only available in entity mode (no ``.select()`` / ``.scalars()``).
         """
         self._check_entity_mode("execute")
-        return self._store._execute_query(  # noqa: SLF001
+        return self._store._execute_query(
             self._cls,
             self._filters,
             self._exists_filters,
@@ -2143,7 +2143,7 @@ class QueryBuilder[T]:
         """If text search is active, resolve ranked IDs; otherwise return None."""
         if self._text is None and self._hybrid_text is None:
             return None
-        return self._store._ranked_ids_from_search(  # noqa: SLF001
+        return self._store._ranked_ids_from_search(
             self._cls,
             self._filters,
             self._exists_filters,
@@ -2199,7 +2199,7 @@ class QueryBuilder[T]:
         ranked_ids = self._resolve_search_ids()
         if ranked_ids is not None and not ranked_ids:
             return []
-        return self._store._execute_projection(  # noqa: SLF001
+        return self._store._execute_projection(
             self._cls,
             select_cols,
             self._select_lang,
@@ -2229,7 +2229,7 @@ class QueryBuilder[T]:
             # Fast path: scalar("identifier") returns ranked IDs directly
             if scalar_col == "identifier":
                 return [*ranked_ids]
-        return self._store._execute_scalar_projection(  # noqa: SLF001
+        return self._store._execute_scalar_projection(
             self._cls,
             scalar_col,
             self._select_lang,
@@ -2251,7 +2251,7 @@ class QueryBuilder[T]:
 
     def count(self) -> int:
         """Return the total count without fetching items."""
-        return self._store._execute_query(  # noqa: SLF001
+        return self._store._execute_query(
             self._cls,
             self._filters,
             self._exists_filters,
@@ -2272,7 +2272,7 @@ class QueryBuilder[T]:
     def exists(self) -> bool:
         """Return True if at least one result matches the filters."""
         if self._text is not None or self._hybrid_text is not None:
-            ranked_ids = self._store._ranked_ids_from_search(  # noqa: SLF001
+            ranked_ids = self._store._ranked_ids_from_search(
                 self._cls,
                 self._filters,
                 self._exists_filters,
@@ -2287,7 +2287,7 @@ class QueryBuilder[T]:
                 search_lang=self._search_lang,
             )
             return len(ranked_ids) > 0
-        return self._store._execute_exists(  # noqa: SLF001
+        return self._store._execute_exists(
             self._cls,
             self._filters,
             self._exists_filters,
@@ -2335,7 +2335,7 @@ class CodesScope:
         the two).
         """
         store = self._store
-        if store._lance is None:  # noqa: SLF001
+        if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
         codelist_urns = _as_seq(codelist_urn)
         id_filter = list(dataset_ids) if dataset_ids is not None else None
@@ -2343,7 +2343,7 @@ class CodesScope:
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(  # noqa: SLF001
+            bm25_rows = store._lance.bm25_search_rows(
                 query,
                 columns=_CODE_ROW_COLUMNS,
                 lang=lang,
@@ -2355,11 +2355,11 @@ class CodesScope:
                 codelist_urn_filter=codelist_urns,
             )
         if mode in ("vector", "hybrid"):
-            if store._embedding_model is None:  # noqa: SLF001
+            if store._embedding_model is None:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
                 raise RuntimeError(msg)
-            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))  # noqa: SLF001
-            vec_rows = store._lance.search_rows(  # noqa: SLF001
+            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
+            vec_rows = store._lance.search_rows(
                 qvec,
                 columns=_CODE_ROW_COLUMNS,
                 lang=lang,
@@ -2406,7 +2406,7 @@ class CodesScope:
         """
         store = self._store
         try:
-            row = store._c.execute(  # noqa: SLF001
+            row = store._c.execute(
                 """
                 SELECT c.code_urn, c.codelist_urn, c.code_id, c.parent_id, c.depth,
                        c.name
@@ -2466,14 +2466,14 @@ class ConceptsScope:
     ) -> SearchResult[Hit[ConceptHit]]:
         """Search concept rows; returns `Hit` objects wrapping `ConceptHit`."""
         store = self._store
-        if store._lance is None:  # noqa: SLF001
+        if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
         scheme_urns = _as_seq(scheme_urn)
 
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(  # noqa: SLF001
+            bm25_rows = store._lance.bm25_search_rows(
                 query,
                 columns=_CONCEPT_ROW_COLUMNS,
                 lang=lang,
@@ -2484,11 +2484,11 @@ class ConceptsScope:
                 scheme_urn_filter=scheme_urns,
             )
         if mode in ("vector", "hybrid"):
-            if store._embedding_model is None:  # noqa: SLF001
+            if store._embedding_model is None:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
                 raise RuntimeError(msg)
-            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))  # noqa: SLF001
-            vec_rows = store._lance.search_rows(  # noqa: SLF001
+            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
+            vec_rows = store._lance.search_rows(
                 qvec,
                 columns=_CONCEPT_ROW_COLUMNS,
                 lang=lang,
@@ -2525,7 +2525,7 @@ class ConceptsScope:
         """Direct SQL lookup of a single concept by URN."""
         store = self._store
         try:
-            row = store._c.execute(  # noqa: SLF001
+            row = store._c.execute(
                 """
                 SELECT c.concept_urn, c.scheme_urn, c.concept_id, c.name, c.description
                 FROM sdmx.concept c
@@ -2597,7 +2597,7 @@ class ReferenceMetadataScope:
         ``fuzzy``, ``rrf_k``, ``oversample``).
         """
         store = self._store
-        if store._lance is None:  # noqa: SLF001
+        if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
 
         set_urn_filter: list[str] | None = None
@@ -2609,7 +2609,7 @@ class ReferenceMetadataScope:
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(  # noqa: SLF001
+            bm25_rows = store._lance.bm25_search_rows(
                 query,
                 columns=_REFMETA_ROW_COLUMNS,
                 lang=lang,
@@ -2620,11 +2620,11 @@ class ReferenceMetadataScope:
                 set_urn_filter=set_urn_filter,
             )
         if mode in ("vector", "hybrid"):
-            if store._embedding_model is None:  # noqa: SLF001
+            if store._embedding_model is None:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
                 raise RuntimeError(msg)
-            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))  # noqa: SLF001
-            vec_rows = store._lance.search_rows(  # noqa: SLF001
+            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
+            vec_rows = store._lance.search_rows(
                 qvec,
                 columns=_REFMETA_ROW_COLUMNS,
                 lang=lang,
@@ -2691,13 +2691,13 @@ class DatasetsScope:
     ) -> SearchResult[Hit[BaseDataset]]:
         """Search datasets; returns `Hit` objects wrapping `BaseDataset`."""
         store = self._store
-        if store._lance is None:  # noqa: SLF001
+        if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
 
         bm25_pairs: list[tuple[str, float]] = []
         vec_pairs: list[tuple[str, float]] = []
         if mode in ("bm25", "hybrid"):
-            bm25_pairs = store._lance.bm25_search(  # noqa: SLF001
+            bm25_pairs = store._lance.bm25_search(
                 query,
                 lang=lang,
                 limit=oversample if mode == "hybrid" else limit + offset,
@@ -2706,11 +2706,11 @@ class DatasetsScope:
                 entity_type=_DATASET_ENTITY_TYPES,
             )
         if mode in ("vector", "hybrid"):
-            if store._embedding_model is None:  # noqa: SLF001
+            if store._embedding_model is None:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
                 raise RuntimeError(msg)
-            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))  # noqa: SLF001
-            vec_pairs = store._lance.search(  # noqa: SLF001
+            qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
+            vec_pairs = store._lance.search(
                 qvec,
                 lang=lang,
                 limit=oversample if mode == "hybrid" else limit + offset,
@@ -2741,7 +2741,7 @@ class DatasetsScope:
         total = len(ranked)
         page = ranked[offset : offset + limit]
         identifiers = [ident for ident, _ in page]
-        datasets = store._fetch_by_identifiers(identifiers)  # noqa: SLF001
+        datasets = store._fetch_by_identifiers(identifiers)
         by_id = {ds.identifier: ds for ds in datasets}
         hits: list[Hit[BaseDataset]] = []
         for ident, (score, src) in page:
@@ -3170,32 +3170,32 @@ class Catalog:
             msg = "from_connection() does not support embedding_model — Lance needs a folder-mode catalog"
             raise ValueError(msg)
         instance = cls.__new__(cls)
-        instance._uri = ":connection:"  # noqa: SLF001 — alternate constructor sets private state
-        instance._conn = conn  # noqa: SLF001
-        instance._owns_connection = False  # noqa: SLF001
-        instance._bundle_dir = None  # noqa: SLF001
-        instance._data_path = None  # noqa: SLF001
-        instance._azure_credentials = None  # noqa: SLF001
-        instance._embedding_model = None  # noqa: SLF001
-        instance._embedding_metadata = None  # noqa: SLF001
-        instance._document_prefix = document_prefix  # noqa: SLF001
-        instance._query_prefix = query_prefix  # noqa: SLF001
-        instance._read_only = read_only  # noqa: SLF001
-        instance._bulk_depth = 0  # noqa: SLF001
-        instance._lance = None  # noqa: SLF001
-        instance._cursor_local = threading.local()  # noqa: SLF001
+        instance._uri = ":connection:"
+        instance._conn = conn
+        instance._owns_connection = False
+        instance._bundle_dir = None
+        instance._data_path = None
+        instance._azure_credentials = None
+        instance._embedding_model = None
+        instance._embedding_metadata = None
+        instance._document_prefix = document_prefix
+        instance._query_prefix = query_prefix
+        instance._read_only = read_only
+        instance._bulk_depth = 0
+        instance._lance = None
+        instance._cursor_local = threading.local()
         _refuse_statcat_schema_mismatch(conn)
         if read_only:
             _ = _catalog_schema.open_schema_readonly(conn)
         else:
             _ = _catalog_schema.create_schema(conn)
         _refuse_sdmx_schema_rebuild(conn)
-        instance._registry = sdmxlib.LocalRegistry.from_connection(conn)  # noqa: SLF001
+        instance._registry = sdmxlib.LocalRegistry.from_connection(conn)
         # Shared-connection mode: the caller owns any ATTACH plumbing. The
         # DataStore wraps the same connection without applying its own
         # extensions/ATTACH; lake reads/writes only work if the caller has
         # already ATTACHed a ducklake.
-        instance._data = sdmxlib.DuckDBDataStore.from_registry(instance._registry)  # noqa: SLF001
+        instance._data = sdmxlib.DuckDBDataStore.from_registry(instance._registry)
         return instance
 
     def _init_lance(self) -> None:

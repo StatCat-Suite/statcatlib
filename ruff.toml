@@ -50,6 +50,14 @@ ignore = [
   "SIM108", # sometimes you might want to use either style
   "ERA001", # commented out code can be noisey for if it is actually dead code
   "TC",     # flake8-type-checking — lazy imports in 3.14 will make this unnecessary
+
+  # ── Suite decisions ───────────────────────────────────────────────────────
+  # SLF001 (private-member-access) cannot see package boundaries, so a module
+  # reading its own package's underscored helpers, or one instance reading
+  # another's private state in the same class, is flagged at every site.
+  # sdmxlib measured 40 suppressions and found no defect; statcatlib carried
+  # 51 of the same kind. Off suite-wide (GH-67, sdmxlib GH-58).
+  "SLF001", # private-member-access — see above
 ]
 
 [lint.per-file-ignores]
@@ -72,7 +80,7 @@ ignore = [
 # needs to reach past the CLI.
 "src/statcatlib/cli/**/*.py" = ["B008", "FBT"]
 # Tests: skip docstrings, annotations, security checks, and unused-arg checks
-"tests/**/*.py" = ["D", "ANN", "S101", "ARG", "DTZ001", "SLF001", "PLC0415"]
+"tests/**/*.py" = ["D", "ANN", "S101", "ARG", "DTZ001", "PLC0415"]
 "tests/test_public_api.py" = ["PLC0415"]  # imports inside test methods are the point
 # tools/: developer scripts, run by `just`, not shipped — not an importable
 # package. T201 stays ON: the prints are scoped with `# noqa: T201` inline, as
