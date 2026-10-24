@@ -19,8 +19,8 @@ extra_css:
 
 theme:
   name: material
+  logo: https://statcat-suite.github.io/assets/favicon.svg
   icon:
-    logo: material/library-shelves
     repo: fontawesome/brands/github
   favicon: https://statcat-suite.github.io/assets/favicon.svg
   palette:
