@@ -35,8 +35,8 @@ model = SentenceTransformer("intfloat/multilingual-e5-small")
 store = sc.Catalog("my_catalog", embedding_model=model)
 ```
 
-Requires the `search` optional extra (`uv run --extra search` or
-`uv add statcatlib[search]`). In-memory stores cannot use `embedding_model`
+Requires the `search` optional extra: `uv add 'statcatlib[search]'`, or
+`pip install 'statcatlib[search]'` (`uv run --extra search` in a checkout). In-memory stores cannot use `embedding_model`
 (raises `ValueError`).
 
 ```python
