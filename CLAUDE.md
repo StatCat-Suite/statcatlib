@@ -36,13 +36,13 @@ src/
     statcatlib/
     ├── model/          # Domain model — attrs classes, no sdmxlib imports
     │   ├── __init__.py
-    │   ├── catalog.py       # Catalog, CatalogRecord
-    │   ├── dataset.py       # Dataset, StatisticalDataset
+    │   ├── catalog.py       # CatalogRecord, CatalogDescription
+    │   ├── dataset.py       # BaseDataset and its five kinds, Variable
     │   ├── distribution.py  # Distribution, DataService
     │   ├── agents.py        # Agent, ContactPoint
     │   ├── temporal.py      # TemporalCoverage, Frequency
     │   ├── spatial.py       # SpatialCoverage
-    │   ├── classification.py # Concept, Standard
+    │   ├── classification.py # Standard
     │   ├── quality.py       # QualityAnnotation, ProvenanceStatement
     │   ├── licence.py       # LicenceDocument
     │   ├── skos.py          # Concept, ConceptRef, ConceptScheme
@@ -58,8 +58,10 @@ src/
     │   └── xhtml.py         # XHTML → markdown for reference metadata
     ├── sources/        # Connectors that ingest into the catalog
     │   ├── __init__.py
-    │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record
+    │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
+    ├── cli/            # The `statcat` command (Typer): build-index, bundle check/explain/rebind/attach-cmd
+    │   └── __init__.py
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
     ├── bundle.py       # Portable bundles — data_path policies; publish_bundle, check_bundle
@@ -121,15 +123,17 @@ Four query operations:
 counting should span the whole catalog. Use `query(AggregateDataset)` when
 you need type-narrowed results.
 
-`QueryBuilder` supports chaining: `.filter()`, `.search()`, `.include()`,
-`.full()`, `.sort_by()`, `.limit()`, `.offset()`, `.with_facets()`, then
-terminal `.execute()` → `SearchResult[DatasetT]`.
+`QueryBuilder` supports chaining: `.filter()`, `.from_ids()`, `.search()`,
+`.hybrid_search()`, `.include()`, `.full()`, `.sort_by()`, `.limit()`,
+`.offset()`, `.with_facets()`, then a terminal: `.execute()` →
+`SearchResult[DatasetT]`, or `.collect()`, `.all()`, `.first()`, `.one()`,
+`.count()`, `.exists()`.
 
 **Selective relationship loading** — `.include(*rels)` declares which
-relationships to batch-load. Default (no `.include()`) loads all ~17. First
+relationships to batch-load. Default (no `.include()`) loads all 18. First
 `.include()` call switches to a whitelist; subsequent calls accumulate.
 `.full()` resets to loading everything. `get()` always loads all relationships
-regardless. Valid names match model field names: `publisher`, `contact_point`,
+regardless. Valid names match model field names: `publisher`, `creator`, `contact_point`,
 `frequency`, `licence`, `themes`, `subject`, `dataset_type`, `keywords`,
 `spatial_coverage`, `distributions`, `conforms_to`, `quality_annotations`,
 `provenance`, `dimension_names`, `variables`, `feature_types`, `authors`.
@@ -331,9 +335,9 @@ refuses a manifest version above this build's with `IncompatibleCatalogError`
 (`_refuse_unreadable_index`, GH-40). That refusal is stricter than GH-3's
 warn-and-serve rule, which covers stale indexes in a format this build reads.
 
-Indexes built before pinaxlib v5.23.0 (a single `search` table, everything stemmed
-as English) are still served, with a warning, until `build_index()`
-rebuilds them. The reverse does not hold: **pinaxlib older than v5.23.0
+pinaxlib is statcatlib's former name. Indexes built before pinaxlib v5.23.0
+(a single `search` table, everything stemmed as English) are still served,
+with a warning, until `build_index()` rebuilds them. The reverse does not hold: **pinaxlib older than v5.23.0
 reading a newer index finds no table it recognises and returns zero hits
 silently**, so the library must be deployed before any bundle built with
 it.

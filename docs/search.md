@@ -106,8 +106,8 @@ A language's table gets an approximate nearest-neighbour index (`IVF_FLAT`)
 once it holds 256 rows with vectors. A smaller table is scanned in full, which
 at that size is faster and exact. `IVF_FLAT` keeps each vector whole, so
 approximate search returns the same neighbours as an exact scan. Indexes built
-before pinaxlib 5.24.0 used a quantised index that misses many of them, and
-`Catalog.open()` warns when it finds one.
+before pinaxlib 5.24.0 (pinaxlib is statcatlib's former name) used a quantised
+index that misses many of them, and `Catalog.open()` warns when it finds one.
 
 Vector search is best at synonyms, paraphrases and vague queries. It misses
 exact codes and rare names, which carry little meaning to a model.
