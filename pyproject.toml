@@ -32,7 +32,9 @@ dependencies = [
     # `reg.obs()` asks Eurostat for CSV it serves, so `ingest_data()` can
     # fetch from it (sdmxlib GH-50). >=0.72: `sdmxlib.bundle`, the manifest
     # and checker `publish_bundle` and `check_bundle` build on (GH-3).
-    "sdmxlib>=0.72.0",
+    # <0.73: the suite is pre-1.0, so a minor may break; the PR that adopts
+    # sdmxlib 0.73 raises the cap (GH-67).
+    "sdmxlib>=0.72.0,<0.73",
 ]
 
 [project.optional-dependencies]

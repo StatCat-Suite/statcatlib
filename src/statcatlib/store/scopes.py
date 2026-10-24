@@ -810,7 +810,7 @@ class CodelistScope:
         if self._exprs:
             msg = ".collect() cannot be used when .enrich() is active — use .rows() instead"
             raise ValueError(msg)
-        return self._store._resolve_codelist(self.urn).codes  # noqa: SLF001
+        return self._store._resolve_codelist(self.urn).codes
 
     def rows(self) -> list[Row]:
         """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``)."""
@@ -835,7 +835,7 @@ class CodelistScope:
 
     def count(self) -> int:
         """Terminal: number of codes in this codelist."""
-        cl = self._store._resolve_codelist(self.urn)  # noqa: SLF001
+        cl = self._store._resolve_codelist(self.urn)
         return len(cl.codes)
 
     def label(self, lang: str = "en") -> str | None:
@@ -920,7 +920,7 @@ class CodeScope:
 
     def collect(self) -> Code:
         """Terminal: resolve this code."""
-        return self._store._resolve_codelist(self.codelist_urn).codes[self.code_id]  # noqa: SLF001
+        return self._store._resolve_codelist(self.codelist_urn).codes[self.code_id]
 
     def dataset_count(self) -> int:
         """Terminal: number of datasets whose DSD uses the codelist containing this code."""
@@ -1022,7 +1022,7 @@ class DimensionScope:
     @property
     def codelist(self) -> CodelistScope | None:
         """Navigate to this dimension's codelist (lazy)."""
-        urn = self._store._resolve_codelist_urn(  # noqa: SLF001
+        urn = self._store._resolve_codelist_urn(
             self.dataflow_urn,
             self.dimension_id,
         )

@@ -464,12 +464,19 @@ stating it.
   `# pyrefly: ignore[kind]` only; its `unused-ignore` reports a dead one.
   ruff, pyrefly and pydoclint are capped in `pyproject.toml`, so a checker
   release reaches the gate only through a PR that bumps it.
-- **Linter/formatter**: `ruff`
+- **Linter/formatter**: `ruff`. SLF001 (private-member-access) is off
+  suite-wide (GH-67, sdmxlib GH-58): it cannot see package boundaries, so a
+  module reading its own package's underscored helpers is flagged at every
+  site. sdmxlib measured 40 suppressions and found no defect, and statcatlib's
+  51 were the same kind. Do not add `# noqa: SLF001`; the rule is not selected.
 - **Domain model**: `attrs`
 - **Storage**: `duckdb`
 - **Search**: `lancedb` (optional, BM25 FTS via Tantivy + ANN vector index)
 - **HTTP**: `httpx`
-- **SDMX dependency**: `sdmxlib` (ingest, store, query and bundles; the domain model takes only `InternationalString`)
+- **SDMX dependency**: `sdmxlib` (ingest, store, query and bundles; the domain model takes only `InternationalString`).
+  Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
+  caps each suite dependency below its next minor (`sdmxlib>=0.72.0,<0.73`),
+  and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.
 

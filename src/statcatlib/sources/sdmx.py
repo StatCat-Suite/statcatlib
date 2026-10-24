@@ -55,7 +55,7 @@ def _resolve_latest(store: Catalog, identifier: str) -> str:
     if m is None:
         return identifier
     agency, flow_id = m.group(1), m.group(2)
-    row = store._c.execute(  # noqa: SLF001
+    row = store._c.execute(
         """
         SELECT identifier FROM dataset
         WHERE identifier LIKE ?
