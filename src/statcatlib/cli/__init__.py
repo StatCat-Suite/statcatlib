@@ -352,7 +352,8 @@ def _load_encoder(model_name: str, device: str | None) -> EmbeddingModel:
     except ImportError as exc:
         console.print(
             f"[red]Missing dependency:[/] {exc}.\n"
-            f"Install the search extra: [bold]uv pip install 'statcatlib[search]'[/]"
+            f"Install the search extra: [bold]uv add 'statcatlib[search]'[/] "
+            f"(or [bold]pip install 'statcatlib[search]'[/])"
         )
         raise typer.Exit(code=1) from exc
 

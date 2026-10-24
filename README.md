@@ -1,5 +1,12 @@
 # statcatlib
 
+[![PyPI](https://img.shields.io/pypi/v/statcatlib)](https://pypi.org/project/statcatlib/)
+[![Python](https://img.shields.io/pypi/pyversions/statcatlib)](https://pypi.org/project/statcatlib/)
+[![License](https://img.shields.io/pypi/l/statcatlib)](LICENSE)
+[![Docs](https://github.com/StatCat-Suite/statcatlib/actions/workflows/docs.yml/badge.svg)](https://statcat-suite.github.io/statcatlib/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 > **Note:** This library has been written extensively with AI assistance
 > (Claude Code). Users who are not comfortable with AI-generated code should
 > take that into account before adopting it.

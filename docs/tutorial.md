@@ -8,6 +8,7 @@ and tracking provenance with lineage. Each section builds on the previous one.
 
 ```bash
 uv add statcatlib
+# or: pip install statcatlib
 ```
 
 ## 1. Create a catalog store
@@ -397,7 +398,8 @@ matched entity as `hit.payload`; pass `kinds=("dataset",)` for datasets only.
 
 !!! note "Requires `statcatlib[search]`"
     `store.search()` requires a folder-mode catalog backed by LanceDB. Install
-    with `uv add statcatlib[search]` and pass a folder path to `Catalog`.
+    with `uv add 'statcatlib[search]'` (or `pip install 'statcatlib[search]'`)
+    and pass a folder path to `Catalog`.
 
 ```python
 results = store.search("gross domestic product", kinds=("dataset",), limit=10)

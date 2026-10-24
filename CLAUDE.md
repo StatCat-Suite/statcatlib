@@ -455,7 +455,9 @@ stating it.
 
 ## Tooling
 
-- **Package manager**: `uv`
+- **Package manager**: `uv`. Install instructions (README, docs, CLI and error
+  messages) say `uv add <pkg>` first and `pip install <pkg>` second, as the
+  fallback. Quote extras: `uv add 'statcatlib[search]'`.
 - **Command runner**: `just`
 - **Type checker**: `pyrefly`, the only one (GH-7): `preset = "all"` minus a
   counted deny-list in `pyrefly.toml`, over `src` and `tests`. Suppressions are
@@ -530,6 +532,9 @@ fails the strict build.
 
 - git commit/push/merge etc. will NEVER be done without asking.
 - the project always uses conventional commits for commit messages.
+- Nothing is signed with Claude: commit messages carry no `Co-Authored-By`
+  trailer, and PR descriptions, issues and comments carry no "Generated with
+  Claude Code" footer. The README's note discloses AI use once for the project.
 - The project lives at github.com/StatCat-Suite/statcatlib; use `gh` for the API.
 - Releases go through a PR: `just release-1-preview` … `release-5-pypi`.
 - Any change that is non trivial (more than a line or 2 change, or some simple CI/justfile change) will be done in a feature branch.
