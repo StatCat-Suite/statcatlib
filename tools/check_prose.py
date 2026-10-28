@@ -14,8 +14,9 @@ pattern can gate them. Two checks are exact, and this runs those:
 
 Headings: the Markdown in `MARKDOWN`, outside code fences. Phrases: that
 Markdown, and every Python, toml and justfile line under `CODE`. CHANGELOG.md
-and `design/` are left out as the historical record: both design documents
-open with a "Historical" banner, as sdmxlib's exempt `design/archive/` does.
+and `design/` are left out as the historical record: `design/archive/` holds
+superseded specs, each opening with a "Historical" banner, as sdmxlib's does.
+Current designs live in `docs/design/` and are checked.
 
 CLAUDE.md's own "Writing style" section quotes the phrases it bans, so lines
 inside it are exempt. This file is exempt for the same reason.

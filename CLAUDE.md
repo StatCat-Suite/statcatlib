@@ -539,6 +539,12 @@ hand-written guides in `docs/api/`. The build imports sdmxlib's
 therefore `just ci`, needs the network: an inventory that cannot be fetched
 fails the strict build.
 
+Designs follow sdmxlib's layout. Current designs and RFCs live in
+`docs/design/`, are listed in `docs/design/SITEMAP.md` and appear in the site
+nav under "Design". EGM review reports for a design go in
+`docs/design/egm/<feature>/`. Superseded specs move to `design/archive/` with a
+"Historical" banner; `design/` is outside the site and the prose check.
+
 ## Git / GitHub
 
 - git commit/push/merge etc. will NEVER be done without asking.

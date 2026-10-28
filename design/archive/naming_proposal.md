@@ -1,9 +1,9 @@
 # Naming proposal for storage, versioning and publishing
 
-> **Historical.** This records how the names in the RFC `docs/designs/products-editions-inventory.md` were chosen, from two clean-room namers and two brainstorm passes. The RFC is authoritative; names and decisions here may have changed since.
+> **Historical.** This records how the names in the RFC `docs/design/products-editions-inventory.md` were chosen, from two clean-room namers and two brainstorm passes. The RFC is authoritative; names and decisions here may have changed since.
 
 * **Date:** 2026-10-28
-* **Status:** historical. `docs/designs/products-editions-inventory.md` (§1 glossary and Key Decisions) is authoritative for the names; this file records how they were chosen. Last revision: 2, the second brainstorm pass. Revision 1 compared
+* **Status:** historical. `docs/design/products-editions-inventory.md` (§1 glossary and Key Decisions) is authoritative for the names; this file records how they were chosen. Last revision: 2, the second brainstorm pass. Revision 1 compared
   two clean-room namers. The first Goldfish round on `concepts_brief.md`
   reviewed it, and the owner settled two points afterwards (below).
 

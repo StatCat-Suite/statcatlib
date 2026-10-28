@@ -114,6 +114,7 @@ nav:
     - Bundles: reference/bundle.md
     - URNs: reference/urn.md
     - Testing: reference/testing.md
-  - Designs:
-    - "RFC: Products, editions and the Inventory": designs/products-editions-inventory.md
+  - Design:
+    - Sitemap: design/SITEMAP.md
+    - "RFC: Products, editions and the Inventory": design/products-editions-inventory.md
   - StatCat Suite: https://statcat-suite.github.io/
