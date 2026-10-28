@@ -107,13 +107,14 @@ store.query(sc.AggregateDataset).filter(
 q.distribution(
     format: str | None = None,
     media_type: str | None = None,
-    service_type: str | None = None,
     endpoint_url: str | None = None,
 ) -> ExistsFilter
 ```
 
 Match datasets that have at least one distribution matching all specified
 criteria. All keyword arguments are ANDed within a single distribution row.
+`endpoint_url` matches the distribution's linked `DataService`. Any other key
+raises `ValueError`.
 
 ```python
 # Datasets with a CSV distribution
@@ -129,14 +130,12 @@ store.query(sc.OpenDataset).filter(
 
 ```python
 q.has_service(
-    service_type: str | None = None,
     endpoint_url: str | None = None,
 ) -> ExistsFilter
 ```
 
-Match datasets served by a `DataService` matching the specified criteria.
-Equivalent to `distribution(...)` but focuses on the linked service rather
-than the distribution itself.
+Match datasets with a distribution whose linked `DataService` has the given
+`endpoint_url`. Any other key raises `ValueError`.
 
 ```python
 # Datasets served via the OECD SDMX endpoint

@@ -652,12 +652,49 @@ def has_dimensions(dims: list[str]) -> SdmxDimensionFilter | _NoOpFilter:
     return SdmxDimensionFilter(dimensions=tuple(dims))
 
 
+#: Keyword keys ``distribution()`` accepts, mapped to the column each one
+#: compares. The keys are caller input, so only these column names reach the
+#: SQL text (GH-71).
+_DISTRIBUTION_KWARG_COLS: dict[str, str] = {
+    "format": "dist_t.format",
+    "media_type": "dist_t.media_type",
+    "endpoint_url": "svc.endpoint_url",
+}
+#: Keyword keys ``has_service()`` accepts. ``DataService`` stores no service
+#: type, so ``endpoint_url`` is the only service column.
+_SERVICE_KWARG_COLS: dict[str, str] = {
+    "endpoint_url": "svc.endpoint_url",
+}
+_SERVICE_JOIN = "LEFT JOIN data_service svc ON dist_t.service_id = svc.id"
+
+
+def _kwarg_conditions(fn: str, allowed: dict[str, str], kwargs: dict[str, object]) -> dict[str, object]:
+    """Map *kwargs* keys to their columns, refusing any key not in *allowed*.
+
+    Args:
+        fn: The calling function's name, for the error message.
+        allowed: Accepted keys, mapped to qualified column names.
+        kwargs: The caller's keyword arguments.
+
+    Returns:
+        The values keyed by qualified column name.
+
+    Raises:
+        ValueError: If a key is not in *allowed*.
+    """
+    unknown = sorted(k for k in kwargs if k not in allowed)
+    if unknown:
+        msg = f"{fn}() got unknown keys {unknown}; accepted keys are {sorted(allowed)}"
+        raise ValueError(msg)
+    return {allowed[k]: v for k, v in kwargs.items()}
+
+
 def distribution(**kwargs: object) -> ExistsFilter:
     """Filter datasets that have a distribution matching *all* kwargs.
 
-    Supported keys: ``format``, ``media_type``.  For service-level
-    filtering pass ``service_type`` or ``endpoint_url`` — these are
-    resolved via a LEFT JOIN to ``data_service``.
+    Supported keys: ``format``, ``media_type``, and ``endpoint_url``, which
+    is resolved via a LEFT JOIN to the distribution's ``data_service``. Any
+    other key raises ``ValueError``.
 
     All kwargs within one call must match the *same* distribution row.
     For "at least two separate distributions" semantics, call this
@@ -668,7 +705,7 @@ def distribution(**kwargs: object) -> ExistsFilter:
 
     Args:
         **kwargs: Column values one distribution must all match: ``format``,
-            ``media_type``, ``service_type`` or ``endpoint_url``.
+            ``media_type`` or ``endpoint_url``.
 
     Returns:
         An EXISTS filter over the dataset's distributions.
@@ -676,34 +713,15 @@ def distribution(**kwargs: object) -> ExistsFilter:
     Example:
         store.query(sc.BaseDataset).filter(q.distribution(media_type="text/csv")).execute()
     """
-    service_keys = {"service_type", "endpoint_url"}
-    dist_conditions: dict[str, object] = {}
-    svc_conditions: dict[str, object] = {}
-    needs_service_join = False
-
-    for k, v in kwargs.items():
-        if k in service_keys:
-            svc_conditions[f"svc.{k}"] = v
-            needs_service_join = True
-        else:
-            dist_conditions[k] = v
-
-    conditions = dict(dist_conditions)
-    join: str | None = None
-
-    if needs_service_join:
-        join = "LEFT JOIN data_service svc ON dist_t.access_service_id = svc.id"
-        # Merge service conditions — they reference the svc alias so keep as-is
-        # We'll handle this specially in to_sql by passing raw conditions
-        conditions.update(svc_conditions)
-
+    conditions = _kwarg_conditions("distribution", _DISTRIBUTION_KWARG_COLS, kwargs)
+    join = _SERVICE_JOIN if any(col.startswith("svc.") for col in conditions) else None
     return _DistributionFilter(conditions=conditions, join=join)
 
 
 def has_service(**kwargs: object) -> ExistsFilter:
     """Filter datasets served by a data service matching *all* kwargs.
 
-    Supported keys: ``service_type``, ``endpoint_url``.
+    Supported key: ``endpoint_url``. Any other key raises ``ValueError``.
 
     Args:
         **kwargs: Column values the data service must all match.
@@ -716,9 +734,8 @@ def has_service(**kwargs: object) -> ExistsFilter:
             q.has_service(endpoint_url="https://example.com/sdmx")
         ).execute()
     """
-    conditions = {f"svc.{k}": v for k, v in kwargs.items()}
-    join = "LEFT JOIN data_service svc ON dist_t.access_service_id = svc.id"
-    return _DistributionFilter(conditions=conditions, join=join)
+    conditions = _kwarg_conditions("has_service", _SERVICE_KWARG_COLS, kwargs)
+    return _DistributionFilter(conditions=conditions, join=_SERVICE_JOIN)
 
 
 # ---------------------------------------------------------------------------
@@ -744,9 +761,9 @@ class _DistributionFilter(ExistsFilter):
         col_clauses: list[str] = ["dist_t.dataset_id = d.identifier"]
         params: list[object] = []
 
-        for col, val in self.conditions.items():
-            # col may already have a table prefix (e.g. "svc.service_type")
-            fq_col = col if "." in col else f"dist_t.{col}"
+        # Keys are qualified column names from _DISTRIBUTION_KWARG_COLS or
+        # _SERVICE_KWARG_COLS, never caller input (GH-71).
+        for fq_col, val in self.conditions.items():
             if val is None:
                 col_clauses.append(f"{fq_col} IS NULL")
             elif isinstance(val, (list, tuple)):
