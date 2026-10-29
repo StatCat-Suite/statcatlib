@@ -166,15 +166,31 @@ class CkanClient:
         timeout: float = 30.0,
     ): ...
 
+    def package_search(
+        self,
+        *,
+        organization: str | None = None,
+        subject: str | None = None,
+        rows: int = 100,
+        start: int = 0,
+    ) -> list[dict[str, object]]: ...
+    def alternate_languages(self, dataset_type: str = "dataset") -> dict[str, list[str]]: ...
+    def close(self) -> None: ...
     def __enter__(self) -> CkanClient: ...
     def __exit__(self, *args) -> None: ...
 ```
+
+`package_search` returns raw package dicts, paging internally.
+`alternate_languages` returns the language pairs the portal's
+`scheming_dataset_schema_show` declares, such as
+`{"en": ["en-t-fr"], "fr": ["fr-t-en"]}` on open.canada.ca, or `{}` when the
+portal runs no ckanext-scheming schema.
 
 ```python
 from statcatlib.sources.ckan import CkanClient
 
 with CkanClient("https://open.canada.ca/data") as client:
-    datasets = sc.ingest_ckan(store, client, organization="statcan")
+    packages = client.package_search(organization="statcan-statcan", rows=10)
 ```
 
 ### `ingest_ckan`
@@ -182,39 +198,50 @@ with CkanClient("https://open.canada.ca/data") as client:
 ```python
 ingest_ckan(
     store: Catalog,
-    client: CkanClient,
+    base_url: str,
     *,
     organization: str | None = None,
     subject: str | None = None,
-    rows: int = 100,
+    limit: int = 100,
 ) -> list[OpenDataset]
 ```
 
-Ingest datasets from a CKAN portal as `OpenDataset` records. Handles
-pagination internally up to `rows` total results.
+Ingest datasets from a CKAN portal as `OpenDataset` records, paging
+internally up to `limit` results. It also records the portal's declared
+language pairs with `store.add_language_alternates(..., source=base_url)`.
 
 **Parameters:**
 
+- `base_url` — the portal, e.g. `"https://open.canada.ca/data"`
 - `organization` — filter by CKAN organization slug
-- `subject` — filter by subject/tag
-- `rows` — maximum number of datasets to ingest
+- `subject` — free-text filter appended to the search query
+- `limit` — maximum number of datasets to ingest
 
 CKAN resources are mapped to `Distribution` objects on each `OpenDataset`.
-Bilingual metadata (English/French) is handled where available.
+
+**Languages.** Each language key is stored under its own tag as the portal
+sends it. open.canada.ca sends English translated from French under `en-t-fr`
+and French translated from English under `fr-t-en`, and these stay separate
+from `en` and `fr`: `title.get("en")` returns `None` for a package whose only
+English title is under `en-t-fr`, and `title.get("en", "en-t-fr")` returns it.
+CKAN declares no default language, so a plain string is stored under `und`
+(undetermined) and a code stored as text, such as a subject slug or frequency
+code, under `zxx`. No field is given an English value the portal did not send.
 
 ```python
-with CkanClient("https://open.canada.ca/data") as client:
-    # All StatCan datasets from open.canada.ca
-    datasets = sc.ingest_ckan(
-        store, client,
-        organization="statcan",
-        rows=500,
-    )
+# All StatCan datasets from open.canada.ca
+datasets = sc.ingest_ckan(
+    store,
+    "https://open.canada.ca/data",
+    organization="statcan-statcan",
+    limit=500,
+)
 
-    # Environmental datasets from a thematic filter
-    env_datasets = sc.ingest_ckan(
-        store, client,
-        subject="environment",
-        rows=100,
-    )
+# Environmental datasets from a thematic filter
+env_datasets = sc.ingest_ckan(
+    store,
+    "https://open.canada.ca/data",
+    subject="environment",
+    limit=100,
+)
 ```

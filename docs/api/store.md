@@ -472,6 +472,56 @@ store.add_lineage(
 )
 ```
 
+## Language pairs
+
+### `add_language_alternates`
+
+```python
+store.add_language_alternates(
+    pairs: Mapping[str, Sequence[str]],
+    *,
+    source: str,
+) -> None
+```
+
+Record language tags that a source declares as alternates of a primary tag.
+open.canada.ca's CKAN schema declares `{"en": ["en-t-fr"], "fr": ["fr-t-en"]}`.
+`en-t-fr` is an RFC 6497 transformed-content tag, meaning English translated
+from French, so text under it is English. statcatlib infers no pairs from the
+tags themselves. It records what a source or caller declares, and
+`ingest_ckan` records the portal's pairs with the portal's URL as `source`.
+Label lookup still matches tags exactly: `title.get("en")` does not return
+`en-t-fr` text.
+
+A pair already recorded is kept, its source included. Nothing is written when
+any pair is refused:
+
+- `TypeError` when the alternates of a primary are a single string.
+- `ValueError` when a tag is empty, an alternate equals its primary, an
+  alternate is already recorded under another primary, or a tag would be both
+  a primary and an alternate. The last rule keeps the step from alternate to
+  primary to one.
+
+```python
+store.add_language_alternates({"en": ["en-t-fr"]}, source="https://open.canada.ca/data")
+```
+
+### `language_alternates`
+
+```python
+store.language_alternates() -> list[Row]
+```
+
+The recorded pairs, one `Row` per alternate tag with `primary_tag`,
+`alternate_tag` and `source`, ordered by primary then alternate tag.
+
+```python
+for pair in store.language_alternates():
+    print(pair.primary_tag, pair.alternate_tag, pair.source)
+# en en-t-fr https://open.canada.ca/data
+# fr fr-t-en https://open.canada.ca/data
+```
+
 ### `DatasetScope` — lineage navigation
 
 Lineage traversal and querying is accessed via `store.dataset(id)`:

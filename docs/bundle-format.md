@@ -50,16 +50,19 @@ not repeated here.
 `dataset_subject`, `dataset_keyword`, `dataset_spatial`, `dataset_standard`,
 `distribution`, `data_service`, `service_dataset`, `quality_annotation`,
 `provenance`, `variable`, `feature_type`, `author`, `dimension_name`,
-`catalog_theme_taxonomy`, `lineage` and `_meta`. Multilingual text is a
-`MAP(VARCHAR, VARCHAR)` from language tag to string.
+`catalog_theme_taxonomy`, `lineage`, `language_alternate` and `_meta`.
+Multilingual text is a `MAP(VARCHAR, VARCHAR)` from language tag to string.
 
-- `statcat._meta` records `schema_version`, `"2.0"` for this page, written
+- `statcat._meta` records `schema_version`, `"2.1"` for this page, written
   once when the schema is created. A reader MUST refuse a catalog that
   records another version, or none, before running any DDL on it:
   `create_schema` adds missing tables and leaves existing ones alone, so an
   older catalog would otherwise fail later, on the first query that reads a
   column added since. `Catalog.open()`, `from_connection()` and
   `publish_bundle` raise `IncompatibleCatalogError`.
+- `statcat.language_alternate` records the language tags a source declares as
+  alternates of a primary tag, such as `en-t-fr` for `en`, with the source.
+  Each alternate has one primary, and no tag is both.
 - A dataset whose `sdmx_dataflow_urn` is set MUST name a dataflow the `sdmx`
   schema holds. That column is the only link from the catalog into sdmxlib's
   tables; statcatlib copies no structure.

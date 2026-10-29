@@ -30,6 +30,10 @@ pytestmark = pytest.mark.unit
 
 _CKAN_BASE = "https://open.canada.ca/data"
 _SEARCH_URL = f"{_CKAN_BASE}/api/3/action/package_search"
+_SCHEMA_URL = f"{_CKAN_BASE}/api/3/action/scheming_dataset_schema_show?type=dataset"
+
+#: The pairs open.canada.ca's dataset schema declares.
+_ALTERNATES = {"en": ["en-t-fr"], "fr": ["fr-t-en"]}
 
 # Minimal valid CKAN package dict representing a bilingual StatCan dataset
 _PKG: dict[str, Any] = {
@@ -77,6 +81,14 @@ _PKG: dict[str, Any] = {
 }
 
 
+def _mock_schema(httpx_mock: HTTPXMock, alternates: object = _ALTERNATES) -> None:
+    """Answer the dataset-schema request ``ingest_ckan`` makes after searching."""
+    httpx_mock.add_response(
+        url=_SCHEMA_URL,
+        json={"success": True, "result": {"dataset_type": "dataset", "alternate_languages": alternates}},
+    )
+
+
 def _make_search_response(packages: list[dict[str, Any]], count: int | None = None) -> dict[str, Any]:
     return {
         "success": True,
@@ -109,18 +121,28 @@ class TestParseIstring:
         assert result.get("en") == "Hello"
         assert result.get("fr") == "Bonjour"
 
-    def test_plain_string_becomes_en(self):
+    def test_plain_string_is_undetermined(self):
+        """CKAN declares no default language, so untagged text is ``und``, never English."""
         result = _parse_istring("Just English")
-        assert result.get("en") == "Just English"
-        assert result.get("fr") is None
+        assert result.as_dict() == {"und": "Just English"}
 
-    def test_none_uses_fallback(self):
-        result = _parse_istring(None, fallback_en="fallback")
-        assert result.get("en") == "fallback"
+    def test_transformed_content_tags_kept(self):
+        """open.canada.ca sends translated text under RFC 6497 tags; each is kept as given."""
+        result = _parse_istring({"en-t-fr": "Hydrography", "fr": "Hydrographie"})
+        assert result.as_dict() == {"en-t-fr": "Hydrography", "fr": "Hydrographie"}
+        assert result.get("en") is None
 
-    def test_empty_string_uses_fallback(self):
-        result = _parse_istring("", fallback_en="fallback")
-        assert result.get("en") == "fallback"
+    def test_json_string_with_transformed_tag(self):
+        result = _parse_istring(json.dumps({"en": "Title", "fr-t-en": "Titre"}))
+        assert result.as_dict() == {"en": "Title", "fr-t-en": "Titre"}
+
+    def test_empty_values_dropped(self):
+        result = _parse_istring({"en": "", "fr": "Bonjour", "de": None})
+        assert result.as_dict() == {"fr": "Bonjour"}
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", {}, {"en": ""}, 42])
+    def test_nothing_usable_is_empty(self, raw: object):
+        assert not _parse_istring(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +187,13 @@ class TestParseFrequency:
         freq = _parse_frequency("Annual")
         assert freq is not None
         assert freq.id == "ANNUAL"
+
+    def test_plain_string_is_a_code(self):
+        """open.canada.ca sends codes such as ``as_needed``; the label is ``zxx``, not English."""
+        freq = _parse_frequency("as_needed")
+        assert freq is not None
+        assert freq.label is not None
+        assert freq.label.as_dict() == {"zxx": "as_needed"}
 
     def test_dict_input(self):
         freq = _parse_frequency({"en": "Quarterly", "fr": "Trimestrielle"})
@@ -215,6 +244,18 @@ class TestParseKeywords:
         assert len(kws) == 2
         assert kws[0].get("fr") == "x"
 
+    def test_transformed_content_tags_paired_by_position(self):
+        raw = {"en-t-fr": ["water", "maps"], "fr": ["eau", "cartes"]}
+        kws = _parse_keywords(raw)
+        assert [kw.as_dict() for kw in kws] == [
+            {"en-t-fr": "water", "fr": "eau"},
+            {"en-t-fr": "maps", "fr": "cartes"},
+        ]
+
+    def test_empty_keywords_dropped(self):
+        kws = _parse_keywords({"en": ["", "b"], "fr": ["", ""]})
+        assert [kw.as_dict() for kw in kws] == [{"en": "b"}]
+
     def test_not_a_dict_returns_empty(self):
         assert _parse_keywords("not a dict") == []
 
@@ -233,7 +274,8 @@ class TestParseSubjects:
         refs = _parse_subjects(raw)
         assert len(refs) == 2
         assert refs[0].uri == "urn:ckan:tag:labour"
-        assert refs[0].label.get("en") == "Labour"
+        # Subjects are the portal's codes (``government_and_politics``), not English text.
+        assert refs[0].label.as_dict() == {"zxx": "Labour"}
 
     def test_plain_list(self):
         refs = _parse_subjects(["Health", "Demographics"])
@@ -291,7 +333,23 @@ class TestCkanPackageToDataset:
         pkg = dict(_PKG)
         del pkg["title_translated"]
         ds = _ckan_package_to_dataset(pkg)
-        assert ds.title.get("en") == "Labour Force Survey"
+        assert ds.title.as_dict() == {"und": "Labour Force Survey"}
+
+    def test_translated_title_keeps_tags_and_no_id_title(self):
+        """A package with only ``en-t-fr`` English keeps it, and the id never becomes the English title."""
+        pkg = {
+            **_PKG,
+            "title_translated": {"en-t-fr": "Hydrography of Montreal", "fr": "Hydrographie de Montréal"},
+            "notes_translated": {"en-t-fr": "Watercourses.", "fr": "Cours d'eau."},
+        }
+        ds = _ckan_package_to_dataset(pkg)
+        assert ds.title.as_dict() == {"en-t-fr": "Hydrography of Montreal", "fr": "Hydrographie de Montréal"}
+        assert ds.description.as_dict() == {"en-t-fr": "Watercourses.", "fr": "Cours d'eau."}
+
+    def test_no_title_is_empty(self):
+        pkg = {k: v for k, v in _PKG.items() if k not in ("title", "title_translated")}
+        ds = _ckan_package_to_dataset(pkg)
+        assert not ds.title
 
     def test_description_bilingual(self):
         ds = _ckan_package_to_dataset(_PKG)
@@ -302,7 +360,14 @@ class TestCkanPackageToDataset:
         ds = _ckan_package_to_dataset(_PKG)
         assert ds.publisher is not None
         assert ds.publisher.id == "statcan-statcan"
-        assert ds.publisher.name.get("en") == "Statistics Canada / Statistique Canada"
+        # A plain organization title carries no language.
+        assert ds.publisher.name.as_dict() == {"und": "Statistics Canada / Statistique Canada"}
+
+    def test_publisher_without_title_named_by_slug(self):
+        pkg = {**_PKG, "organization": {"name": "statcan-statcan"}}
+        ds = _ckan_package_to_dataset(pkg)
+        assert ds.publisher is not None
+        assert ds.publisher.name.as_dict() == {"zxx": "statcan-statcan"}
 
     def test_issued_parsed(self):
         ds = _ckan_package_to_dataset(_PKG)
@@ -365,6 +430,8 @@ class TestCkanPackageToDataset:
         assert ds.licence is not None
         assert ds.licence.id == "ca-ogl-lgo"
         assert ds.licence.uri == "https://open.canada.ca/en/open-government-licence-canada"
+        assert ds.licence.label is not None
+        assert ds.licence.label.as_dict() == {"und": "Open Government Licence - Canada"}
 
     def test_language(self):
         ds = _ckan_package_to_dataset(_PKG)
@@ -379,7 +446,7 @@ class TestCkanPackageToDataset:
         pkg = {**_PKG, "title": "Fallback Title"}
         del pkg["title_translated"]
         ds = _ckan_package_to_dataset(pkg)
-        assert ds.title.get("en") == "Fallback Title"
+        assert ds.title.as_dict() == {"und": "Fallback Title"}
 
     def test_empty_resources_gives_no_distributions(self):
         pkg: dict[str, object] = {**_PKG, "resources": []}
@@ -469,6 +536,7 @@ class TestIngestCkan:
             url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=10&start=0",
             json=_make_search_response([_PKG], count=1),
         )
+        _mock_schema(httpx_mock)
         store = sc.Catalog().open()
         datasets = sc.ingest_ckan(store, _CKAN_BASE, limit=10)
         assert len(datasets) == 1
@@ -481,6 +549,7 @@ class TestIngestCkan:
             url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
             json=_make_search_response([_PKG], count=1),
         )
+        _mock_schema(httpx_mock)
         store = sc.Catalog().open()
         datasets = sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         assert isinstance(datasets, list)
@@ -491,6 +560,7 @@ class TestIngestCkan:
             url=f"{_SEARCH_URL}?q=organization%3Astatcan-statcan&rows=10&start=0",
             json=_make_search_response([_PKG], count=1),
         )
+        _mock_schema(httpx_mock)
         store = sc.Catalog().open()
         datasets = sc.ingest_ckan(store, _CKAN_BASE, organization="statcan-statcan", limit=10)
         assert len(datasets) == 1
@@ -507,6 +577,7 @@ class TestIngestCkan:
             url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
             json=_make_search_response([_PKG], count=1),
         )
+        _mock_schema(httpx_mock)
         with sc.Catalog(tmp_path / "catalog") as store:
             sc.ingest_ckan(store, _CKAN_BASE, limit=5)
             store.build_index()
@@ -522,8 +593,47 @@ class TestIngestCkan:
             url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
             json=_make_search_response([_PKG], count=1),
         )
+        _mock_schema(httpx_mock)
+        _mock_schema(httpx_mock)
         store = sc.Catalog().open()
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         count = store.query(sc.OpenDataset).count()
         assert count == 1  # upsert, not duplicate
+        assert len(store.language_alternates()) == 2  # recorded once, not twice
+
+    def test_records_declared_language_pairs(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response([_PKG], count=1),
+        )
+        _mock_schema(httpx_mock)
+        store = sc.Catalog().open()
+        sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+        assert store.language_alternates() == [
+            {"primary_tag": "en", "alternate_tag": "en-t-fr", "source": _CKAN_BASE},
+            {"primary_tag": "fr", "alternate_tag": "fr-t-en", "source": _CKAN_BASE},
+        ]
+
+    @pytest.mark.parametrize("status", [400, 404])
+    def test_portal_without_schema_records_no_pairs(self, httpx_mock: HTTPXMock, status: int):
+        """A portal without ckanext-scheming does not know the action; ingest still succeeds."""
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response([_PKG], count=1),
+        )
+        httpx_mock.add_response(url=_SCHEMA_URL, status_code=status, json={"success": False})
+        store = sc.Catalog().open()
+        datasets = sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+        assert len(datasets) == 1
+        assert store.language_alternates() == []
+
+    def test_schema_without_pairs_records_none(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response([_PKG], count=1),
+        )
+        _mock_schema(httpx_mock, alternates=None)
+        store = sc.Catalog().open()
+        sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+        assert store.language_alternates() == []

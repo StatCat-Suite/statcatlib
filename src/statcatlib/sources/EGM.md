@@ -55,7 +55,9 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
     `measure_dim` is not a DSD dimension.
 - `ingest_ckan(store, base_url, *, organization=None, subject=None, limit=100) -> list[OpenDataset]`
   fetches up to `limit` packages with `CkanClient.package_search`, maps each
-  with `_ckan_package_to_dataset`, and calls `store.put(datasets)`.
+  with `_ckan_package_to_dataset`, and calls `store.put(datasets)`. It then
+  records the portal's `CkanClient.alternate_languages()` with
+  `store.add_language_alternates(..., source=base_url)`.
 
 Public in their modules, not re-exported by the package:
 
@@ -66,7 +68,10 @@ Public in their modules, not re-exported by the package:
   `httpx.Client`. `package_search(*, organization=None, subject=None, rows=100, start=0)`
   returns raw package dicts, paging 100 rows per request until `rows` results
   are collected or the portal's `count` is reached. With no filters the query
-  is `*:*`. `close()` closes the HTTP client.
+  is `*:*`. `alternate_languages(dataset_type="dataset")` returns the
+  `alternate_languages` declared by `scheming_dataset_schema_show`, or `{}`
+  when the portal has no scheming schema (an HTTP error or `success: false`).
+  `close()` closes the HTTP client.
 
 Internal helpers that tests import directly:
 
@@ -97,7 +102,12 @@ Internal helpers that tests import directly:
   `_seq` accessors narrow each value and return `None` or an empty container
   on a type mismatch. Keep new CKAN fields behind these accessors rather than
   typing raw JSON as `Any`.
-- CKAN bilingual fields can arrive as dicts, JSON-encoded strings, or plain
+- CKAN language tags are kept as the portal sends them, `en-t-fr` and
+  `fr-t-en` included. No field gets an English value the portal did not send:
+  a plain string is stored under `und`, and a code stored as text (a subject
+  slug, a frequency code, an organization slug used as its name) under `zxx`.
+  Empty values are dropped, and a field with none left is empty (GH-84).
+- CKAN multilingual fields can arrive as dicts, JSON-encoded strings, or plain
   strings. `_parse_istring` and `_parse_frequency` accept all three. The
   others return `[]` for one shape: `_parse_keywords` for a non-JSON plain
   string or JSON that decodes to a non-dict, and `_parse_subjects` and

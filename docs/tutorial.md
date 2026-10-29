@@ -227,24 +227,26 @@ stored version. Re-running it replaces the table and its binding.
 
 ## 4. Ingest from CKAN
 
-Any CKAN portal (open.canada.ca, data.gov, data.gov.uk, …) can be ingested using
-the `CkanClient`:
+Any CKAN portal (open.canada.ca, data.gov, data.gov.uk, …) can be ingested by
+its base URL:
 
 ```python
-from statcatlib.sources.ckan import CkanClient
-
 with sc.Catalog("open_canada") as store:
-    with CkanClient("https://open.canada.ca/data") as client:
-        datasets = sc.ingest_ckan(
-            store, client,
-            organization="statcan",
-            rows=500,
-        )
-        print(f"Ingested {len(datasets)} datasets")
+    datasets = sc.ingest_ckan(
+        store,
+        "https://open.canada.ca/data",
+        organization="statcan-statcan",
+        limit=500,
+    )
+    print(f"Ingested {len(datasets)} datasets")
 ```
 
 CKAN datasets are ingested as `OpenDataset` records, with distributions mapped
-from CKAN resources.
+from CKAN resources. Language tags are kept as the portal sends them.
+open.canada.ca's `en-t-fr` and `fr-t-en` tags (English translated from French,
+French translated from English) stay separate from `en` and `fr`. Ingest
+records the pairs the portal declares, and `store.language_alternates()`
+lists them.
 
 ## 5. Direct lookup
 

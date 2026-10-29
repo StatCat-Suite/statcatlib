@@ -30,8 +30,8 @@ modules; `statcatlib/__init__.py` re-exports `NotLoadedError` and
 - `Catalog(uri=":memory:", *, data_path=, azure_credentials=, embedding_model=, document_prefix=, query_prefix=, read_only=False)`
   - Lifecycle: `open()`, `close()`, context manager, `Catalog.from_connection(conn)`.
   - Properties: `uri`, `connection`, `cursor`, `registry`, `data`, `bundle_dir`, `index_layout`, `index_annotations`, `embedding_metadata`, `embedding_model_name`, `document_prefix`, `query_prefix`.
-  - Writes: `put(obj)` for a dataset, `ConceptScheme`, or a sequence of either; `put_concept()`; `add_lineage()`; `bulk_load()`; `transaction()`; `build_index(...) -> int`; `attach_embedding_model()`.
-  - Reads: `get(cls, id)`, `query(cls, **filters) -> QueryBuilder`, `search(text, *, kinds=, lang=, ...) -> SearchResult[Hit]`, `facets(*fields)`, `get_concept_scheme()`, `get_concept()`, `agent_labels()`, `concept_labels()`, `spatial_labels()`, `code_map()`, `codelist_for()`, `get_structure()`, `metadata_for()`, `metadata_report()`, `metadata_targets()`, `check_index_compatible()`.
+  - Writes: `put(obj)` for a dataset, `ConceptScheme`, or a sequence of either; `put_concept()`; `add_lineage()`; `add_language_alternates(pairs, *, source)`; `bulk_load()`; `transaction()`; `build_index(...) -> int`; `attach_embedding_model()`.
+  - Reads: `get(cls, id)`, `query(cls, **filters) -> QueryBuilder`, `search(text, *, kinds=, lang=, ...) -> SearchResult[Hit]`, `facets(*fields)`, `get_concept_scheme()`, `get_concept()`, `agent_labels()`, `concept_labels()`, `spatial_labels()`, `code_map()`, `codelist_for()`, `get_structure()`, `metadata_for()`, `metadata_report()`, `metadata_targets()`, `check_index_compatible()`, `language_alternates() -> list[Row]`.
   - Scope entry points: `themes`, `concept_schemes`, `codes`, `concepts`, `datasets`, `reference_metadata`, `codelists`, `dataset(id)`, `codelist(urn)`, `dimensions(ds)`.
 - `QueryBuilder[T]` with modifiers `filter`, `from_ids`, `search`, `hybrid_search`, `include`, `full`, `sort_by`, `limit`, `offset`, `with_facets`, `select`, `scalars`, and terminals `execute`, `collect`, `all`, `first`, `one`, `rows`, `row`, `values`, `value`, `count`, `exists`.
 - `SearchResult[T]`, `Hit[T]`, `CodeHit`, `ConceptHit`, `ReferenceMetadataHit`.
@@ -95,7 +95,7 @@ modules; `statcatlib/__init__.py` re-exports `NotLoadedError` and
 - Opens and closes a DuckDB connection; read-write opens take DuckDB's exclusive file lock on `meta.duckdb`.
 - Folder mode creates `<uri>/` and `meta.duckdb`, ATTACHes `lake.ducklake`, and may rewrite a relative DuckLake DATA_PATH stamp to the absolute path on a read-write open (GH-23).
 - `create_schema` creates the `statcat` schema and tables; `LocalRegistry` creates or migrates the `sdmx` schema on the same connection.
-- `put`, `put_concept` and `add_lineage` upsert rows in `statcat` tables. `bulk_load()` raises `wal_autocheckpoint` to 1GB; on exit of the outermost block it resets it to 16MB and runs `CHECKPOINT`. `transaction()` commits on clean exit and rolls back on exception.
+- `put`, `put_concept` and `add_lineage` upsert rows in `statcat` tables. `add_language_alternates` inserts rows into `statcat.language_alternate` and keeps a pair already recorded. `bulk_load()` raises `wal_autocheckpoint` to 1GB; on exit of the outermost block it resets it to 16MB and runs `CHECKPOINT`. `transaction()` commits on clean exit and rolls back on exception.
 - `build_index()` writes LanceDB tables, `search/index.json` and, when a model is set, `search/embeddings.json`; it calls the embedding model in batches (256 by default, `STATCAT_EMBED_BATCH_SIZE` overrides).
 - `discard_orphans()` drops LanceDB tables left by an abandoned rebuild.
 - Emits `warnings.warn` for stale or legacy search indexes and for changed search annotations.

@@ -229,7 +229,8 @@ One DuckDB file, two schema owners:
   `dataset_theme`, `dataset_subject`, `dataset_keyword`, `dataset_spatial`,
   `dataset_standard`, `distribution`, `data_service`, `service_dataset`,
   `quality_annotation`, `provenance`, `variable`, `feature_type`, `author`,
-  `dimension_name`, `catalog_theme_taxonomy`, `lineage`, `_meta`
+  `dimension_name`, `catalog_theme_taxonomy`, `lineage`, `language_alternate`,
+  `_meta`
 - **`sdmx` schema** — SDMX structural tables owned by sdmxlib (schema 2.48).
   Catalogue spine (`artefact`, `localized_text`, `annotation`,
   `annotation_text`, `artefact_ref`, `fetch_scope`); item tables (`code`,

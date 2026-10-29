@@ -7261,3 +7261,71 @@ class Catalog:
                 notes,
             ],
         )
+
+    def add_language_alternates(self, pairs: Mapping[str, Sequence[str]], *, source: str) -> None:
+        """Record language tags that a source declares as alternates of a primary tag.
+
+        open.canada.ca's CKAN schema declares ``{"en": ["en-t-fr"], "fr":
+        ["fr-t-en"]}``: text under ``en-t-fr`` (English translated from French,
+        RFC 6497) is English. statcatlib infers no pairs from the tags
+        themselves. It records the pairs a source or caller declares, and label
+        lookup still matches tags exactly (GH-84).
+
+        A pair already recorded is kept as it is, its source included.
+
+        Args:
+            pairs: Each primary tag mapped to its alternate tags.
+            source: Where the pairs come from, such as the portal's base URL.
+
+        Raises:
+            TypeError: The alternates of a primary tag are a single string
+                rather than a sequence of tags.
+            ValueError: A tag is empty, an alternate equals its primary, an
+                alternate is already recorded under another primary, or a tag
+                would be both a primary and an alternate. Nothing is written.
+        """
+        self._require_writable("add_language_alternates()")
+        existing: dict[str, str] = {
+            str(alt): str(primary)
+            for alt, primary in self._c.execute("SELECT alternate_tag, primary_tag FROM language_alternate").fetchall()
+        }
+        new: dict[str, str] = {}
+        for primary, alternates in pairs.items():
+            if isinstance(alternates, str):
+                msg = f"alternates of {primary!r} must be a sequence of tags, got the string {alternates!r}"
+                raise TypeError(msg)
+            for alt in alternates:
+                if not primary.strip() or not alt.strip():
+                    msg = f"language tags must be non-empty, got {primary!r} -> {alt!r}"
+                    raise ValueError(msg)
+                if alt == primary:
+                    msg = f"{alt!r} cannot be an alternate of itself"
+                    raise ValueError(msg)
+                recorded = existing.get(alt) or new.get(alt)
+                if recorded is not None and recorded != primary:
+                    msg = f"{alt!r} is already an alternate of {recorded!r}, not {primary!r}"
+                    raise ValueError(msg)
+                if alt not in existing:
+                    new[alt] = primary
+        # One step from alternate to primary: a chain would make lookup recursive.
+        if chained := sorted((existing.keys() | new.keys()) & {*existing.values(), *new.values()}):
+            msg = f"tags cannot be both a primary and an alternate: {chained}"
+            raise ValueError(msg)
+        for alt, primary in new.items():
+            self._exec("INSERT INTO language_alternate VALUES (?, ?, ?)", [alt, primary, source])
+
+    def language_alternates(self) -> list[Row]:
+        """Return the recorded language pairs, one `Row` per alternate tag.
+
+        Each row holds ``primary_tag``, ``alternate_tag`` and ``source``, ordered
+        by primary then alternate tag. See `add_language_alternates`.
+
+        Returns:
+            The pairs, or an empty list when none are recorded.
+        """
+        rows = self._c.execute(
+            """SELECT primary_tag, alternate_tag, source
+            FROM language_alternate
+            ORDER BY primary_tag, alternate_tag"""
+        ).fetchall()
+        return [Row(primary_tag=p, alternate_tag=a, source=s) for p, a, s in rows]
