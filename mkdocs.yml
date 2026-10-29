@@ -117,4 +117,5 @@ nav:
   - Design:
     - Sitemap: design/SITEMAP.md
     - "RFC: Products, editions and the Inventory": design/products-editions-inventory.md
+    - "RFC: Language tags and label lookup": design/language-tags.md
   - StatCat Suite: https://statcat-suite.github.io/
