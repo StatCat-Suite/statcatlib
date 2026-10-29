@@ -6,6 +6,12 @@ into the catalog as OpenDataset objects.
 The open.canada.ca portal stores many metadata fields as JSON-encoded
 strings rather than native JSON objects. The helpers here handle both
 representations defensively.
+
+Language tags are kept as the portal sends them, including RFC 6497
+transformed-content tags such as ``en-t-fr`` (English translated from
+French). CKAN declares no default language, so a plain string is stored
+under ``und`` and a code stored as text under ``zxx``. No field is given an
+English value the portal did not send (GH-84).
 """
 
 from __future__ import annotations
@@ -51,6 +57,12 @@ _FREQ_LABEL_TO_ID: dict[str, str] = {
 }
 
 _ROWS_PER_PAGE = 100
+
+#: BCP 47 tag for text the portal sends with no language: undetermined.
+_UNDETERMINED = "und"
+
+#: BCP 47 tag for a code stored as text: no linguistic content.
+_NO_LANGUAGE = "zxx"
 
 
 class CkanClient:
@@ -114,6 +126,35 @@ class CkanClient:
                 break
 
         return results
+
+    def alternate_languages(self, dataset_type: str = "dataset") -> dict[str, list[str]]:
+        """Return the language pairs the portal's dataset schema declares.
+
+        Portals running ckanext-scheming with ckanext-fluent publish
+        ``alternate_languages`` in ``scheming_dataset_schema_show``;
+        open.canada.ca declares ``{"en": ["en-t-fr"], "fr": ["fr-t-en"]}``.
+
+        Args:
+            dataset_type: The CKAN dataset type whose schema to read.
+
+        Returns:
+            Each primary tag mapped to its alternate tags. Empty when the
+            portal has no scheming schema or the schema declares no pairs.
+        """
+        try:
+            schema = self._get("scheming_dataset_schema_show", {"type": dataset_type})
+        except httpx.HTTPStatusError, RuntimeError:
+            return {}
+        if not isinstance(schema, Mapping):
+            return {}
+        declared = schema.get("alternate_languages")
+        if not isinstance(declared, Mapping):
+            return {}
+        return {
+            primary: [alt for alt in _seq(alts) if isinstance(alt, str) and alt.strip()]
+            for primary, alts in declared.items()
+            if isinstance(primary, str) and primary.strip() and _seq(alts)
+        }
 
     def _get(self, action: str, params: dict[str, str | int]) -> object:
         url = f"{self._base}/api/3/action/{action}"
@@ -185,31 +226,33 @@ def _seq(v: object) -> list[object]:
     return list(v) if isinstance(v, list) else []
 
 
-def _parse_istring(
-    raw: object,
-    *,
-    en_key: str = "en",
-    fr_key: str = "fr",
-    fallback_en: str = "",
-) -> InternationalString:
-    """Parse a bilingual field that may be a dict, a JSON-encoded string, or a plain string."""
-    if isinstance(raw, dict):
-        kw: dict[str, str] = {"en": raw.get(en_key) or fallback_en}
-        if fr_val := raw.get(fr_key):
-            kw["fr"] = fr_val
-        return InternationalString(**kw)
+def _lang_map(raw: Mapping[object, object]) -> dict[str, str]:
+    """The non-empty string values of *raw*, keyed by language tag as given."""
+    return {
+        tag.strip(): text
+        for tag, text in raw.items()
+        if isinstance(tag, str) and tag.strip() and isinstance(text, str) and text.strip()
+    }
+
+
+def _parse_istring(raw: object) -> InternationalString:
+    """Parse a multilingual field: a dict, a JSON-encoded dict, or a plain string.
+
+    Every language key is kept under its own tag, ``en-t-fr`` and ``fr-t-en``
+    included. A plain string is stored under ``und``. Empty values are dropped,
+    and a field with none left is the empty `InternationalString`.
+    """
     if isinstance(raw, str):
         try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                kw2: dict[str, str] = {"en": parsed.get(en_key) or fallback_en}
-                if fr_val2 := parsed.get(fr_key):
-                    kw2["fr"] = fr_val2
-                return InternationalString(**kw2)
+            parsed: object = json.loads(raw)
         except json.JSONDecodeError, ValueError:
-            pass
-        return InternationalString(en=raw or fallback_en)
-    return InternationalString(en=fallback_en)
+            parsed = None
+        if not isinstance(parsed, dict):
+            return InternationalString.of({_UNDETERMINED: raw} if raw.strip() else {})
+        raw = parsed
+    if isinstance(raw, Mapping):
+        return InternationalString.of(_lang_map(raw))
+    return InternationalString.EMPTY
 
 
 def _parse_dt(raw: object) -> datetime | None:
@@ -227,7 +270,12 @@ def _parse_dt(raw: object) -> datetime | None:
 
 
 def _parse_keywords(raw: object) -> list[InternationalString]:
-    """Parse CKAN keywords field: {'en': [...], 'fr': [...]} or JSON-encoded."""
+    """Parse CKAN keywords: ``{tag: [keyword, ...]}``, native or JSON-encoded.
+
+    Keywords are paired across languages by position, as the portal lists
+    them: the i-th keyword under each tag forms one keyword. Every tag is kept,
+    ``en-t-fr`` and ``fr-t-en`` included.
+    """
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
@@ -235,17 +283,13 @@ def _parse_keywords(raw: object) -> list[InternationalString]:
             return []
     if not isinstance(raw, dict):
         return []
-    en_words: list[str] = raw.get("en") or []
-    fr_words: list[str] = raw.get("fr") or []
-    # Zip together paired en/fr keywords; extras get en-only entries
-    result: list[InternationalString] = []
-    for i, en_kw in enumerate(en_words):
-        kw_args: dict[str, str] = {"en": en_kw}
-        if i < len(fr_words):
-            kw_args["fr"] = fr_words[i]
-        result.append(InternationalString(**kw_args))
-    result.extend(InternationalString(fr=fr_kw) for fr_kw in fr_words[len(en_words) :])
-    return result
+    words_by_tag = {tag: _seq(words) for tag, words in raw.items() if isinstance(tag, str)}
+    longest = max((len(words) for words in words_by_tag.values()), default=0)
+    keywords = (
+        InternationalString.of(_lang_map({tag: words[i] for tag, words in words_by_tag.items() if i < len(words)}))
+        for i in range(longest)
+    )
+    return [kw for kw in keywords if kw]
 
 
 def _parse_frequency(raw: object) -> Frequency | None:
@@ -266,13 +310,9 @@ def _parse_frequency(raw: object) -> Frequency | None:
     if not en_label:
         return None
     freq_id = _FREQ_LABEL_TO_ID.get(en_label.lower(), en_label.upper().replace(" ", "_"))
-    freq_kw: dict[str, str] = {"en": en_label}
-    if isinstance(raw, dict) and (label_fr := raw.get("fr")):
-        freq_kw["fr"] = label_fr
-    return Frequency(
-        id=freq_id,
-        label=InternationalString(**freq_kw),
-    )
+    # A plain string is the portal's frequency code (``as_needed``), not English text.
+    label = _parse_istring(raw) if isinstance(raw, dict) else InternationalString.of({_NO_LANGUAGE: en_label})
+    return Frequency(id=freq_id, label=label)
 
 
 def _parse_subjects(raw: object) -> list[ConceptRef]:
@@ -293,7 +333,8 @@ def _parse_subjects(raw: object) -> list[ConceptRef]:
     for item in raw:
         if isinstance(item, str) and item.strip():
             slug = item.strip().lower().replace(" ", "_")
-            refs.append(ConceptRef(uri=f"urn:ckan:tag:{slug}", label=InternationalString(en=item.strip())))
+            label = InternationalString.of({_NO_LANGUAGE: item.strip()})
+            refs.append(ConceptRef(uri=f"urn:ckan:tag:{slug}", label=label))
     return refs
 
 
@@ -319,7 +360,7 @@ def _parse_spatial(raw: object) -> list[SpatialCoverage]:
 def _map_resource(res: dict[str, object], package_id: str) -> Distribution:
     """Map a CKAN resource dict to a Distribution."""
     name_raw = res.get("name_translated") or res.get("name") or ""
-    title = _parse_istring(name_raw) if name_raw else None
+    title = _parse_istring(name_raw) or None
     url = _s(res, "url")
     url_type = _s(res, "url_type") or ""
     # download_url for uploaded files; access_url for links
@@ -361,31 +402,19 @@ def _ckan_package_to_dataset(raw: dict[str, object]) -> OpenDataset:
         raise ValueError(msg)
 
     # Title and description — prefer bilingual translated fields
-    title = _parse_istring(
-        raw.get("title_translated") or raw.get("title") or pkg_id,
-        fallback_en=pkg_id,
-    )
-    description = _parse_istring(
-        raw.get("notes_translated") or raw.get("notes") or "",
-    )
+    title = _parse_istring(raw.get("title_translated") or raw.get("title"))
+    description = _parse_istring(raw.get("notes_translated") or raw.get("notes"))
 
     # Publisher from CKAN organization
     org = _d(raw, "organization")
     publisher: Agent | None = None
     if org:
-        org_name = _s(org, "name") or _s(org, "id") or ""
-        org_title_raw = org.get("title") or org.get("name") or org_name
-        org_desc_raw = org.get("description") or None
-        pub_name = _parse_istring(org_title_raw, fallback_en=org_name)
-        # Some CKAN portals store org title/description as bilingual JSON strings
-        if org_desc_raw:
-            desc_parsed = _parse_istring(org_desc_raw)
-            if fr_name := desc_parsed.get("fr"):
-                pub_name = InternationalString(
-                    en=pub_name.get("en") or org_name,
-                    fr=fr_name,
-                )
-        publisher = Agent(id=org_name or None, name=pub_name)
+        org_name = _s(org, "name") or _s(org, "id")
+        # An organization with no title is named by its slug, a code.
+        pub_name = _parse_istring(org.get("title")) or InternationalString.of(
+            {_NO_LANGUAGE: org_name} if org_name else {}
+        )
+        publisher = Agent(id=org_name, name=pub_name)
 
     # Temporal
     issued = _parse_dt(raw.get("metadata_created") or raw.get("date_published"))
@@ -418,7 +447,7 @@ def _ckan_package_to_dataset(raw: dict[str, object]) -> OpenDataset:
     if lic_id or lic_title:
         licence = LicenceDocument(
             id=lic_id or lic_title,
-            label=InternationalString(en=lic_title) if lic_title else None,
+            label=_parse_istring(_s(raw, "license_title")) or None,
             uri=lic_url,
         )
 
@@ -467,6 +496,8 @@ def ingest_ckan(
 
     Fetches up to ``limit`` packages from the CKAN Action API, maps each
     to a statcatlib ``OpenDataset``, stores them all, and returns the list.
+    It also records the language pairs the portal's dataset schema declares
+    (`CkanClient.alternate_languages`), with *base_url* as their source.
 
     Args:
         store: Target Catalog.
@@ -485,6 +516,9 @@ def ingest_ckan(
             subject=subject,
             rows=limit,
         )
+        alternates = client.alternate_languages()
     datasets = [_ckan_package_to_dataset(pkg) for pkg in raw_packages]
     store.put(datasets)
+    if alternates:
+        store.add_language_alternates(alternates, source=base_url)
     return datasets

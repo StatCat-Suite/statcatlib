@@ -22,6 +22,7 @@ Bridge      dataset_theme, dataset_subject, dataset_keyword,
             dimension_name, concept_relation,
             concept_scheme_top_concept, catalog_theme_taxonomy
 Lineage     lineage
+Languages   language_alternate
 Meta        _meta
 
 SKOS identity model
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 #: The ``statcat`` schema this build writes and reads, recorded in ``statcat._meta``.
 #: `Catalog.open` refuses a catalog stamped with another (GH-39), so bumping it means
 #: rebuilding every catalog.
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "2.1"
 
 # ── DDL ────────────────────────────────────────────────────────────────
 
@@ -346,6 +347,16 @@ CREATE TABLE IF NOT EXISTS lineage (
 
 CREATE INDEX IF NOT EXISTS idx_lineage_source ON lineage(source_id);
 CREATE INDEX IF NOT EXISTS idx_lineage_target ON lineage(target_id);
+
+-- ── Languages ─────────────────────────────────────────────────────────
+-- Language tags declared as alternates of a primary tag, such as
+-- `en-t-fr` (English translated from French, RFC 6497) for `en`. Recorded
+-- as a source declares them. statcatlib infers no pairs (GH-84).
+CREATE TABLE IF NOT EXISTS language_alternate (
+    alternate_tag TEXT PRIMARY KEY,
+    primary_tag   TEXT NOT NULL,
+    source        TEXT NOT NULL
+);
 """
 
 
