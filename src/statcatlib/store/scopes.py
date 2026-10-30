@@ -407,6 +407,15 @@ def _compile_enriched_query(
 # ---------------------------------------------------------------------------
 
 
+def _dimension_label(component_id: str, name: dict[str, str] | None) -> InternationalString:
+    """A dimension's label: its concept's name in every language held.
+
+    A dimension whose concept has no name is labelled by its ID as a code,
+    under ``zxx`` (no linguistic content), never as English text (GH-94).
+    """
+    return InternationalString.of(name) if name else InternationalString.of({"zxx": component_id})
+
+
 @define
 class DimensionInfo:
     """Plain data object describing a dimension of a dataset.
@@ -979,7 +988,7 @@ class DimensionsScope:
             rows = self._store.connection.execute(
                 """
                 SELECT dc.component_id,
-                       COALESCE(con.name['en'], dc.component_id),
+                       con.name,
                        dc.position
                 FROM sdmx.dataflow df
                 JOIN sdmx.dsd_component dc ON dc.dsd_urn = df.dsd_urn
@@ -996,7 +1005,7 @@ class DimensionsScope:
             [
                 DimensionInfo(
                     id=r[0],
-                    label=InternationalString(en=r[1] or ""),
+                    label=_dimension_label(r[0], r[1]),
                     position=r[2],
                 )
                 for r in rows
@@ -1033,7 +1042,7 @@ class DimensionScope:
         rows = self._store.connection.execute(
             """
             SELECT dc.component_id,
-                   COALESCE(con.name['en'], dc.component_id),
+                   con.name,
                    dc.position
             FROM sdmx.dataflow df
             JOIN sdmx.dsd_component dc ON dc.dsd_urn = df.dsd_urn
@@ -1051,7 +1060,7 @@ class DimensionScope:
             raise LookupError(msg)
         return DimensionInfo(
             id=row[0],
-            label=InternationalString(en=row[1] or ""),
+            label=_dimension_label(row[0], row[1]),
             position=row[2],
         )
 

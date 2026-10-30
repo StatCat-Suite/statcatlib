@@ -35,11 +35,11 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
 - `dataset_from_dataflow(flow, dsd, *, publisher=None, themes=None) -> AggregateDataset`
   converts one sdmxlib `Dataflow` and its `DataStructure`. The identifier is
   `AGENCY:ID(VERSION)` from the flow's maintainer. The default publisher is an
-  `Agent` built from the maintainer agency, with the agency id as the English
-  name when the agency has neither an `en` nor an `fr` name.
+  `Agent` built from the maintainer agency, named by the agency id under
+  `zxx` (a code) when the agency has no name.
   `dimension_names` holds each dimension's resolved concept name, or the
-  dimension id in `en` and `fr` when the concept is unresolved or the
-  resolved object has no `name`.
+  dimension id under `zxx` when the concept is unresolved or the resolved
+  object has no `name` (GH-94).
 - `ingest_data(store, reg, identifier, *, measure_dim=None) -> str` fetches
   observations from `reg.obs(flow_urn).frame()` in the long layout, writes
   them with `store.data.write_observations` to
@@ -57,7 +57,11 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
   fetches up to `limit` packages with `CkanClient.package_search`, maps each
   with `_ckan_package_to_dataset`, and calls `store.put(datasets)`. It then
   records the portal's `CkanClient.alternate_languages()` with
-  `store.add_language_alternates(..., source=base_url)`.
+  `store.add_language_alternates(..., source=base_url)`. When the schema lists
+  `geographic_region` choices, `CkanClient.field_choices` returns them as a
+  `ConceptScheme`, which is stored first; each region code a package carries
+  becomes a `SpatialCoverage` whose `uri` is that code's concept URI, with no
+  label of its own (GH-83).
 
 Public in their modules, not re-exported by the package:
 
@@ -70,14 +74,23 @@ Public in their modules, not re-exported by the package:
   are collected or the portal's `count` is reached. With no filters the query
   is `*:*`. `alternate_languages(dataset_type="dataset")` returns the
   `alternate_languages` declared by `scheming_dataset_schema_show`, or `{}`
-  when the portal has no scheming schema (an HTTP error or `success: false`).
-  `close()` closes the HTTP client.
+  when the portal has no scheming schema (HTTP 400 or 404, or
+  `success: false`). `field_choices(field_name, dataset_type="dataset")`
+  returns a select field's choices as a `ConceptScheme` at
+  `choice_scheme_uri`, each choice a `Concept` whose notation is its code, or
+  `None`. Both read one schema, fetched once per client; any other HTTP
+  failure raises `httpx.HTTPStatusError`. `close()` closes the HTTP client.
+- `ckan.choice_scheme_uri(base_url, field_name, dataset_type="dataset") -> str`
+  is `{base_url}/scheming/{dataset_type}/{field_name}`.
 
 Internal helpers that tests import directly:
 
-- `ckan._ckan_package_to_dataset(raw) -> OpenDataset` is a pure mapper with no
-  network or store access. It raises `ValueError` when the package has no
-  string `id`. Every other field falls back to a default.
+- `ckan._ckan_package_to_dataset(raw, *, regions=None) -> OpenDataset` is a
+  pure mapper with no network or store access. It raises `ValueError` when
+  the package has no string `id`. Every other field falls back to a default;
+  an organization with neither slug nor UUID gives no publisher (GH-94).
+  `regions` is the `geographic_region` scheme that `_parse_spatial` maps
+  codes through; other region text is stored under `und`.
 
 ## Invariants
 

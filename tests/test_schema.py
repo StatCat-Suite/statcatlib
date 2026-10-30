@@ -106,7 +106,7 @@ class TestSchemaNamespace:
     def test_schema_version_stored(self, conn: duckdb.DuckDBPyConnection) -> None:
         version = s.get_schema_version(conn)
         assert version is not None
-        assert version == "2.1"
+        assert version == s.SCHEMA_VERSION == "2.2"
 
 
 # ---------------------------------------------------------------------------

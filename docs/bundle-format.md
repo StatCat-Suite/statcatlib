@@ -53,7 +53,7 @@ not repeated here.
 `catalog_theme_taxonomy`, `lineage`, `language_alternate` and `_meta`.
 Multilingual text is a `MAP(VARCHAR, VARCHAR)` from language tag to string.
 
-- `statcat._meta` records `schema_version`, `"2.1"` for this page, written
+- `statcat._meta` records `schema_version`, `"2.2"` for this page, written
   once when the schema is created. A reader MUST refuse a catalog that
   records another version, or none, before running any DDL on it:
   `create_schema` adds missing tables and leaves existing ones alone, so an

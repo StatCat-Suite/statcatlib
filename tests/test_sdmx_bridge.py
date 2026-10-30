@@ -135,12 +135,11 @@ class TestDimensionNames:
         assert len(ds.dimension_names) == 2
 
     def test_dimension_ids_as_fallback(self) -> None:
-        """Without resolved concept refs, dimension IDs are used as labels."""
+        """Without resolved concept refs, dimension IDs label as codes, under ``zxx``."""
         flow, dsd = _make_minimal()
         ds = dataset_from_dataflow(flow, dsd)
-        dim_ids = {d.get("en") for d in ds.dimension_names}
-        assert "GEO" in dim_ids
-        assert "FREQ" in dim_ids
+        assert {d.get("zxx") for d in ds.dimension_names} == {"GEO", "FREQ"}
+        assert all(d.langs == ["zxx"] for d in ds.dimension_names)
 
     def test_empty_dsd_gives_no_dimensions(self) -> None:
         dsd = DataStructure(id="DSD_EMPTY", maintainer="TEST", name=_i("Empty"), dimensions=[])

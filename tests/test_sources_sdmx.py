@@ -11,6 +11,7 @@ from collections.abc import Iterator
 import pytest
 from sdmxlib import artefact_urn
 from sdmxlib.model.codelist import Code, Codelist
+from sdmxlib.model.concept import Concept, ConceptScheme
 from sdmxlib.model.dataflow import Dataflow
 from sdmxlib.model.datastructure import DataStructure, Dimension
 from sdmxlib.model.hierarchy import HierarchicalCode, Hierarchy, HierarchyAssociation
@@ -153,9 +154,7 @@ class TestIngestSdmx:
         result = sc.ingest_sdmx(store, registry)
         ds = result[0]
         assert len(ds.dimension_names) == 2
-        dim_ids = {d.get("en") for d in ds.dimension_names}
-        assert "GEO" in dim_ids
-        assert "FREQ" in dim_ids
+        assert {d.get("zxx") for d in ds.dimension_names} == {"GEO", "FREQ"}
 
     def test_sdmxlib_tables_populated(self):
         store = sc.Catalog().open()
@@ -266,12 +265,12 @@ class TestPublisherMapping:
         assert ds.publisher is not None
         assert ds.publisher.id == "TEST"
 
-    def test_publisher_name_fallback_to_id(self, sdmx_store: sc.Catalog):
-        """When agency has no name, publisher.name.get('en') should fall back to agency id."""
+    def test_an_agency_without_a_name_is_labelled_by_its_id(self, sdmx_store: sc.Catalog):
+        """An agency with no name is labelled by its ID as a code, under ``zxx``."""
         ds = sdmx_store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
         assert ds is not None
         assert ds.publisher is not None
-        assert ds.publisher.name.get("en") is not None
+        assert ds.publisher.name == sc.InternationalString(zxx="TEST")
 
     def test_facets_publisher_works_after_ingest(self, sdmx_store: sc.Catalog):
         counts = sdmx_store.facets("publisher")
@@ -1002,3 +1001,35 @@ class TestWithin:
 
         result = store.query(sc.StatisticalDataset).filter(q.within("REF_AREA", "TOR", hierarchy=h_admin)).execute()
         assert result.total == 0
+
+
+class TestDimensionLabels:
+    """Dimension labels carry every language of the concept name, and a code otherwise (GH-94)."""
+
+    def _store(self, *, with_concepts: bool) -> tuple[sc.Catalog, sc.AggregateDataset]:
+        registry, _ = _make_registry()
+        if with_concepts:
+            registry.add(
+                ConceptScheme(
+                    id="CS_TEST",
+                    maintainer="TEST",
+                    name=_i("Concepts"),
+                    concepts=[
+                        Concept(id="GEO", name=InternationalString(en="Geography", fr="Géographie", de="Geografie"))
+                    ],
+                )
+            )
+        store = sc.Catalog().open()
+        ds = sc.ingest_sdmx(store, registry)[0]
+        return store, ds
+
+    def test_a_named_concept_labels_in_every_language(self):
+        store, ds = self._store(with_concepts=True)
+        labels = {d.id: d.label for d in store.dimensions(ds).collect()}
+        assert labels["GEO"] == InternationalString(en="Geography", fr="Géographie", de="Geografie")
+        assert store.dimensions(ds)["GEO"].collect().label.get("de") == "Geografie"
+
+    def test_a_dimension_without_a_concept_name_is_labelled_by_its_id_as_a_code(self):
+        store, ds = self._store(with_concepts=False)
+        labels = {d.id: d.label for d in store.dimensions(ds).collect()}
+        assert labels == {"GEO": InternationalString(zxx="GEO"), "FREQ": InternationalString(zxx="FREQ")}

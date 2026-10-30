@@ -525,12 +525,12 @@ def _ckan_package_to_dataset(raw: dict[str, object], *, regions: ConceptScheme |
     # Publisher from CKAN organization
     org = _d(raw, "organization")
     publisher: Agent | None = None
-    if org:
-        org_name = _s(org, "name") or _s(org, "id")
+    # An organization is stored under its slug, else its UUID; one with
+    # neither cannot be identified, so the package has no publisher (GH-94).
+    org_name = (_s(org, "name") or _s(org, "id")) if org else None
+    if org_name is not None:
         # An organization with no title is named by its slug, a code.
-        pub_name = _parse_istring(org.get("title")) or InternationalString.of(
-            {_NO_LANGUAGE: org_name} if org_name else {}
-        )
+        pub_name = _parse_istring(org.get("title")) or InternationalString.of({_NO_LANGUAGE: org_name})
         publisher = Agent(id=org_name, name=pub_name)
 
     # Temporal

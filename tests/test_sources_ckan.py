@@ -781,3 +781,9 @@ class TestIngestRegionCodes:
         httpx_mock.add_response(url=_SCHEMA_URL, status_code=503)
         with pytest.raises(httpx.HTTPStatusError, match="503"):
             sc.ingest_ckan(sc.Catalog().open(), _CKAN_BASE, limit=5)
+
+
+def test_an_organization_without_slug_or_id_gives_no_publisher():
+    """Stored agents need an id, so an unidentifiable organization is no publisher (GH-94)."""
+    ds = _ckan_package_to_dataset({**_PKG, "organization": {"title": "Somebody"}})
+    assert ds.publisher is None

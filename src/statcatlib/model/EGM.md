@@ -79,6 +79,9 @@ unless marked otherwise.
   `CatalogDescription.theme_taxonomy`.
 - `is_concept_in_scheme(scheme, notation) -> bool`: in-memory membership
   check.
+- `concept_uri(scheme_uri, notation) -> str`: `{scheme_uri}/{notation}`, the
+  URI the store gives a concept. Every reference to a stored concept builds
+  its URI here.
 
 ## Invariants
 
