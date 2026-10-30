@@ -166,7 +166,9 @@ Decided by the owner:
    logs it per source (finding 13), and keeps ingesting the package.
 3. Untagged CKAN text is stored under `und`; codes stored as text are `zxx`.
    SDMX-ML text with no `xml:lang` stays English, as the SDMX-ML schemas
-   declare (`default="en"`) and sdmxlib already applies.
+   declare (`default="en"`) and sdmxlib already applies. sdmxlib refuses an
+   artefact with `xml:lang=""`, which is invalid `xs:language`
+   (StatCat-Suite/sdmxlib#280, its design's D5).
 4. No default language; `lang` is required.
 5. Exact matching only, over a tag or an ordered tuple.
 6. Labels carry the matched tag.
@@ -204,8 +206,6 @@ Decided by the owner:
 
 Open, for the design document:
 
-- Whether sdmxlib refuses `xml:lang=""` or reads it as the schema default
-  `en` (StatCat-Suite/sdmxlib#280).
 - The exact signatures that change, the projection column names (`title`
   plus `title_lang`), and `LocalizedText` equality, hashing and JSON form
   (findings 8 and 12).
