@@ -65,6 +65,7 @@ __all__ = [
     "has_keyword",
     "has_service",
     "has_spatial",
+    "has_spatial_uri",
     "publishes",
     "serves",
     "title_contains",
@@ -908,8 +909,39 @@ def serves(*inner_filters: PositionalFilter, **kwargs: object) -> ExistsFilter:
 # ---------------------------------------------------------------------------
 
 
+@define
+class _SpatialFilter(ExistsFilter):
+    """EXISTS filter on a spatial coverage's own label or its concept's label.
+
+    A region stored by identifier, such as a CKAN ``geographic_region`` code
+    (GH-83), has no label of its own; its labels are on the concept whose
+    URI is the region's ``uri``.
+    """
+
+    table: str = "dataset_spatial"
+    lang: str = "en"
+    label: str = ""
+
+    @override
+    def to_sql(self, ctx: CompileContext) -> tuple[str, list[object]]:
+        alias = ctx.next_alias("ef")
+        sql = f"""EXISTS (SELECT 1 FROM dataset_spatial {alias}_t
+            LEFT JOIN concept {alias}_c ON {alias}_c.uri = {alias}_t.uri
+            WHERE {alias}_t.dataset_id = d.identifier
+                AND ({alias}_t.label[?] = ? OR {alias}_c.label[?] = ?))"""
+        return sql, [self.lang, self.label, self.lang, self.label]
+
+
 def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
     """Filter datasets that have a spatial coverage matching *label*.
+
+    The label is matched against the coverage's own label and, for a region
+    stored by identifier, against the label of its concept, so
+    ``has_spatial("Terre-Neuve-et-Labrador", lang="fr")`` finds a CKAN
+    dataset that carries the region code ``10``. CKAN region text that is
+    not a code carries no language and is stored under ``und``, so it
+    matches with ``lang="und"``. To filter on a spatial facet key that is a
+    URI, use `has_spatial_uri`.
 
     Args:
         label: The spatial coverage label, matched exactly.
@@ -921,10 +953,28 @@ def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
     Example:
         store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
     """
-    return ExistsFilter(
-        table="dataset_spatial",
-        conditions={"label": MapCondition(key=lang, value=label)},
-    )
+    return _SpatialFilter(lang=lang, label=label)
+
+
+def has_spatial_uri(uri: str) -> ExistsFilter:
+    """Filter datasets that have a spatial coverage identified by *uri*.
+
+    A spatial facet key is a region's URI when it has one (`Catalog.facets`),
+    so a key from ``facets("spatial")`` filters back to the datasets it
+    counts.
+
+    Args:
+        uri: The region's URI, such as a CKAN ``geographic_region`` concept
+            URI (GH-83), matched exactly.
+
+    Returns:
+        An EXISTS filter over the dataset's spatial coverage.
+
+    Example:
+        key = next(iter(store.facets("spatial")["spatial"]))
+        store.query(sc.BaseDataset).filter(q.has_spatial_uri(key)).execute()
+    """
+    return ExistsFilter(table="dataset_spatial", conditions={"uri": uri})
 
 
 def has_keyword(keyword: str, *, lang: str = "en") -> ExistsFilter:

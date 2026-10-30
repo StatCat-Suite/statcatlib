@@ -28,14 +28,14 @@ from statcatlib.model.agents import Agent
 from statcatlib.model.dataset import OpenDataset
 from statcatlib.model.distribution import Distribution
 from statcatlib.model.licence import LicenceDocument
-from statcatlib.model.skos import ConceptRef
+from statcatlib.model.skos import Concept, ConceptRef, ConceptScheme, concept_uri
 from statcatlib.model.spatial import SpatialCoverage
 from statcatlib.model.temporal import Frequency, TemporalCoverage
 
 if TYPE_CHECKING:
     from statcatlib.store.store import Catalog
 
-__all__ = ["CkanClient", "ingest_ckan"]
+__all__ = ["CkanClient", "choice_scheme_uri", "ingest_ckan"]
 
 # Frequency label (lowercase English) → normalized catalog ID
 _FREQ_LABEL_TO_ID: dict[str, str] = {
@@ -58,11 +58,33 @@ _FREQ_LABEL_TO_ID: dict[str, str] = {
 
 _ROWS_PER_PAGE = 100
 
+#: HTTP statuses a portal without ckanext-scheming answers the schema action with.
+_NO_SCHEMING_STATUSES = frozenset({400, 404})
+
 #: BCP 47 tag for text the portal sends with no language: undetermined.
 _UNDETERMINED = "und"
 
 #: BCP 47 tag for a code stored as text: no linguistic content.
 _NO_LANGUAGE = "zxx"
+
+
+def choice_scheme_uri(base_url: str, field_name: str, dataset_type: str = "dataset") -> str:
+    """Return the URI of the concept scheme holding a field's choices.
+
+    The URI names the portal, the dataset type and the field, so two portals
+    that define different choices for one field keep separate schemes:
+    ``https://open.canada.ca/data/scheming/dataset/geographic_region``. A
+    choice's concept URI is ``{scheme_uri}/{code}``.
+
+    Args:
+        base_url: The CKAN portal base URL.
+        field_name: The dataset field, such as ``"geographic_region"``.
+        dataset_type: The CKAN dataset type the field belongs to.
+
+    Returns:
+        The scheme URI.
+    """
+    return f"{base_url.rstrip('/')}/scheming/{dataset_type}/{field_name}"
 
 
 class CkanClient:
@@ -75,6 +97,7 @@ class CkanClient:
     def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
         self._base = base_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout)
+        self._schemas: dict[str, Mapping[str, object] | None] = {}
 
     def package_search(
         self,
@@ -139,13 +162,12 @@ class CkanClient:
 
         Returns:
             Each primary tag mapped to its alternate tags. Empty when the
-            portal has no scheming schema or the schema declares no pairs.
+            portal has no scheming schema or the schema declares no pairs. A
+            schema request failing with a status other than 400 or 404
+            raises `httpx.HTTPStatusError` (`_schema`).
         """
-        try:
-            schema = self._get("scheming_dataset_schema_show", {"type": dataset_type})
-        except httpx.HTTPStatusError, RuntimeError:
-            return {}
-        if not isinstance(schema, Mapping):
+        schema = self._schema(dataset_type)
+        if schema is None:
             return {}
         declared = schema.get("alternate_languages")
         if not isinstance(declared, Mapping):
@@ -155,6 +177,88 @@ class CkanClient:
             for primary, alts in declared.items()
             if isinstance(primary, str) and primary.strip() and _seq(alts)
         }
+
+    def field_choices(self, field_name: str, dataset_type: str = "dataset") -> ConceptScheme | None:
+        """Return a dataset field's choices as a concept scheme.
+
+        ckanext-scheming lists a select field's allowed values in
+        ``scheming_dataset_schema_show``. open.canada.ca's
+        ``geographic_region`` holds 310 codes from the
+        ``canada_geographic_region`` preset, each labelled in English and
+        French: ``{"value": "10", "label": {"en": "Newfoundland and
+        Labrador", "fr": "Terre-Neuve-et-Labrador"}}``.
+
+        The scheme's URI is `choice_scheme_uri` for this portal and field,
+        and each choice is a `Concept` whose notation is the code, so its URI
+        is ``{scheme_uri}/{code}``.
+
+        Args:
+            field_name: The dataset field, such as ``"geographic_region"``.
+            dataset_type: The CKAN dataset type whose schema to read.
+
+        Returns:
+            The scheme, labelled with the field's label. ``None`` when the
+            portal has no scheming schema, or the field is absent or has no
+            choices. A schema request failing with a status other than 400 or
+            404 raises `httpx.HTTPStatusError` (`_schema`).
+        """
+        schema = self._schema(dataset_type)
+        if schema is None:
+            return None
+        field = next(
+            (
+                f
+                for f in _seq(schema.get("dataset_fields"))
+                if isinstance(f, Mapping) and f.get("field_name") == field_name
+            ),
+            None,
+        )
+        if field is None:
+            return None
+        concepts: dict[str, Concept] = {}
+        for choice in _seq(field.get("choices")):
+            if not isinstance(choice, Mapping):
+                continue
+            code = (_s(choice, "value") or "").strip()
+            if code:
+                concepts[code] = Concept(notation=code, label=_parse_istring(choice.get("label")))
+        if not concepts:
+            return None
+        return ConceptScheme(
+            uri=choice_scheme_uri(self._base, field_name, dataset_type),
+            label=_parse_istring(field.get("label")),
+            concepts=concepts,
+        )
+
+    def _schema(self, dataset_type: str) -> Mapping[str, object] | None:
+        """The portal's scheming schema for *dataset_type*, fetched once per client.
+
+        Args:
+            dataset_type: The CKAN dataset type whose schema to read.
+
+        Returns:
+            The schema object, or ``None`` when the portal does not run
+            ckanext-scheming: the action answers 400 or 404, or CKAN reports
+            it unsuccessful.
+
+        Raises:
+            httpx.HTTPStatusError: The schema request failed with any other
+                status, such as a 503.
+        """
+        if dataset_type not in self._schemas:
+            try:
+                schema = self._get("scheming_dataset_schema_show", {"type": dataset_type})
+            except httpx.HTTPStatusError as exc:
+                # 400 or 404: the portal does not know the action. Any other
+                # status is a failure to report; read as "no schema", it would
+                # store region codes as text without a word.
+                if exc.response.status_code not in _NO_SCHEMING_STATUSES:
+                    raise
+                schema = None
+            except RuntimeError:
+                schema = None
+            self._schemas[dataset_type] = schema if isinstance(schema, Mapping) else None
+        return self._schemas[dataset_type]
 
     def _get(self, action: str, params: dict[str, str | int]) -> object:
         url = f"{self._base}/api/3/action/{action}"
@@ -338,8 +442,14 @@ def _parse_subjects(raw: object) -> list[ConceptRef]:
     return refs
 
 
-def _parse_spatial(raw: object) -> list[SpatialCoverage]:
-    """Parse CKAN geographic_region field to SpatialCoverage objects."""
+def _parse_spatial(raw: object, regions: ConceptScheme | None = None) -> list[SpatialCoverage]:
+    """Parse CKAN's ``geographic_region`` field to SpatialCoverage objects.
+
+    A string that is a code of *regions* (the portal's choices, from
+    `CkanClient.field_choices`) becomes the region's identifier: its `uri` is
+    the concept's URI and its label is left to the concept (GH-83). Any other
+    string is text in no declared language, stored under ``und``.
+    """
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
@@ -347,14 +457,19 @@ def _parse_spatial(raw: object) -> list[SpatialCoverage]:
             raw = [raw]
     if not isinstance(raw, list):
         return []
-    regions: list[SpatialCoverage] = []
+    uris = {code: concept_uri(regions.uri, code) for code in regions.concepts} if regions is not None else {}
+    result: list[SpatialCoverage] = []
     for item in raw:
         if isinstance(item, str) and item.strip():
-            regions.append(SpatialCoverage(label=InternationalString(en=item.strip())))
+            text = item.strip()
+            if (uri := uris.get(text)) is not None:
+                result.append(SpatialCoverage(uri=uri))
+            else:
+                result.append(SpatialCoverage(label=InternationalString.of({_UNDETERMINED: text})))
         elif isinstance(item, dict):
             label = _parse_istring(item) if item else None
-            regions.append(SpatialCoverage(label=label))
-    return regions
+            result.append(SpatialCoverage(label=label))
+    return result
 
 
 def _map_resource(res: dict[str, object], package_id: str) -> Distribution:
@@ -379,7 +494,7 @@ def _map_resource(res: dict[str, object], package_id: str) -> Distribution:
     )
 
 
-def _ckan_package_to_dataset(raw: dict[str, object]) -> OpenDataset:
+def _ckan_package_to_dataset(raw: dict[str, object], *, regions: ConceptScheme | None = None) -> OpenDataset:
     """Map a raw CKAN package dict to a statcatlib OpenDataset.
 
     This is a pure function: no network calls, no store access.
@@ -387,6 +502,8 @@ def _ckan_package_to_dataset(raw: dict[str, object]) -> OpenDataset:
     Args:
         raw: One package dict as CKAN's ``package_search`` returned it.
             Values are `object`; every field is narrowed before use.
+        regions: The portal's ``geographic_region`` choices, whose codes
+            become spatial coverage identifiers (`_parse_spatial`).
 
     Returns:
         The mapped `OpenDataset`.
@@ -431,7 +548,7 @@ def _ckan_package_to_dataset(raw: dict[str, object]) -> OpenDataset:
     themes = _parse_subjects(raw.get("subject") or raw.get("topic_category"))
 
     # Spatial
-    spatial_coverage = _parse_spatial(raw.get("geographic_region"))
+    spatial_coverage = _parse_spatial(raw.get("geographic_region"), regions)
 
     # Keywords
     keywords = _parse_keywords(raw.get("keywords"))
@@ -499,6 +616,12 @@ def ingest_ckan(
     It also records the language pairs the portal's dataset schema declares
     (`CkanClient.alternate_languages`), with *base_url* as their source.
 
+    When the schema lists choices for ``geographic_region``, they are stored
+    as a `ConceptScheme` (`CkanClient.field_choices`), and each region code
+    a package carries becomes a spatial coverage whose ``uri`` is that
+    code's concept. Its labels are the concept's, in every language the
+    portal sends.
+
     Args:
         store: Target Catalog.
         base_url: CKAN portal base URL, e.g. ``"https://open.canada.ca/data"``.
@@ -517,7 +640,10 @@ def ingest_ckan(
             rows=limit,
         )
         alternates = client.alternate_languages()
-    datasets = [_ckan_package_to_dataset(pkg) for pkg in raw_packages]
+        regions = client.field_choices("geographic_region")
+    if regions is not None:
+        store.put(regions)
+    datasets = [_ckan_package_to_dataset(pkg, regions=regions) for pkg in raw_packages]
     store.put(datasets)
     if alternates:
         store.add_language_alternates(alternates, source=base_url)
