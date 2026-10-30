@@ -1136,21 +1136,57 @@ def _validated_extras(extras: Mapping[str, str]) -> dict[str, str] | None:
     return dict(extras)
 
 
-def _agent_id(agent: Agent) -> str:
-    """Derive a stable ID for an agent."""
-    return (
-        agent.id
-        or hashlib.md5(  # noqa: S324
-            (agent.name.get("en") or agent.name.get("fr") or "").encode()
-        ).hexdigest()[:12]
-    )
+def _agent_id(agent: Agent, role: str) -> str:
+    """Return the stored ID of a dataset's publisher or creator.
+
+    An agent is stored under its own ``id``. A name is never an identifier
+    (``docs/design/language-tags.md``, decision 9), and every ingest path
+    passes one: SDMX the agency ID, CKAN the organisation slug (GH-94).
+
+    Args:
+        agent: The dataset's publisher or creator.
+        role: ``"publisher"`` or ``"creator"``, for the error message.
+
+    Returns:
+        The agent's ``id``.
+
+    Raises:
+        ValueError: The agent has no ``id``.
+    """
+    if not agent.id:
+        msg = f"the dataset's {role} has no id; an Agent needs one to be stored: {agent!r}"
+        raise ValueError(msg)
+    return agent.id
 
 
 def _contact_id(contact: ContactPoint) -> str:
-    """Derive a stable ID for a contact."""
-    key = contact.email or contact.url or ""
-    if contact.name:
-        key += contact.name.get("en") or contact.name.get("fr") or ""
+    """Derive a stable ID for a contact point.
+
+    The identity is the email, else the URL, else the phone, else every
+    ``(tag, text)`` pair of the name, so no one language identifies it
+    (GH-94). A name-only contact therefore gets a new ID when a translation
+    is added.
+
+    Args:
+        contact: The dataset's contact point.
+
+    Returns:
+        A 12-character hex digest of the identity.
+
+    Raises:
+        ValueError: The contact has no email, URL, phone or name.
+    """
+    if contact.email:
+        key = f"email:{contact.email}"
+    elif contact.url:
+        key = f"url:{contact.url}"
+    elif contact.phone:
+        key = f"phone:{contact.phone}"
+    elif contact.name:
+        key = "name:" + json.dumps(sorted(contact.name.items()), ensure_ascii=False)
+    else:
+        msg = f"a contact point needs an email, url, phone or name to be stored: {contact!r}"
+        raise ValueError(msg)
     return hashlib.md5(key.encode()).hexdigest()[:12]  # noqa: S324
 
 
@@ -5144,10 +5180,15 @@ class Catalog:
 
         Theme/subject/type concepts are NOT upserted here — they are citations
         from the dataset to externally-managed ConceptScheme artefacts.
+
+        Every identity is checked before the first write, so a dataset whose
+        creator or contact cannot be stored leaves no publisher row behind.
         """
-        ag_id: str | None = None
+        ag_id = _agent_id(dataset.publisher, "publisher") if dataset.publisher is not None else None
+        creator_id = _agent_id(dataset.creator, "creator") if dataset.creator is not None else None
+        ct_id = _contact_id(dataset.contact_point) if dataset.contact_point is not None else None
+
         if dataset.publisher is not None:
-            ag_id = _agent_id(dataset.publisher)
             self._exec(
                 "INSERT INTO agent (id, name, type, homepage)"
                 " VALUES (?, ?, ?, ?)"
@@ -5156,9 +5197,7 @@ class Catalog:
                 [ag_id, _istring_to_map(dataset.publisher.name), dataset.publisher.type, dataset.publisher.homepage],
             )
 
-        creator_id: str | None = None
         if dataset.creator is not None:
-            creator_id = _agent_id(dataset.creator)
             self._exec(
                 "INSERT INTO agent (id, name, type, homepage)"
                 " VALUES (?, ?, ?, ?)"
@@ -5167,9 +5206,7 @@ class Catalog:
                 [creator_id, _istring_to_map(dataset.creator.name), dataset.creator.type, dataset.creator.homepage],
             )
 
-        ct_id: str | None = None
         if dataset.contact_point is not None:
-            ct_id = _contact_id(dataset.contact_point)
             self._exec(
                 "INSERT INTO contact (id, name, email, phone, url)"
                 " VALUES (?, ?, ?, ?, ?)"

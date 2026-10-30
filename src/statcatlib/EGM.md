@@ -62,7 +62,9 @@ Imported from `statcatlib.bundle`:
 
 - Filter constructors: `has_code`, `descendants_of`, `within`,
   `has_dimensions`, `distribution`, `has_service`, `publishes`, `serves`,
-  `has_spatial`, `has_keyword`, `title_contains`, `description_contains`.
+  `has_spatial`, `has_spatial_uri`, `has_keyword`, `title_contains`,
+  `description_contains`. `has_spatial` also matches a region's concept
+  label; `has_spatial_uri` filters on a spatial facet key that is a URI.
 - Filter nodes with `to_sql(ctx) -> (fragment, params)`: `MapFilter`,
   `ExistsFilter`, `SdmxCodelistFilter`, `SdmxCodeFilter`,
   `SdmxDimensionFilter`, `PositionalFilter`.

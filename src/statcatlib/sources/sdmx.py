@@ -35,6 +35,9 @@ __all__ = [
 
 _IDENTIFIER_RE = re.compile(r"^([^:]+):([^(]+)\(([^)]+)\)$")
 
+#: BCP 47 tag for a code stored as text: no linguistic content.
+_NO_LANGUAGE = "zxx"
+
 
 class ObservationSource(Protocol):
     """Where `ingest_data` reads observations from.
@@ -112,7 +115,8 @@ def dataset_from_dataflow(
     urn = _build_urn(flow)
 
     if publisher is None:
-        name = agency.name if (agency.name.get("en") or agency.name.get("fr")) else InternationalString(en=agency.id)
+        # An agency with no name is labelled by its ID as a code (GH-94).
+        name = agency.name or InternationalString.of({_NO_LANGUAGE: agency.id})
         publisher = Agent(id=agency.id, name=name)
 
     dimension_names: list[InternationalString] = []
@@ -125,9 +129,9 @@ def dataset_from_dataflow(
             if hasattr(resolved_concept, "name"):
                 label = resolved_concept.name
             else:
-                label = InternationalString(en=dim.id, fr=dim.id)
+                label = InternationalString.of({_NO_LANGUAGE: dim.id})
         else:
-            label = InternationalString(en=dim.id, fr=dim.id)
+            label = InternationalString.of({_NO_LANGUAGE: dim.id})
         dimension_names.append(label)
 
     return AggregateDataset(
@@ -219,33 +223,6 @@ def ingest_sdmx_registry(
     with store.bulk_load():
         store.put(datasets)
     return datasets
-
-
-def _query_dimension_names(conn: object, dataflow_urn: str) -> list[InternationalString]:
-    """Query dimension names for a dataflow from the shared sdmx tables."""
-    import duckdb  # noqa: PLC0415
-
-    assert isinstance(conn, duckdb.DuckDBPyConnection)  # noqa: S101
-    rows = conn.execute(
-        """
-        SELECT dc.component_id,
-               con.name['en'],
-               con.name['fr']
-        FROM sdmx.dataflow df
-        JOIN sdmx.dsd_component dc ON dc.dsd_urn = df.dsd_urn
-        LEFT JOIN sdmx.concept con ON con.concept_urn = dc.concept_urn
-        WHERE df.urn = ?
-          AND dc.component_type = 'Dimension'
-        ORDER BY dc.position
-        """,
-        [dataflow_urn],
-    ).fetchall()
-    result = []
-    for component_id, name_en, name_fr in rows:
-        en = name_en or component_id
-        fr = name_fr or component_id
-        result.append(InternationalString(en=en, fr=fr))
-    return result
 
 
 def ingest_data(

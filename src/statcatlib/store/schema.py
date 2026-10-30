@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 #: The ``statcat`` schema this build writes and reads, recorded in ``statcat._meta``.
 #: `Catalog.open` refuses a catalog stamped with another (GH-39), so bumping it means
 #: rebuilding every catalog.
-SCHEMA_VERSION = "2.1"
+SCHEMA_VERSION = "2.2"
 
 # ── DDL ────────────────────────────────────────────────────────────────
 
