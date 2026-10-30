@@ -1095,24 +1095,6 @@ _ENTITY_SPECS: dict[type, _ReadsEntity] = {
 }
 
 
-def _sql_literal(v: object) -> str:
-    """Format a Python value as a DuckDB SQL literal for bulk VALUES clauses."""
-    if v is None:
-        return "NULL"
-    if isinstance(v, bool):
-        return "TRUE" if v else "FALSE"
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, datetime):
-        return f"'{v.isoformat()}'"
-    if isinstance(v, dict):
-        # MAP literal for DuckDB
-        entries = ", ".join(f"'{k}': '{str(val).replace(chr(39), chr(39) + chr(39))}'" for k, val in v.items())
-        return f"MAP {{{entries}}}"
-    s = str(v).replace("'", "''")
-    return f"'{s}'"
-
-
 def _validated_extras(extras: Mapping[str, str]) -> dict[str, str] | None:
     """Check `BaseDataset.extras` is string-to-string before it is stored.
 
@@ -3534,10 +3516,10 @@ class Catalog:
             [scheme.uri, _istring_to_map(scheme.label), _istring_to_map(scheme.definition)],
         )
         self._exec("DELETE FROM concept_scheme_top_concept WHERE scheme_uri = ?", [scheme.uri])
-        if scheme.top_concepts:
-            lit = _sql_literal
-            vals = ", ".join(f"({lit(scheme.uri)}, {lit(n)})" for n in scheme.top_concepts)
-            self._c.execute(f"INSERT INTO concept_scheme_top_concept (scheme_uri, notation) VALUES {vals}")
+        self._insert_rows(
+            "INSERT INTO concept_scheme_top_concept (scheme_uri, notation)",
+            [(scheme.uri, n) for n in scheme.top_concepts],
+        )
         for concept in scheme.concepts.values():
             self.put_concept(scheme.uri, concept)
 
@@ -3632,17 +3614,16 @@ class Catalog:
             ],
         )
         self._exec("DELETE FROM concept_relation WHERE source_uri = ?", [concept_uri])
-        lit = _sql_literal
         rel_rows: list[tuple[str, str, str]] = [
             *[(concept_uri, f"{scheme_uri}/{n}", "broader") for n in concept.broader],
             *[(concept_uri, f"{scheme_uri}/{n}", "narrower") for n in concept.narrower],
             *[(concept_uri, f"{scheme_uri}/{n}", "related") for n in concept.related],
         ]
-        if rel_rows:
-            vals = ", ".join(f"({lit(r[0])}, {lit(r[1])}, {lit(r[2])})" for r in rel_rows)
-            self._c.execute(
-                f"INSERT INTO concept_relation (source_uri, target_uri, relation) VALUES {vals} ON CONFLICT DO NOTHING"
-            )
+        self._insert_rows(
+            "INSERT INTO concept_relation (source_uri, target_uri, relation)",
+            rel_rows,
+            suffix=" ON CONFLICT DO NOTHING",
+        )
 
     def get_concept(self, uri: str) -> Concept | None:
         """Retrieve a single Concept by URI."""
@@ -3767,6 +3748,21 @@ class Catalog:
             _ = self._c.execute(sql)
         else:
             _ = self._c.execute(sql, params)
+
+    def _insert_rows(self, insert: str, rows: Sequence[Sequence[object]], *, suffix: str = "") -> None:
+        """Insert *rows* in one statement, binding every value as a parameter.
+
+        *insert* is the ``INSERT INTO table (columns)`` head and *suffix* any
+        clause after ``VALUES`` (``ON CONFLICT DO NOTHING``). One multi-row
+        ``VALUES`` keeps a bridge write to one round trip; only the
+        placeholders are interpolated, so a key or value holding ``'`` is
+        stored as given (GH-89). A ``dict`` binds to a ``MAP`` column.
+        """
+        if not rows:
+            return
+        row = f"({', '.join('?' * len(rows[0]))})"
+        params = [value for r in rows for value in r]
+        self._exec(f"{insert} VALUES {', '.join([row] * len(rows))}{suffix}", params)
 
     @contextlib.contextmanager
     def bulk_load(self) -> Generator[Self]:
@@ -5319,42 +5315,38 @@ class Catalog:
     def _write_bridge_rows(self, dataset: BaseDataset) -> None:  # noqa: C901, PLR0912
         """Write bridge rows for themes, keywords, spatial, distributions, etc."""
         ds_id = dataset.identifier
-        lit = _sql_literal
 
         # Theme citations (concept URIs only — concepts owned by ConceptScheme)
         self._exec("DELETE FROM dataset_theme WHERE dataset_id = ?", [ds_id])
-        if dataset.themes:
-            vals = ", ".join(f"({lit(ds_id)}, {lit(t.uri)})" for t in dataset.themes)
-            self._c.execute(f"INSERT INTO dataset_theme (dataset_id, concept_uri) VALUES {vals}")
+        self._insert_rows(
+            "INSERT INTO dataset_theme (dataset_id, concept_uri)",
+            [(ds_id, t.uri) for t in dataset.themes],
+        )
 
         # Subject citations
         self._exec("DELETE FROM dataset_subject WHERE dataset_id = ?", [ds_id])
-        if dataset.subject:
-            vals = ", ".join(f"({lit(ds_id)}, {lit(s.uri)})" for s in dataset.subject)
-            self._c.execute(f"INSERT INTO dataset_subject (dataset_id, concept_uri) VALUES {vals}")
+        self._insert_rows(
+            "INSERT INTO dataset_subject (dataset_id, concept_uri)",
+            [(ds_id, s.uri) for s in dataset.subject],
+        )
 
-        # Keywords (MAP column, with ordinal) — batch VALUES insert
+        # Keywords (MAP column, with ordinal)
         self._exec("DELETE FROM dataset_keyword WHERE dataset_id = ?", [ds_id])
-        if dataset.keywords:
-            vals = ", ".join(
-                f"({lit(ds_id)}, {lit(_istring_to_map(kw))}, {lit(i)})" for i, kw in enumerate(dataset.keywords)
-            )
-            self._c.execute(f"INSERT INTO dataset_keyword (dataset_id, keyword, ordinal) VALUES {vals}")
+        self._insert_rows(
+            "INSERT INTO dataset_keyword (dataset_id, keyword, ordinal)",
+            [(ds_id, _istring_to_map(kw), i) for i, kw in enumerate(dataset.keywords)],
+        )
 
-        # Spatial coverage (MAP label, with ordinal) — batch VALUES insert
+        # Spatial coverage (MAP label, with ordinal)
         self._exec("DELETE FROM dataset_spatial WHERE dataset_id = ?", [ds_id])
-        if dataset.spatial_coverage:
-            vals = ", ".join(
-                f"({lit(ds_id)}, {lit(_istring_to_map(cov.label))}, {lit(cov.uri)},"
-                f" {lit(cov.bbox[0] if cov.bbox else None)}, {lit(cov.bbox[1] if cov.bbox else None)},"
-                f" {lit(cov.bbox[2] if cov.bbox else None)}, {lit(cov.bbox[3] if cov.bbox else None)}, {lit(i)})"
+        self._insert_rows(
+            "INSERT INTO dataset_spatial"
+            " (dataset_id, label, uri, bbox_west, bbox_south, bbox_east, bbox_north, ordinal)",
+            [
+                (ds_id, _istring_to_map(cov.label), cov.uri, *(cov.bbox or (None, None, None, None)), i)
                 for i, cov in enumerate(dataset.spatial_coverage)
-            )
-            self._c.execute(
-                f"INSERT INTO dataset_spatial"
-                f" (dataset_id, label, uri, bbox_west, bbox_south, bbox_east, bbox_north, ordinal)"
-                f" VALUES {vals}"
-            )
+            ],
+        )
 
         # Standards
         self._exec("DELETE FROM dataset_standard WHERE dataset_id = ?", [ds_id])
