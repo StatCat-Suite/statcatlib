@@ -7,10 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
+from sdmxlib import InternationalString
 
 import statcatlib as sc
+import statcatlib.query as q
 from statcatlib.sources.ckan import (
     CkanClient,
     _ckan_package_to_dataset,
@@ -81,12 +84,30 @@ _PKG: dict[str, Any] = {
 }
 
 
-def _mock_schema(httpx_mock: HTTPXMock, alternates: object = _ALTERNATES) -> None:
+#: A cut of open.canada.ca's ``geographic_region`` field: the
+#: ``canada_geographic_region`` preset has 310 such choices.
+_REGION_FIELD: dict[str, Any] = {
+    "field_name": "geographic_region",
+    "label": {"en": "Geographic Region Name", "fr": "Nom de la région géographique"},
+    "preset": "canada_geographic_region",
+    "choices": [
+        {"value": "0", "label": {"en": "Canada", "fr": "Canada"}},
+        {"value": "10", "label": {"en": "Newfoundland and Labrador", "fr": "Terre-Neuve-et-Labrador"}},
+        {"value": "24", "label": {"en": "Quebec", "fr": "Québec"}},
+    ],
+}
+
+_REGION_SCHEME = "https://open.canada.ca/data/scheming/dataset/geographic_region"
+
+
+def _mock_schema(
+    httpx_mock: HTTPXMock, alternates: object = _ALTERNATES, fields: list[dict[str, Any]] | None = None
+) -> None:
     """Answer the dataset-schema request ``ingest_ckan`` makes after searching."""
-    httpx_mock.add_response(
-        url=_SCHEMA_URL,
-        json={"success": True, "result": {"dataset_type": "dataset", "alternate_languages": alternates}},
-    )
+    result: dict[str, Any] = {"dataset_type": "dataset", "alternate_languages": alternates}
+    if fields is not None:
+        result["dataset_fields"] = fields
+    httpx_mock.add_response(url=_SCHEMA_URL, json={"success": True, "result": result})
 
 
 def _make_search_response(packages: list[dict[str, Any]], count: int | None = None) -> dict[str, Any]:
@@ -303,8 +324,8 @@ class TestParseSpatial:
         raw = json.dumps(["Canada", "Provinces and territories"])
         regions = _parse_spatial(raw)
         assert len(regions) == 2
-        assert regions[0].label is not None
-        assert regions[0].label.get("en") == "Canada"
+        # Free text in no declared language is stored under ``und``.
+        assert regions[0] == sc.SpatialCoverage(label=InternationalString(und="Canada"))
 
     def test_plain_list(self):
         regions = _parse_spatial(["Canada"])
@@ -312,6 +333,17 @@ class TestParseSpatial:
 
     def test_none_returns_empty(self):
         assert _parse_spatial(None) == []
+
+    def test_a_known_code_becomes_the_region_identifier(self):
+        regions = sc.ConceptScheme(
+            uri=_REGION_SCHEME,
+            label=InternationalString(en="Regions"),
+            concepts={"10": sc.Concept(notation="10", label=InternationalString(en="Newfoundland and Labrador"))},
+        )
+        assert _parse_spatial(json.dumps(["10", "Nunavik"]), regions) == [
+            sc.SpatialCoverage(uri=f"{_REGION_SCHEME}/10"),
+            sc.SpatialCoverage(label=InternationalString(und="Nunavik")),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -400,8 +432,8 @@ class TestCkanPackageToDataset:
     def test_spatial_coverage(self):
         ds = _ckan_package_to_dataset(_PKG)
         assert len(ds.spatial_coverage) == 2
-        labels = [cov.label.get("en") for cov in ds.spatial_coverage if cov.label]
-        assert "Canada" in labels
+        labels = [cov.label.get("und") for cov in ds.spatial_coverage if cov.label]
+        assert labels == ["Canada", "Provinces and territories"]
 
     def test_temporal_coverage(self):
         ds = _ckan_package_to_dataset(_PKG)
@@ -524,6 +556,35 @@ class TestCkanClient:
         with CkanClient(_CKAN_BASE) as client, pytest.raises(RuntimeError, match="CKAN API error"):
             client.package_search()
 
+    def test_field_choices_is_a_concept_scheme(self, httpx_mock: HTTPXMock):
+        _mock_schema(httpx_mock, fields=[{"field_name": "title"}, _REGION_FIELD])
+        with CkanClient(_CKAN_BASE) as client:
+            scheme = client.field_choices("geographic_region")
+        assert scheme is not None
+        assert scheme.uri == _REGION_SCHEME
+        assert scheme.label.get("fr") == "Nom de la région géographique"
+        assert list(scheme.concepts) == ["0", "10", "24"]
+        assert scheme.concepts["10"].label == InternationalString(
+            en="Newfoundland and Labrador", fr="Terre-Neuve-et-Labrador"
+        )
+
+    @pytest.mark.parametrize(
+        "fields",
+        [None, [{"field_name": "title"}], [{"field_name": "geographic_region", "choices": []}]],
+        ids=["no-fields", "field-absent", "no-choices"],
+    )
+    def test_field_choices_none_without_choices(self, httpx_mock: HTTPXMock, fields: list[dict[str, Any]] | None):
+        _mock_schema(httpx_mock, fields=fields)
+        with CkanClient(_CKAN_BASE) as client:
+            assert client.field_choices("geographic_region") is None
+
+    def test_one_schema_request_serves_every_schema_read(self, httpx_mock: HTTPXMock):
+        _mock_schema(httpx_mock, fields=[_REGION_FIELD])
+        with CkanClient(_CKAN_BASE) as client:
+            assert client.alternate_languages() == _ALTERNATES
+            assert client.field_choices("geographic_region") is not None
+        assert len(httpx_mock.get_requests()) == 1
+
 
 # ---------------------------------------------------------------------------
 # TestIngestCkan (end-to-end with in-memory store)
@@ -637,3 +698,86 @@ class TestIngestCkan:
         store = sc.Catalog().open()
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         assert store.language_alternates() == []
+
+
+class TestIngestRegionCodes:
+    """``geographic_region`` codes become identifiers labelled by their concepts (GH-83)."""
+
+    @pytest.fixture
+    def store(self, httpx_mock: HTTPXMock) -> sc.Catalog:
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response(
+                [
+                    {**_PKG, "id": "nl", "geographic_region": json.dumps(["0", "10"])},
+                    {**_PKG, "id": "qc", "geographic_region": ["0", "24"]},
+                ],
+                count=2,
+            ),
+        )
+        _mock_schema(httpx_mock, fields=[_REGION_FIELD])
+        store = sc.Catalog().open()
+        sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+        return store
+
+    def test_the_choices_are_stored_as_a_concept_scheme(self, store: sc.Catalog):
+        scheme = store.get_concept_scheme(_REGION_SCHEME)
+        assert scheme is not None
+        assert scheme.concepts["10"].label.get("fr") == "Terre-Neuve-et-Labrador"
+
+    def test_a_code_is_stored_as_the_region_uri_with_no_label(self, store: sc.Catalog):
+        ds = store.get(sc.OpenDataset, "nl")
+        assert ds is not None
+        assert ds.spatial_coverage == [
+            sc.SpatialCoverage(uri=f"{_REGION_SCHEME}/0"),
+            sc.SpatialCoverage(uri=f"{_REGION_SCHEME}/10"),
+        ]
+
+    def test_the_spatial_facet_is_keyed_by_region_uri(self, store: sc.Catalog):
+        assert store.facets("spatial")["spatial"] == {
+            f"{_REGION_SCHEME}/0": 2,
+            f"{_REGION_SCHEME}/10": 1,
+            f"{_REGION_SCHEME}/24": 1,
+        }
+
+    @pytest.mark.parametrize(
+        ("lang", "label"), [("en", "Newfoundland and Labrador"), ("fr", "Terre-Neuve-et-Labrador")]
+    )
+    def test_spatial_labels_come_from_the_concepts(self, store: sc.Catalog, lang: str, label: str):
+        assert store.spatial_labels(lang)[f"{_REGION_SCHEME}/10"] == label
+
+    def test_has_spatial_matches_a_concept_label(self, store: sc.Catalog):
+        found = store.query(sc.OpenDataset).filter(q.has_spatial("Québec", lang="fr")).collect()
+        assert [ds.identifier for ds in found] == ["qc"]
+
+    def test_query_facets_are_keyed_by_region_uri(self, store: sc.Catalog):
+        result = store.query(sc.OpenDataset).filter(q.has_spatial("Québec", lang="fr")).with_facets("spatial").execute()
+        assert result.facets["spatial"] == {f"{_REGION_SCHEME}/0": 1, f"{_REGION_SCHEME}/24": 1}
+
+    def test_a_facet_key_filters_back_to_its_datasets(self, store: sc.Catalog):
+        key = f"{_REGION_SCHEME}/24"
+        found = store.query(sc.OpenDataset).filter(q.has_spatial_uri(key)).collect()
+        assert [ds.identifier for ds in found] == ["qc"]
+
+    def test_free_text_regions_are_counted_under_their_text(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response([{**_PKG, "geographic_region": ["10", "Nunavik"]}], count=1),
+        )
+        _mock_schema(httpx_mock, fields=[_REGION_FIELD])
+        store = sc.Catalog().open()
+        sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+        assert store.facets("spatial")["spatial"] == {f"{_REGION_SCHEME}/10": 1, "Nunavik": 1}
+        assert store.spatial_labels("fr")["Nunavik"] == "Nunavik"
+        found = store.query(sc.OpenDataset).filter(q.has_spatial("Nunavik", lang="und")).collect()
+        assert [ds.identifier for ds in found] == ["abc-123"]
+
+    def test_a_failed_schema_request_raises(self, httpx_mock: HTTPXMock):
+        """A 503 is reported: read as "no schema" it would store region codes as text."""
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response([_PKG], count=1),
+        )
+        httpx_mock.add_response(url=_SCHEMA_URL, status_code=503)
+        with pytest.raises(httpx.HTTPStatusError, match="503"):
+            sc.ingest_ckan(sc.Catalog().open(), _CKAN_BASE, limit=5)

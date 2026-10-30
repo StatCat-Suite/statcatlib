@@ -52,7 +52,7 @@ from statcatlib.model.dataset import (
 from statcatlib.model.distribution import DataService, Distribution
 from statcatlib.model.licence import LicenceDocument
 from statcatlib.model.quality import ProvenanceStatement, QualityAnnotation
-from statcatlib.model.skos import Concept, ConceptRef, ConceptScheme
+from statcatlib.model.skos import Concept, ConceptRef, ConceptScheme, concept_uri
 from statcatlib.model.spatial import SpatialCoverage
 from statcatlib.model.temporal import Frequency, TemporalCoverage
 from statcatlib.query import (
@@ -1171,6 +1171,13 @@ _SORTABLE_COLUMNS: frozenset[str] = frozenset(
 )
 
 _MAP_SORTABLE_COLUMNS: frozenset[str] = frozenset({"title"})
+
+#: The spatial facet key of a ``dataset_spatial ds`` row: its region
+#: identifier, such as a CKAN ``geographic_region`` concept URI (GH-83). A row
+#: with no identifier is keyed by its English label until English stops being
+#: a key (``docs/design/language-tags.md``, decision 9), else by its label in
+#: no declared language, ``und``, which CKAN free text is stored under.
+_SPATIAL_FACET_KEY = "COALESCE(ds.uri, ds.label['en'], ds.label['und'])"
 
 # Columns allowed in .select() / .scalars() lightweight projections
 _SELECTABLE_COLUMNS: frozenset[str] = frozenset(
@@ -3551,13 +3558,13 @@ class Catalog:
             c_alt_label = _map_to_istring(c_row[2]) or InternationalString()
             c_definition = _map_to_istring(c_row[3])
             # Load relations for this concept
-            concept_uri = f"{uri}/{notation}"
+            this_uri = concept_uri(uri, notation)
             rel_rows = self._c.execute(
                 """SELECT r.relation, c2.notation
                 FROM concept_relation r
                 JOIN concept c2 ON c2.uri = r.target_uri
                 WHERE r.source_uri = ?""",
-                [concept_uri],
+                [this_uri],
             ).fetchall()
             broader: list[str] = []
             narrower: list[str] = []
@@ -3595,7 +3602,7 @@ class Catalog:
         their URIs are resolved the same way.
         """
         self._require_writable("put_concept()")
-        concept_uri = f"{scheme_uri}/{concept.notation}"
+        this_uri = concept_uri(scheme_uri, concept.notation)
         self._exec(
             """INSERT INTO concept (uri, in_scheme, notation, label, alt_label, definition)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -3605,7 +3612,7 @@ class Catalog:
                 alt_label = excluded.alt_label,
                 definition = excluded.definition""",
             [
-                concept_uri,
+                this_uri,
                 scheme_uri,
                 concept.notation,
                 _istring_to_map(concept.label),
@@ -3613,11 +3620,11 @@ class Catalog:
                 _istring_to_map(concept.definition),
             ],
         )
-        self._exec("DELETE FROM concept_relation WHERE source_uri = ?", [concept_uri])
+        self._exec("DELETE FROM concept_relation WHERE source_uri = ?", [this_uri])
         rel_rows: list[tuple[str, str, str]] = [
-            *[(concept_uri, f"{scheme_uri}/{n}", "broader") for n in concept.broader],
-            *[(concept_uri, f"{scheme_uri}/{n}", "narrower") for n in concept.narrower],
-            *[(concept_uri, f"{scheme_uri}/{n}", "related") for n in concept.related],
+            *[(this_uri, concept_uri(scheme_uri, n), "broader") for n in concept.broader],
+            *[(this_uri, concept_uri(scheme_uri, n), "narrower") for n in concept.narrower],
+            *[(this_uri, concept_uri(scheme_uri, n), "related") for n in concept.related],
         ]
         self._insert_rows(
             "INSERT INTO concept_relation (source_uri, target_uri, relation)",
@@ -6418,10 +6425,10 @@ class Catalog:
             ).fetchall()
         elif field_name == "spatial":
             rows = cur.execute(
-                "SELECT ds.label['en'], COUNT(DISTINCT ds.dataset_id) AS cnt"
-                " FROM dataset_spatial ds"
-                " WHERE ds.label['en'] IS NOT NULL"
-                " GROUP BY ds.label['en'] ORDER BY cnt DESC"
+                f"""SELECT {_SPATIAL_FACET_KEY} AS region, COUNT(DISTINCT ds.dataset_id) AS cnt
+                FROM dataset_spatial ds
+                WHERE {_SPATIAL_FACET_KEY} IS NOT NULL
+                GROUP BY region ORDER BY cnt DESC"""
             ).fetchall()
         elif field_name == "type":
             rows = cur.execute("SELECT kind, COUNT(*) AS cnt FROM dataset GROUP BY kind ORDER BY cnt DESC").fetchall()
@@ -6452,19 +6459,47 @@ class Catalog:
         return {row[0]: row[1] for row in rows}
 
     def spatial_labels(self, lang: str = "en") -> dict[str, str]:
-        """Return ``{en_label: display_label}`` for the spatial facet sidebar."""
-        if lang == "en":
-            return {}
-        # SELECT DISTINCT instead of GROUP BY because DuckDB rejects a
-        # COALESCE built from grouped MAP-indexed expressions, even when
-        # both inner columns appear in the GROUP BY list.
+        """Return ``{facet_key: display_label}`` for the spatial facet sidebar.
+
+        A spatial facet key is the region's ``uri`` when it has one, else its
+        English label, else its ``und`` label (`facets`). A ``uri`` key is
+        labelled from the concept with that URI, such as a CKAN
+        ``geographic_region`` code (GH-83), then from the stored label; it is
+        left out when neither has *lang*. A label key is labelled in *lang*,
+        falling back to the key, and only for a language other than English,
+        where an English key already reads as its label. A key whose rows
+        carry different labels gets the least, so the result is the same on
+        every call.
+        """
+        # The inner SELECT names the COALESCE results so the outer GROUP BY
+        # aggregates plain columns: DuckDB rejects a COALESCE built from
+        # grouped MAP-indexed expressions.
         rows = self._c.execute(
-            """SELECT DISTINCT label['en'], COALESCE(label[?], label['en'])
-            FROM dataset_spatial
-            WHERE label['en'] IS NOT NULL""",
-            [lang],
+            """SELECT key, min(label) FROM (
+                SELECT ds.uri AS key, COALESCE(c.label[?], ds.label[?]) AS label
+                FROM dataset_spatial ds
+                LEFT JOIN concept c ON c.uri = ds.uri
+                WHERE ds.uri IS NOT NULL
+            )
+            WHERE label IS NOT NULL
+            GROUP BY key""",
+            [lang, lang],
         ).fetchall()
-        return {row[0]: row[1] for row in rows}
+        labels: dict[str, str] = {row[0]: row[1] for row in rows}
+        if lang != "en":
+            rows = self._c.execute(
+                """SELECT key, min(label) FROM (
+                    SELECT COALESCE(label['en'], label['und']) AS key,
+                        COALESCE(label[?], label['en'], label['und']) AS label
+                    FROM dataset_spatial
+                    WHERE uri IS NULL
+                )
+                WHERE key IS NOT NULL
+                GROUP BY key""",
+                [lang],
+            ).fetchall()
+            labels.update({row[0]: row[1] for row in rows})
+        return labels
 
     # ------------------------------------------------------------------
     # Internal query execution
@@ -7034,11 +7069,11 @@ class Catalog:
                 WHERE d.status IS NOT NULL
                 GROUP BY d.status ORDER BY cnt DESC"""
         elif field_name == "spatial":
-            sql = f"""SELECT ds.label['en'], COUNT(DISTINCT m.identifier) AS cnt
+            sql = f"""SELECT {_SPATIAL_FACET_KEY} AS region, COUNT(DISTINCT m.identifier) AS cnt
                 FROM ({match_sql}) m
                 JOIN dataset_spatial ds ON m.identifier = ds.dataset_id
-                WHERE ds.label['en'] IS NOT NULL
-                GROUP BY ds.label['en'] ORDER BY cnt DESC"""
+                WHERE {_SPATIAL_FACET_KEY} IS NOT NULL
+                GROUP BY region ORDER BY cnt DESC"""
         elif field_name == "type":
             sql = f"""SELECT d.kind, COUNT(*) AS cnt
                 FROM ({match_sql}) m

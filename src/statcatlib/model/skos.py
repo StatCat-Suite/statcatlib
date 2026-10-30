@@ -41,6 +41,7 @@ __all__ = [
     "ConceptRef",
     "ConceptScheme",
     "ConceptSchemeRef",
+    "concept_uri",
     "is_concept_in_scheme",
 ]
 
@@ -126,6 +127,23 @@ class ConceptScheme:
     definition: InternationalString | None = None
     concepts: dict[str, Concept] = attrs.field(factory=dict)  # notation → Concept
     top_concepts: tuple[str, ...] = ()  # notations
+
+
+def concept_uri(scheme_uri: str, notation: str) -> str:
+    """Return the URI of the concept *notation* in the scheme *scheme_uri*.
+
+    The catalog stores a concept under ``{scheme_uri}/{notation}``. Every
+    reference to a stored concept builds its URI here, so a reference made
+    at ingest joins the ``concept`` row the store wrote.
+
+    Args:
+        scheme_uri: The concept scheme's URI.
+        notation: The concept's notation within the scheme.
+
+    Returns:
+        The concept's URI.
+    """
+    return f"{scheme_uri}/{notation}"
 
 
 def is_concept_in_scheme(scheme: ConceptScheme, notation: str) -> bool:

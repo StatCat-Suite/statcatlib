@@ -548,3 +548,20 @@ class TestSpatialLabels:
         )
         labels = s.spatial_labels("fr")
         assert labels == {"Yukon": "Yukon"}
+
+
+def test_spatial_labels_pick_one_label_per_uri() -> None:
+    """Rows sharing a uri with no concept but different labels give the least, every call."""
+    store = sc.Catalog().open()
+    store.put(
+        [
+            sc.OpenDataset(
+                identifier=ident,
+                title=InternationalString(en=ident),
+                description=InternationalString(en=ident),
+                spatial_coverage=[sc.SpatialCoverage(uri="urn:geo:x", label=InternationalString(fr=label))],
+            )
+            for ident, label in (("a", "Zone B"), ("b", "Zone A"))
+        ]
+    )
+    assert store.spatial_labels("fr") == {"urn:geo:x": "Zone A"}

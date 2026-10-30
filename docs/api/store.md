@@ -361,6 +361,12 @@ building filter panels in UIs or profiling catalog composition.
 Supported fields: `"publisher"`, `"themes"`, `"frequency"`, `"status"`,
 `"spatial"`, `"type"`.
 
+A `"spatial"` key is the region's `uri` when it has one, such as a CKAN
+`geographic_region` code stored as a concept URI, and its English label
+otherwise. `store.spatial_labels(lang)` maps each key to a display label,
+read from the region's concept for a `uri` key, and `q.has_spatial_uri(key)`
+filters on a `uri` key.
+
 ```python
 counts = store.facets("publisher", "themes", "frequency")
 # {"publisher": {"ESTAT": 42, "ECB": 18}, "themes": {"Labour": 22, ...}}
@@ -707,7 +713,8 @@ Add one or more filter conditions (ANDed together). Accepts:
 - keyword arguments for flat column filters (`publisher`, `status`,
   `frequency`, `identifier`)
 - `PositionalFilter` objects from `statcatlib.query`: `has_code`, `has_dimensions`,
-  `distribution`, `has_service`, `publishes`, `serves` (and any `ExistsFilter` subclass)
+  `distribution`, `has_service`, `publishes`, `serves`, `has_spatial_uri` (and any
+  `ExistsFilter` subclass)
 - `MapFilter` objects: `has_spatial`, `has_keyword`, `title_contains`,
   `description_contains`
 
