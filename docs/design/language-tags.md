@@ -96,8 +96,8 @@ are ranked below. The main ones were checked against the code.
    `Label` (`sdmxlib/query/_expr.py:1209`), and it names output columns
    `f"{column}_{lang}"`, which breaks for `en-t-fr` and tuples. Rename the
    value type and decide the projection column names (`title` plus
-   `title_lang`). The type is `LocalizedText` (decision 14); the column names
-   are open.
+   `title_lang`). The type is `LocalisedString` (decision 14); the column
+   names are open.
 9. **Untagged SDMX-ML text is English by schema default.** Every SDMX-ML
    schema declares `xml:lang` with `default="en"`, and sdmxlib applies it
    (`SCHEMA_DEFAULT_LANG`, `sdmxlib/formats/sdmx_ml/_common.py:89-93`). The
@@ -109,7 +109,7 @@ are ranked below. The main ones were checked against the code.
     `lang=("fr", "en")`, a caller misses `fr-t-en` text that is present.
     Publish a recommended preference tuple per locale, and add an API that
     lists the tags present with counts.
-12. **The `LocalizedText` and `str` boundary is unspecified.** The docs promise `str`
+12. **The `LocalisedString` and `str` boundary is unspecified.** The docs promise `str`
     from `Row` values, `.scalars()` and `batch_labels`. The design must define
     equality, hashing, JSON serialisation and `.frame()` columns.
 13. **Ingest normalisation is invisible.** Count and log fixes and refusals
@@ -198,15 +198,18 @@ Decided by the owner:
     `InternationalString` and in sdmxlib's writers); statcatlib normalises
     request tags with the same function. Filed as
     StatCat-Suite/sdmxlib#280.
-14. **The label value type is `LocalizedText(text, lang)`, in sdmxlib**,
-    beside `InternationalString`, with a lookup such as
-    `InternationalString.pick(*langs) -> LocalizedText | None`. The name
-    avoids sdmxlib's query expression `Label`. Part of
-    StatCat-Suite/sdmxlib#280. sdmxlib makes it an attrs frozen class,
-    equal and hashed by both fields, and leaves its JSON form to statcatlib
-    (its design's D7). statcatlib serialises it as an object holding the
-    stored lowercase tag, `{"text": "Population", "lang": "en"}`, with no
-    display case (GH-88).
+14. **The label value type is `LocalisedString(text, lang)`, in sdmxlib**,
+    beside `InternationalString`. It takes the SDMX information model's
+    class name; its fields `text` and `lang` are the IM's `label` and
+    `locale`. It is a frozen `msgspec.Struct`, equal and hashed by both
+    fields, and its tag is normalised on construction, so a hand-built
+    value equals the one a lookup returns. `InternationalString` lookups
+    (`[]`, `get`, `pick`) return it. Its JSON form,
+    `{"text": "Population", "lang": "en"}` with the stored lowercase tag
+    and no display case, is a contract across the StatCat Suite (GH-88).
+    The suite design for `LocalisedString`, in the StatCat Suite hub,
+    specifies the API, validation and errors. It replaces PR 308's
+    `LocalizedText`, an attrs class (StatCat-Suite/sdmxlib#280).
 
 Open, for the design document:
 
@@ -222,10 +225,10 @@ Staging, decided by the owner. The work ships in four slices, in this order:
    package-id titles, `alternate_languages` recorded as language pairs.
 2. Spatial identifiers (GH-83) and removing English as a key: facets,
    dimension names, agent and contact IDs.
-3. Adopting sdmxlib's `normalize_tag()` and `LocalizedText` once sdmxlib
+3. Adopting sdmxlib's `normalize_tag()` and `LocalisedString` once sdmxlib
    ships them (StatCat-Suite/sdmxlib#280).
 4. The breaking lookup change: required `lang`, exact matching over tuples,
-   `LocalizedText` returns, `MissingTranslationError`, gap lists, search
+   `LocalisedString` returns, `MissingTranslationError`, gap lists, search
    pairs and tagged hits. It needs slice 3.
 
 Migration items: `statcat` `SCHEMA_VERSION` bump and catalog rebuild, changed
