@@ -202,13 +202,17 @@ Decided by the owner:
     beside `InternationalString`, with a lookup such as
     `InternationalString.pick(*langs) -> LocalizedText | None`. The name
     avoids sdmxlib's query expression `Label`. Part of
-    StatCat-Suite/sdmxlib#280.
+    StatCat-Suite/sdmxlib#280. sdmxlib makes it an attrs frozen class,
+    equal and hashed by both fields, and leaves its JSON form to statcatlib
+    (its design's D7). statcatlib serialises it as an object holding the
+    stored lowercase tag, `{"text": "Population", "lang": "en"}`, with no
+    display case (GH-88).
 
 Open, for the design document:
 
 - The exact signatures that change, the projection column names (`title`
-  plus `title_lang`), and `LocalizedText` equality, hashing and JSON form
-  (findings 8 and 12).
+  plus `title_lang`), and how `.frame()` columns carry the tag (findings 8
+  and 12).
 - A recommended preference tuple per locale, and an API that lists the tags
   present with counts (finding 11).
 
