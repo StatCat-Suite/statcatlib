@@ -135,11 +135,12 @@ the affected APIs, and 7 docs pages have 106.
 ## Goals vs. Non-Goals
 
 * **In-Scope Goals:**
-  - Validate BCP 47 tags at ingest, with lossless canonicalisation only.
-  - Store tags as given, `-t-` extensions included; `und` for untagged CKAN
-    text; `zxx` for codes stored as text.
+  - Validate BCP 47 tags at ingest with sdmxlib's `normalize_tag()`.
+  - Store tags in the lowercase form `normalize_tag()` returns, `-t-`
+    extensions included; `und` for untagged CKAN text; `zxx` for codes
+    stored as text.
   - Require `lang` on every label-returning API. Accept a tag or an ordered
-    tuple, matched exactly and case-insensitively.
+    tuple; each requested tag is normalised, then matched exactly.
   - Return labels with the tag that matched.
   - Raise `MissingTranslationError` from single lookups; return `None` and
     a gap list from bulk and paged calls.
@@ -155,8 +156,14 @@ the affected APIs, and 7 docs pages have 106.
 Decided by the owner:
 
 1. Keep `MAP(VARCHAR, VARCHAR)`.
-2. Keys are BCP 47 tags, checked at ingest; case, `_` and whitespace are fixed;
-   malformed and empty tags are refused.
+2. Keys are BCP 47 tags, stored in the lowercase form `sl.normalize_tag()`
+   returns (the GH-88 contract with StatCat-Suite/sdmxlib#280). Request tags
+   go through the same function, so lookups compare exactly and no SQL path
+   folds case. `normalize_tag()` refuses `_` and whitespace, so the CKAN
+   reader repairs them before calling it: it strips the ends of a tag and
+   replaces `_` with `-`. Internal whitespace, malformed and empty tags are
+   refused; the reader drops the refused tag from the field, counts it and
+   logs it per source (finding 13), and keeps ingesting the package.
 3. Untagged CKAN text is stored under `und`; codes stored as text are `zxx`.
    SDMX-ML text with no `xml:lang` stays English, as the SDMX-ML schemas
    declare (`default="en"`) and sdmxlib already applies.
