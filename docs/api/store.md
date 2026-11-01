@@ -451,16 +451,20 @@ the last `build_index` call, or the defaults when there was none, so a sealed
 edition's index holds exactly its rows.
 
 Each embedded row records `text_sha256`, the SHA-256 of the model name, the
-document prefix and the text. Before a rebuild replaces the tables,
-`build_index` reads the stored vectors and gives each text whose hash matches
-its stored vector; only the other texts reach the model. A seal whose text did
-not change therefore calls `encode` zero times, and a seal after an edit
-encodes only the edited texts. The model name is `model_name`, or the one the
-carried `embeddings.json` records; a change of model name or document prefix
-re-encodes every text. Pass `model_name` whenever the model changes: without
-it, the carried name stays, and the new model would reuse the old model's
-vectors. With no model name at all, nothing is reused and every text is
-encoded. To use `datasets.find(mode="vector")`
+document prefix and the text. When `build_index` is called with `model_name`,
+it reads the stored vectors before the rebuild replaces the tables and gives
+each text whose hash matches its stored vector; only the other texts reach
+the model. The seal repeats the last `build_index` call, so a working copy
+that calls `wc.build_index(model_name=...)` and changes no text calls
+`encode` zero times, and one with edits encodes only the edited texts. A
+change of model name or document prefix re-encodes every text.
+
+Without `model_name`, `build_index` reuses nothing and encodes every text,
+since the encoder may be a different model from the one that wrote the
+stored vectors; it logs that at INFO. This includes a seal of a working copy
+that never called `build_index`. The rows still record `text_sha256` under
+the model name `embeddings.json` records, so a later build that passes
+`model_name` can reuse them. To use `datasets.find(mode="vector")`
 and `mode="hybrid"` on the sealed edition, pass the model to
 `cat.product(id).view(embedding_model=model)`.
 

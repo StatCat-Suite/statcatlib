@@ -218,9 +218,10 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `lance.text_sha256(model, prefix, text)`. `_Store.build_index` reads
   `LanceIndex.carried_vectors()` before `add_bulk` replaces the tables, and
   `_batch_encode` takes a stored vector for each text whose hash matches and
-  encodes the rest. The model name is `build_index`'s `model_name`, or
-  `embedding_model_name` (the carried `embeddings.json`); with neither,
-  nothing is reused and `text_sha256` is NULL. A table without the column
+  encodes the rest. Vectors are reused only when `build_index` gets
+  `model_name` explicitly (`_Store._vector_reuse`); without it every text is
+  encoded, an INFO line says so, and the hash uses `embedding_model_name`
+  (the carried `embeddings.json`). With no name at all `text_sha256` is NULL. A table without the column
   (written before S2b) yields no vectors.
 - The journal rule (`settle_journal`; the table is in `working_copy.py`'s
   module docstring) runs when a working copy starts or resumes, at the start

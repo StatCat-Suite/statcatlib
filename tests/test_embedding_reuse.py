@@ -1,13 +1,15 @@
 """A seal reuses a carried vector whose text hash matches (RFC D21, design item 26).
 
 Each search row records `text_sha256`, the hash of the model name, the
-document prefix and the text. `build_index`, and so the seal's rebuild, reads
-the stored vectors before it replaces the tables, and encodes only the texts
-whose hash has no vector.
+document prefix and the text. A `build_index` given ``model_name``, and so the
+seal's rebuild of it, reads the stored vectors before it replaces the tables,
+and encodes only the texts whose hash has no vector. Without ``model_name``
+it encodes every text, since the encoder may be a new model.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 
@@ -93,6 +95,7 @@ class TestReuse:
             before = _vectors(cat)
             model = _CountingModel()
             wc = cat.product("p").working_copy(embedding_model=model)
+            wc.build_index(model_name="m")
             wc.seal()
             assert model.encoded == []
             assert _vectors(cat) == before
@@ -102,6 +105,7 @@ class TestReuse:
             model = _CountingModel()
             wc = cat.product("p").working_copy(embedding_model=model)
             wc.put([_dataset("d2", "Consumer price index"), _dataset("d3", "Population")])
+            wc.build_index(model_name="m")
             wc.seal()
             assert len(model.encoded) == 2
             assert all(("Consumer price index" in t) or ("Population" in t) for t in model.encoded)
@@ -131,6 +135,24 @@ class TestReencode:
         assert meta is not None
         assert meta.model == "m2"
         assert {h for h, _ in after.values()} == {text_sha256("m2", "", t) for t in first.encoded}
+
+    def test_a_model_without_model_name_reencodes_every_text(
+        self, root: Path, first: _CountingModel, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A new model object given without ``model_name`` reuses nothing, so two models never share an index."""
+        with sc.Catalog.create(root, exist_ok=True) as cat:
+            model = _CountingModel(salt="new")
+            wc = cat.product("p").working_copy(embedding_model=model)
+            with caplog.at_level(logging.INFO, logger="statcatlib.store.store"):
+                wc.seal()
+            assert sorted(model.encoded) == sorted(first.encoded)
+            after = _vectors(cat)
+            rows = require_table(require_index(cat.product("p").view()), "en").to_arrow().to_pylist()
+        for row in rows:
+            assert list(row["embedding"]) == pytest.approx(model._one(row["text"]), abs=1e-6)
+        assert "not reused because no model_name was given" in caplog.text
+        # The rows still carry the hash under the recorded name, for a later explicit build.
+        assert {h for h, _ in after.values()} == {text_sha256("m", "", t) for t in first.encoded}
 
     def test_a_prefix_change_reencodes_every_text(self, root: Path, first: _CountingModel) -> None:
         with sc.Catalog.create(root, exist_ok=True) as cat:

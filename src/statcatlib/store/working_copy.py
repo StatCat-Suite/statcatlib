@@ -592,12 +592,11 @@ class WorkingCopy:
         of the last call here (the defaults when there was none), so the
         sealed index always holds the sealed rows.
 
-        A text whose `text_sha256` (model name, document prefix, text)
-        matches a stored vector takes that vector, so only new or changed
-        texts reach the encoder, and a seal with unchanged text encodes
-        nothing. Pass *model_name* whenever the model changes: it is part of
-        the hash, and without it the carried ``embeddings.json``'s name
-        stays.
+        With *model_name*, a text whose `text_sha256` (model name, document
+        prefix, text) matches a stored vector takes that vector, so only new
+        or changed texts reach the encoder, and a seal with unchanged text
+        encodes nothing. Without *model_name* every text is encoded, since
+        the encoder may be a new model.
 
         Args:
             embedding_model: The encoder; the working copy's when ``None``.
@@ -623,8 +622,9 @@ class WorkingCopy:
             document_prefix: Prepended to every document before embedding.
             query_prefix: Prepended to every query before embedding.
             model_name: The model id recorded in ``embeddings.json`` and
-                hashed into each row's ``text_sha256``; the carried one when
-                ``None``.
+                hashed into each row's ``text_sha256``. Carried vectors are
+                reused only when it is given; when ``None``, every text is
+                encoded and hashed under the carried name.
 
         Returns:
             The number of datasets indexed.

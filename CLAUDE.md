@@ -406,8 +406,10 @@ uses batch encoding (256 texts per `encode()` call).
 JSON array). `build_index` reads the stored vectors
 (`LanceIndex.carried_vectors`) before `add_bulk` replaces the tables, and
 encodes only the texts whose hash has no vector, so a seal with unchanged
-text calls `encode` zero times (RFC D21). The model name is `model_name`, or
-the carried `embeddings.json`'s; without either nothing is reused.
+text calls `encode` zero times (RFC D21). Vectors are reused only when
+`build_index` gets `model_name` explicitly; without it every text is encoded
+(a new model object would otherwise mix two models' vectors), and the rows
+are hashed under the carried `embeddings.json`'s name.
 
 **One table per language** — the search index is not one table but one
 per language, each with its own Tantivy tokenizer: French text stemmed

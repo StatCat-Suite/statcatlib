@@ -697,14 +697,19 @@ def as_vectors(encoded: object) -> list[list[float]]:
 class _VectorReuse:
     """The vectors one `build_index` may reuse, and its counts of reused and encoded texts (S2b).
 
-    A text whose `text_sha256` (model name, document prefix, text) names a
-    carried vector takes that vector; every other text is encoded. Without
-    a model name nothing is reused and no hash is recorded, since a vector
-    could not be tied to the model that made it.
+    Every embedded row records `text_sha256` (model name, document prefix,
+    text) under the model name ``embeddings.json`` records, so a later build
+    can reuse it. A text takes a carried vector only when the build was given
+    ``model_name`` explicitly and the hash matches; every other text is
+    encoded. A model object passed without ``model_name`` may be a new model,
+    and hashing it under the carried name would mix two models' vectors in
+    one index.
 
     Attributes:
-        model_name: The model the vectors belong to, or ``None``.
-        carried: Each stored vector by its hash.
+        model_name: The name hashed into `text_sha256`: the explicit
+            ``model_name``, else the carried one, else ``None`` (no hash).
+        carried: Each reusable vector by its hash; empty unless the build
+            named its model.
         reused: How many texts took a carried vector.
         encoded: How many texts were encoded.
     """
@@ -715,7 +720,7 @@ class _VectorReuse:
     encoded: int
 
     def __init__(self, model_name: str | None, carried: Mapping[str, list[float]]) -> None:
-        """Hold *carried* for the texts of *model_name*."""
+        """Hash under *model_name*, and reuse *carried*."""
         self.model_name = model_name
         self.carried = carried if model_name is not None else {}
         self.reused = 0
@@ -4563,10 +4568,7 @@ class _Store:
         if progress is not None:
             progress(0, total)
         # Read before add_bulk replaces the tables that hold them (S2b).
-        reuse = _VectorReuse(
-            model_name if model_name is not None else self.embedding_model_name,
-            self._lance.carried_vectors() if self._embedding_model is not None else {},
-        )
+        reuse = self._vector_reuse(model_name)
 
         # Row order is not load-bearing — PyArrow scans the whole batch, so
         # leading with ``embedding=None`` rows still infers the right type.
@@ -4628,6 +4630,25 @@ class _Store:
         )
         n_datasets = self._c.execute("SELECT COUNT(*) FROM dataset").fetchone()
         return int(n_datasets[0]) if n_datasets else 0
+
+    def _vector_reuse(self, model_name: str | None) -> _VectorReuse:
+        """The carried vectors a build may reuse: only when *model_name* names the encoder explicitly.
+
+        Without it the encoder may be a new model, so every text is encoded
+        and an INFO line says why.
+
+        Args:
+            model_name: `build_index`'s ``model_name``.
+
+        Returns:
+            The reuse state for one build.
+        """
+        if self._embedding_model is None or self._lance is None:
+            return _VectorReuse(None, {})
+        if model_name is None:
+            _log.info("build_index: carried vectors were not reused because no model_name was given")
+            return _VectorReuse(self.embedding_model_name, {})
+        return _VectorReuse(model_name, self._lance.carried_vectors())
 
     def _build_dataset_lance_rows(
         self,
