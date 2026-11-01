@@ -16,7 +16,7 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 import statcatlib as sc
 import statcatlib.query as q
 from statcatlib.store.store import _QueryContext
-from tests.conftest import concept_of
+from tests.conftest import ScratchStore, concept_of, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -30,7 +30,7 @@ def _i(en: str) -> InternationalString:
     return InternationalString(en=en)
 
 
-def _store_with_agents() -> sc.Catalog:
+def _store_with_agents() -> ScratchStore:
     """Store with three agents publishing various datasets via SDMX ingest.
 
     - ECB: AggregateDataset with GEO=[CA, DE]
@@ -39,7 +39,7 @@ def _store_with_agents() -> sc.Catalog:
 
     Separate codelists are used so GEO code filters discriminate by publisher.
     """
-    store = sc.Catalog().open()
+    store = open_scratch()
 
     # ECB dataflow: CL_GEO_ECB = [CA, DE]
     cl_ecb = Codelist(
@@ -98,14 +98,14 @@ def _store_with_agents() -> sc.Catalog:
     return store
 
 
-def _store_with_services() -> sc.Catalog:
+def _store_with_services() -> ScratchStore:
     """Store with DataService objects linked via distributions.
 
     - svc-api: serves EXR dataset (AggregateDataset with GEO=[CA])
     - svc-bulk: serves GDP dataset (AggregateDataset with GEO=[FR])
     - svc-static: not linked to any dataset
     """
-    store = sc.Catalog().open()
+    store = open_scratch()
 
     svc_api = sc.DataService(id="svc-api", title=_i("API"), endpoint_url="https://api.example.com")
     svc_bulk = sc.DataService(id="svc-bulk", title=_i("Bulk"), endpoint_url="https://bulk.example.com")

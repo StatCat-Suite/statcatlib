@@ -16,7 +16,7 @@ from sdmxlib.model.istring import InternationalString
 import statcatlib as sc
 import statcatlib.query as q
 from statcatlib.sources.sdmx import dataset_from_dataflow
-from tests.conftest import concept_of
+from tests.conftest import concept_of, scratch_store
 
 pytestmark = pytest.mark.unit
 
@@ -181,45 +181,45 @@ class TestIngestSdmxBridge:
         return registry, flow.id
 
     def test_ingest_sdmx_returns_list(self) -> None:
-        store = sc.Catalog().open()
-        registry, _ = self._make_registry()
-        result = sc.ingest_sdmx(store, registry)
-        assert isinstance(result, list)
-        assert len(result) == 1
+        with scratch_store() as store:
+            registry, _ = self._make_registry()
+            result = sc.ingest_sdmx(store, registry)
+            assert isinstance(result, list)
+            assert len(result) == 1
 
     def test_ingest_sdmx_all_aggregate(self) -> None:
-        store = sc.Catalog().open()
-        registry, _ = self._make_registry()
-        result = sc.ingest_sdmx(store, registry)
-        assert all(isinstance(ds, sc.AggregateDataset) for ds in result)
+        with scratch_store() as store:
+            registry, _ = self._make_registry()
+            result = sc.ingest_sdmx(store, registry)
+            assert all(isinstance(ds, sc.AggregateDataset) for ds in result)
 
     def test_ingest_sdmx_codes_queryable(self) -> None:
         """Codes are accessible via SDMX structural tables after ingest."""
-        store = sc.Catalog().open()
-        registry, _ = self._make_registry()
-        sc.ingest_sdmx(store, registry)
+        with scratch_store() as store:
+            registry, _ = self._make_registry()
+            sc.ingest_sdmx(store, registry)
 
-        # CA and US should be queryable via has_code (SDMX JOIN path)
-        result_ca = store.query(sc.AggregateDataset).filter(q.has_code("GEO", "CA")).execute()
-        result_us = store.query(sc.AggregateDataset).filter(q.has_code("GEO", "US")).execute()
-        assert result_ca.total == 1
-        assert result_us.total == 1
-        assert result_ca.items[0].identifier == "TEST:DF_TEST(1.0)"
+            # CA and US should be queryable via has_code (SDMX JOIN path)
+            result_ca = store.query(sc.AggregateDataset).filter(q.has_code("GEO", "CA")).execute()
+            result_us = store.query(sc.AggregateDataset).filter(q.has_code("GEO", "US")).execute()
+            assert result_ca.total == 1
+            assert result_us.total == 1
+            assert result_ca.items[0].identifier == "TEST:DF_TEST(1.0)"
 
     def test_ingest_sdmx_registry_publisher_override(self) -> None:
-        store = sc.Catalog().open()
-        registry, _ = self._make_registry()
-        publisher = sc.Agent(id="CUSTOM", name=_i("Custom Publisher"))
-        result = sc.ingest_sdmx_registry(store, registry, publisher=publisher)
-        assert result[0].publisher is not None
-        assert result[0].publisher.id == "CUSTOM"
+        with scratch_store() as store:
+            registry, _ = self._make_registry()
+            publisher = sc.Agent(id="CUSTOM", name=_i("Custom Publisher"))
+            result = sc.ingest_sdmx_registry(store, registry, publisher=publisher)
+            assert result[0].publisher is not None
+            assert result[0].publisher.id == "CUSTOM"
 
     def test_ingest_sdmx_registry_themes_override(self) -> None:
-        store = sc.Catalog().open()
-        registry, _ = self._make_registry()
-        theme = sc.ConceptRef(uri="urn:test:themes/ECONOMY", label=_i("Economy"))
-        result = sc.ingest_sdmx_registry(store, registry, themes=[theme])
-        assert any(t.uri == "urn:test:themes/ECONOMY" for t in result[0].themes)
+        with scratch_store() as store:
+            registry, _ = self._make_registry()
+            theme = sc.ConceptRef(uri="urn:test:themes/ECONOMY", label=_i("Economy"))
+            result = sc.ingest_sdmx_registry(store, registry, themes=[theme])
+            assert any(t.uri == "urn:test:themes/ECONOMY" for t in result[0].themes)
 
     def test_prepare_sdmx_returns_datasets(self) -> None:
         """prepare_sdmx() returns AggregateDataset objects without storing."""

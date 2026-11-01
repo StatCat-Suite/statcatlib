@@ -1,120 +1,108 @@
-"""Unit tests for Catalog folder mode + Path-style construction."""
+"""The catalog directory: what `Catalog.create` writes, and what a seal adds (Phase 2a).
 
+`Catalog.create` writes ``catalog.json`` and nothing else; the first seal
+writes the Inventory and the product's directory. The layout is the sharded
+catalog spec's §4.1.
+"""
+
+import uuid
 from pathlib import Path
 
 import polars as pl
 import pytest
-import sdmxlib as sl
 
 import statcatlib as sc
+from statcatlib.testing import temporary_catalog
 
 pytestmark = pytest.mark.unit
 
 
-class TestPathStyleOpen:
-    """``Catalog(path).open()`` — Path-style, idempotent.
+def _dataset(identifier: str = "test-ds") -> sc.OpenDataset:
+    return sc.OpenDataset(
+        identifier=identifier,
+        title=sc.InternationalString(en="Test"),
+        description=sc.InternationalString(en="Test dataset"),
+    )
 
-    Construction is cheap; open() creates the folder layout if it doesn't
-    exist and re-attaches if it does. There's no separate strict-create
-    or strict-open shape — one Path-style entry point is used
-    everywhere.
-    """
 
-    def test_creates_meta_duckdb(self, tmp_path: Path) -> None:
-        with sc.Catalog(tmp_path / "cat").open():
+class TestCreate:
+    def test_create_writes_only_catalog_json(self, tmp_path: Path) -> None:
+        with sc.Catalog.create(tmp_path / "cat"):
             pass
-        assert (tmp_path / "cat" / "meta.duckdb").exists()
+        assert sorted(p.name for p in (tmp_path / "cat").iterdir()) == ["catalog.json"]
 
-    def test_does_not_create_parquet_subdir(self, tmp_path: Path) -> None:
-        """An empty ``parquet/`` is a lie about the layout.
-
-        DuckLake creates its own DATA_PATH directory on first write, so
-        making one here bought nothing — and it destroyed a real signal:
-        beside a split bundle, an empty local ``parquet/`` makes an
-        unresolvable layout look co-located.
-        """
-        with sc.Catalog(tmp_path / "cat").open():
+    def test_create_makes_missing_parents(self, tmp_path: Path) -> None:
+        with sc.Catalog.create(tmp_path / "a" / "b" / "cat"):
             pass
-        assert (tmp_path / "cat").is_dir()
-        assert not (tmp_path / "cat" / "parquet").exists()
+        assert (tmp_path / "a" / "b" / "cat" / "catalog.json").is_file()
 
-    def test_bundle_dir_property(self, tmp_path: Path) -> None:
-        with sc.Catalog(tmp_path / "cat").open() as store:
-            assert store.bundle_dir == tmp_path / "cat"
+    def test_create_refuses_an_existing_catalog(self, tmp_path: Path) -> None:
+        sc.Catalog.create(tmp_path / "cat").close()
+        with pytest.raises(FileExistsError, match="exist_ok=True"):
+            sc.Catalog.create(tmp_path / "cat")
 
-    def test_data_property_is_data_store(self, tmp_path: Path) -> None:
-        with sc.Catalog(tmp_path / "cat").open() as store:
-            assert isinstance(store.data, sl.DuckDBDataStore)
+    def test_exist_ok_reopens_for_writing_and_writes_nothing(self, tmp_path: Path) -> None:
+        sc.Catalog.create(tmp_path / "cat").close()
+        before = (tmp_path / "cat" / "catalog.json").read_bytes()
+        with sc.Catalog.create(tmp_path / "cat", exist_ok=True) as cat:
+            assert cat.writable
+        assert (tmp_path / "cat" / "catalog.json").read_bytes() == before
+        assert sorted(p.name for p in (tmp_path / "cat").iterdir()) == ["catalog.json"]
 
-    def test_idempotent_reopen(self, tmp_path: Path) -> None:
-        with sc.Catalog(tmp_path / "cat").open():
+    def test_create_logs_the_path_it_created(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("INFO", logger="statcatlib.catalog"), sc.Catalog.create(tmp_path / "cat"):
             pass
-        with sc.Catalog(tmp_path / "cat").open() as store:
-            assert store.bundle_dir is not None
+        assert str(tmp_path / "cat") in caplog.text
 
-    def test_with_block_implicit_open(self, tmp_path: Path) -> None:
-        """``with Catalog(p):`` opens implicitly via __enter__."""
-        with sc.Catalog(tmp_path / "cat") as store:
-            assert store.bundle_dir is not None
+    def test_a_catalog_id_is_a_uuid7(self, tmp_path: Path) -> None:
+        with sc.Catalog.create(tmp_path / "cat") as cat:
+            assert uuid.UUID(cat.catalog_id).version == 7
 
-    def test_opens_without_a_parquet_dir(self, tmp_path: Path) -> None:
-        """``parquet/`` is not the sentinel — its absence must not block an open."""
-        with sc.Catalog(tmp_path / "cat").open():
-            pass
-        assert not (tmp_path / "cat" / "parquet").exists()
-        with sc.Catalog(tmp_path / "cat").open() as store:
-            assert store.bundle_dir is not None
+
+class TestSealLayout:
+    def test_a_seal_writes_the_inventory_and_the_edition(self, tmp_path: Path) -> None:
+        with sc.Catalog.create(tmp_path / "cat") as cat:
+            wc = cat.product("p").working_copy()
+            wc.put(_dataset())
+            edition = wc.seal()
+        root = tmp_path / "cat"
+        assert (root / "CURRENT").is_file()
+        assert (root / "inventory" / "000000000001.json").is_file()
+        assert len(list((root / "inventory" / "leaves").iterdir())) == 1
+        assert (root / "products" / "p" / edition.edition_id / "manifest.json").is_file()
+        assert (root / "products" / "p" / edition.edition_id / "metadata.duckdb").is_file()
 
     def test_persists_across_reopens(self, tmp_path: Path) -> None:
-        """Catalog content survives close + reopen against the same path."""
-        cat = tmp_path / "cat"
-        with sc.Catalog(cat).open() as store:
-            store.put(
-                sc.OpenDataset(
-                    identifier="test-ds",
-                    title=sc.InternationalString(en="Test"),
-                    description=sc.InternationalString(en="Test dataset"),
-                )
-            )
-        with sc.Catalog(cat).open() as store:
-            assert store.get(sc.BaseDataset, "test-ds") is not None
+        with sc.Catalog.create(tmp_path / "cat") as cat:
+            wc = cat.product("p").working_copy()
+            wc.put(_dataset())
+            wc.seal()
+        with sc.Catalog.open(tmp_path / "cat") as cat:
+            assert cat.product("p").view().get(sc.BaseDataset, "test-ds") is not None
 
-    def test_write_observations_through_lake(self, tmp_path: Path) -> None:
-        """``cat.data.write_observations`` materialises a table in the lake."""
-        with sc.Catalog(tmp_path / "cat").open() as store:
+    def test_write_observations_through_the_editions_lake(self, tmp_path: Path) -> None:
+        """``wc.registry.write_observations`` materialises a table in the edition's lake."""
+        with sc.Catalog.create(tmp_path / "cat") as cat:
+            wc = cat.product("p").working_copy()
             df = pl.DataFrame({"REF_AREA": ["CA", "US"], "OBS_VALUE": [1.0, 2.0]})
-            store.data.write_observations(schema="t", table="obs", source=df)
-            rows = store.connection.execute("SELECT COUNT(*) FROM lake.t.obs").fetchone()
-            assert rows is not None
-            assert rows[0] == 2
+            wc.registry.write_observations(schema="t", table="obs", source=df)
+            rows = wc.registry.connection.execute("SELECT COUNT(*) FROM lake.t.obs").fetchall()
+            assert rows == [(2,)]
+            wc.close()
 
 
-class TestMemoryMode:
-    def test_bundle_dir_is_none(self) -> None:
-        with sc.Catalog().open() as store:
-            assert store.bundle_dir is None
+class TestRemovedConstructors:
+    @pytest.mark.parametrize("args", [(), (":memory:",), ("some/path",)])
+    def test_catalog_constructor_names_the_new_calls(self, args: tuple[str, ...]) -> None:
+        with pytest.raises(TypeError, match=r"Catalog\.open.*Catalog\.create.*temporary_catalog"):
+            sc.Catalog(*args)
 
-    def test_explicit_memory_string(self) -> None:
-        with sc.Catalog(":memory:").open() as store:
-            assert store.bundle_dir is None
-
-    def test_data_property_available(self) -> None:
-        """Even in-memory catalogs expose ``.data`` — it just has no lake."""
-        with sc.Catalog().open() as store:
-            assert isinstance(store.data, sl.DuckDBDataStore)
-
-
-class TestCheapConstruction:
-    """``Catalog(uri)`` doesn't open the connection until ``.open()``."""
-
-    def test_construction_does_no_io(self, tmp_path: Path) -> None:
-        # Constructing against a path doesn't create the folder
-        cat_ref = sc.Catalog(tmp_path / "cat")
-        assert not (tmp_path / "cat").exists()
-        # Methods that need the connection raise a clear error before open
-        with pytest.raises(RuntimeError, match="not open"):
-            _ = cat_ref.connection
-
-    def test_uri_property_available_pre_open(self, tmp_path: Path) -> None:
-        cat_ref = sc.Catalog(tmp_path / "cat")
-        assert cat_ref.uri == tmp_path / "cat"
+    def test_temporary_catalog_is_writable_and_removed(self) -> None:
+        with temporary_catalog() as cat:
+            wc = cat.product("p").working_copy()
+            wc.put(_dataset())
+            wc.seal()
+            cat.refresh()
+            assert cat.product("p").view().get(sc.BaseDataset, "test-ds") is not None
+            root = cat._root
+        assert not root.exists()

@@ -1,7 +1,7 @@
-"""Integration tests for Catalog structural traversal methods.
+"""Integration tests for the structural traversal methods of an edition view.
 
 These tests ingest SDMX artefacts into the shared DuckDB tables, then verify
-that the traversal methods on Catalog correctly join across sdmxlib's
+that the traversal methods on `EditionView` correctly join across sdmxlib's
 tables (dataflows, dsd_components, codelists, codes).
 """
 
@@ -16,7 +16,7 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 from sdmxlib.model.istring import InternationalString
 
 import statcatlib as sc
-from tests.conftest import concept_of
+from tests.conftest import ScratchStore, concept_of, open_scratch
 
 pytestmark = pytest.mark.integration
 
@@ -30,7 +30,7 @@ def _i(en: str, fr: str | None = None) -> InternationalString:
     return InternationalString(en=en, fr=fr or en)
 
 
-def _make_two_flow_registry() -> tuple[InMemoryRegistry, sc.Catalog]:
+def _make_two_flow_registry() -> tuple[InMemoryRegistry, ScratchStore]:
     """Two dataflows sharing a GEO codelist, different FREQ codelists.
 
     DF_EXR uses CL_GEO + CL_FREQ_A
@@ -83,7 +83,7 @@ def _make_two_flow_registry() -> tuple[InMemoryRegistry, sc.Catalog]:
     for obj in [geo_cl, freq_a, freq_q, dsd1, dsd2, flow1, flow2]:
         registry.add(obj)
 
-    store = sc.Catalog().open()
+    store = open_scratch()
     sc.ingest_sdmx(store, registry)
     return registry, store
 
@@ -95,7 +95,7 @@ def _make_two_flow_registry() -> tuple[InMemoryRegistry, sc.Catalog]:
 
 class TestLocalRegistry:
     def test_returns_local_registry(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         reg = store.registry
         assert isinstance(reg, sdmxlib.LocalRegistry)
 
@@ -109,19 +109,20 @@ class TestLocalRegistry:
         assert result is not None
         assert isinstance(result, sdmxlib.Codelist)
 
-    def test_raises_before_open(self) -> None:
-        cat = sc.Catalog()  # cheap, not opened
-        with pytest.raises(RuntimeError, match="not open"):
-            _ = cat.registry
+    def test_raises_after_close(self) -> None:
+        store = open_scratch()
+        store.close()
+        with pytest.raises(sc.WorkingCopyClosedError, match="closed"):
+            _ = store.registry
 
     def test_same_instance_per_open(self) -> None:
-        """Composition: one Registry per open(), not rebuilt per access."""
-        store = sc.Catalog().open()
+        """Composition: one registry per working copy, not rebuilt per access."""
+        store = open_scratch()
         assert store.registry is store.registry
 
     def test_writes_via_registry_visible_to_statcatlib(self) -> None:
         """sl.LocalRegistry mutations land in the same DuckDB file statcatlib queries."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         # Direct mutation via the composed registry — statcatlib should see it
         # because both schemas live on one connection (Topology B).
         cl = sdmxlib.Codelist(
@@ -176,7 +177,7 @@ class TestCodeMap:
         assert result == {}
 
     def test_non_sdmx_dataset_returns_empty(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(
             sc.OpenDataset(
                 identifier="plain-1",
@@ -243,7 +244,7 @@ class TestGetStructure:
         assert "FREQ" in dim_ids
 
     def test_no_urn_returns_none(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         ds = sc.AggregateDataset(
             identifier="no-sdmx",
             title=_i("No SDMX"),
@@ -319,7 +320,7 @@ class TestDatasetRelated:
         registry = InMemoryRegistry()
         for obj in [unique_cl, dsd, flow]:
             registry.add(obj)
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_sdmx(store, registry)
         result = store.dataset("TEST:DF_UNIQUE(1.0)").related("codelist").collect()
         assert result == []

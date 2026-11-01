@@ -1,4 +1,4 @@
-"""Concurrent query safety on a single Catalog instance.
+"""Concurrent query safety on one sealed edition's view.
 
 Regression: the catalog used to share one DuckDB cursor across all
 callers, so concurrent ``execute()`` calls from threads (e.g. FastAPI's
@@ -21,29 +21,32 @@ import statcatlib as sc
 pytestmark = pytest.mark.unit
 
 
-def _populate(store: sc.Catalog, n: int = 20) -> None:
+def _sealed_view(catalog: sc.Catalog, n: int = 20) -> sc.EditionView:
+    wc = catalog.product("p").working_copy()
     for i in range(n):
-        store.put(
+        wc.put(
             sc.OpenDataset(
                 identifier=f"ds-{i:03d}",
                 title=I18n(en=f"Dataset {i}"),
                 description=I18n(en=f"Description {i}"),
             )
         )
+    wc.seal()
+    catalog.refresh()
+    return catalog.product("p").view()
 
 
-def test_concurrent_queries_do_not_share_cursor(tmp_path):
-    """Many threads issuing queries on one Catalog must not corrupt cursor state."""
-    store = sc.Catalog(str(tmp_path / "catalog")).open()
-    _populate(store)
+def test_concurrent_queries_do_not_share_cursor(catalog: sc.Catalog) -> None:
+    """Many threads issuing queries on one sealed view must not corrupt cursor state."""
+    view = _sealed_view(catalog)
 
     def worker(i: int) -> int:
-        # Mix of query shapes that all go through ``self._c``: get, query
-        # terminals, facets, exists. Each thread runs many iterations so
-        # concurrent execute() calls overlap.
+        # Mix of query shapes that all go through the store's `_cursor()`: get
+        # and query terminals. Each thread runs many iterations so concurrent
+        # execute() calls overlap.
         for _ in range(25):
-            assert store.get(sc.BaseDataset, f"ds-{i % 20:03d}") is not None
-            results = store.query(sc.BaseDataset).limit(5).collect()
+            assert view.get(sc.BaseDataset, f"ds-{i % 20:03d}") is not None
+            results = view.query(sc.BaseDataset).limit(5).collect()
             assert len(results) == 5
         return i
 
@@ -53,9 +56,9 @@ def test_concurrent_queries_do_not_share_cursor(tmp_path):
             f.result()  # re-raises any exception from the worker
 
 
-def test_per_thread_cursor_is_distinct(tmp_path):
-    """Two threads accessing ``_c`` get different cursor objects."""
-    store = sc.Catalog(str(tmp_path / "catalog")).open()
+def test_per_thread_cursor_is_distinct(catalog: sc.Catalog) -> None:
+    """Two threads asking a view for its cursor get different cursor objects."""
+    view = _sealed_view(catalog, n=1)
 
     cursors: dict[str, object] = {}
     # Without the barrier the pool may run both tasks on one idle worker,
@@ -64,7 +67,7 @@ def test_per_thread_cursor_is_distinct(tmp_path):
 
     def grab(name: str) -> None:
         barrier.wait(timeout=10)
-        cursors[name] = store._c
+        cursors[name] = view._cursor()
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         list(ex.map(grab, ["a", "b"]))

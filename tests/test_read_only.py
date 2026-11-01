@@ -1,21 +1,20 @@
-"""Tests for ``Catalog(..., read_only=True)`` — multi-worker safe opens.
+"""`Catalog.open` is read-only: its views answer, and nothing it returns writes (Phase 2a, P4).
 
-Opening a folder catalog read-write takes an exclusive DuckDB
-file lock, which prevents running multiple uvicorn workers against the
-same bundle. ``read_only=True`` opens the DuckDB connection with
-``read_only=True``, ATTACHes the DuckLake sidecar ``READ_ONLY``, and
-disables every write path.
+A sealed edition opens through ``LocalRegistry.edition``, with DuckDB's
+``read_only``, so any number of processes may read it at once. A view has no
+write methods, and a catalog from `Catalog.open` starts no working copy.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
+import duckdb
 import pytest
 from sdmxlib import InternationalString
 
 import statcatlib as sc
-from tests.conftest import untyped
 
 pytestmark = pytest.mark.unit
 
@@ -24,103 +23,70 @@ def _i(en: str) -> InternationalString:
     return InternationalString(en=en)
 
 
-def _seed(path: Path) -> None:
-    """Build a small folder-mode catalog at *path*."""
-    with sc.Catalog(path).open() as cat:
-        cat.put(
-            sc.OpenDataset(
-                identifier="DS-1",
-                title=_i("First"),
-                description=_i("First dataset"),
-                publisher=sc.Agent(id="PUB", name=_i("Pub")),
-                status="current",
-            )
-        )
-        cat.put(
-            sc.OpenDataset(
-                identifier="DS-2",
-                title=_i("Second"),
-                description=_i("Second dataset"),
-                publisher=sc.Agent(id="PUB", name=_i("Pub")),
-                status="current",
-            )
-        )
+def _dataset(identifier: str, title: str) -> sc.OpenDataset:
+    return sc.OpenDataset(
+        identifier=identifier,
+        title=_i(title),
+        description=_i(f"{title} dataset"),
+        publisher=sc.Agent(id="PUB", name=_i("Pub")),
+        status="current",
+    )
+
+
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    """A catalog whose product ``p`` has a sealed edition holding DS-1 and DS-2."""
+    path = tmp_path / "cat"
+    with sc.Catalog.create(path) as cat:
+        wc = cat.product("p").working_copy()
+        wc.put([_dataset("DS-1", "First"), _dataset("DS-2", "Second")])
+        wc.seal()
+    return path
+
+
+@pytest.fixture
+def view(root: Path) -> Iterator[sc.EditionView]:
+    with sc.Catalog.open(root) as cat:
+        yield cat.product("p").view()
 
 
 class TestReadOnlyOpen:
-    def test_query_works_read_only(self, tmp_path: Path) -> None:
-        bundle = tmp_path / "cat"
-        _seed(bundle)
-        with sc.Catalog(bundle, read_only=True).open() as cat:
-            ds = cat.get(sc.OpenDataset, "DS-1")
-            assert ds is not None
-            assert ds.identifier == "DS-1"
-            rows = cat.query(sc.OpenDataset).execute().items
-            assert {d.identifier for d in rows} == {"DS-1", "DS-2"}
+    def test_query_works(self, view: sc.EditionView) -> None:
+        ds = view.get(sc.OpenDataset, "DS-1")
+        assert ds is not None
+        assert ds.identifier == "DS-1"
+        assert {d.identifier for d in view.query(sc.OpenDataset).execute().items} == {"DS-1", "DS-2"}
 
-    def test_no_exclusive_lock(self, tmp_path: Path) -> None:
-        """read_only=True must not take the DuckDB exclusive lock.
+    def test_no_exclusive_lock(self, root: Path, view: sc.EditionView) -> None:
+        """Two catalogs and a raw read-only connection read the same edition at once."""
+        with sc.Catalog.open(root) as other:
+            assert other.product("p").view().get(sc.OpenDataset, "DS-2") is not None
+        assert view.get(sc.OpenDataset, "DS-1") is not None
+        (meta,) = (root / "products" / "p").glob("*/metadata.duckdb")
+        with duckdb.connect(str(meta), read_only=True) as second:
+            assert second.execute("SELECT count(*) FROM statcat.dataset").fetchall() == [(2,)]
 
-        Repro is cross-process (uvicorn workers), but the underlying
-        symptom is observable in-process by opening a second raw DuckDB
-        connection to the same ``meta.duckdb`` — read-write open takes
-        an exclusive lock that fails the second connect; read-only opens
-        coexist freely.
-        """
-        import duckdb
-
-        bundle = tmp_path / "cat"
-        _seed(bundle)
-        with sc.Catalog(bundle, read_only=True).open():
-            # Second concurrent read-only opener succeeds — no lock contention.
-            second = duckdb.connect(str(bundle / "meta.duckdb"), read_only=True)
-            try:
-                second.execute("SELECT 1").fetchone()
-            finally:
-                second.close()
+    def test_open_refuses_a_directory_that_is_not_a_catalog(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match=r"Catalog\.create"):
+            sc.Catalog.open(tmp_path / "nope")
 
 
-class TestReadOnlyWriteGuards:
-    def test_put_raises(self, tmp_path: Path) -> None:
-        bundle = tmp_path / "cat"
-        _seed(bundle)
-        with sc.Catalog(bundle, read_only=True).open() as cat, pytest.raises(RuntimeError, match=r"read_only"):
-            cat.put(
-                sc.OpenDataset(
-                    identifier="DS-NEW",
-                    title=_i("New"),
-                    description=_i("nope"),
-                    publisher=sc.Agent(id="PUB", name=_i("Pub")),
-                    status="current",
-                )
-            )
+class TestWriteGuards:
+    def test_a_view_has_no_write_methods(self, view: sc.EditionView) -> None:
+        for name in ("put", "put_concept", "add_lineage", "add_language_alternates", "bulk_load", "build_index"):
+            assert not hasattr(view, name), name
 
-    def test_bulk_load_raises(self, tmp_path: Path) -> None:
-        bundle = tmp_path / "cat"
-        _seed(bundle)
-        with (
-            sc.Catalog(bundle, read_only=True).open() as cat,
-            pytest.raises(RuntimeError, match=r"read_only"),
-            cat.bulk_load(),
-        ):
+    def test_the_sealed_store_refuses_writes(self, view: sc.EditionView) -> None:
+        store = view._store
+        with pytest.raises(RuntimeError, match="sealed edition is never written"):
+            store.put(_dataset("DS-NEW", "New"))
+        with pytest.raises(RuntimeError, match="sealed edition is never written"), store.bulk_load():
             pass
+        with pytest.raises(RuntimeError, match="sealed edition is never written"):
+            store.build_index()
+        with pytest.raises(RuntimeError, match="sealed edition is never written"):
+            store.add_lineage("DS-1", "DS-2", "derived_from")
 
-    def test_build_index_raises(self, tmp_path: Path) -> None:
-        bundle = tmp_path / "cat"
-        _seed(bundle)
-        with sc.Catalog(bundle, read_only=True).open() as cat, pytest.raises(RuntimeError, match=r"read_only"):
-            cat.build_index()
-
-
-class TestReadOnlyValidation:
-    def test_memory_uri_rejected(self) -> None:
-        with pytest.raises(ValueError, match="in-memory"):
-            sc.Catalog(":memory:", read_only=True)
-
-    def test_embedding_model_rejected(self) -> None:
-        with pytest.raises(ValueError, match="embedding_model"):
-            sc.Catalog("/tmp/whatever", embedding_model=untyped(object()), read_only=True)  # noqa: S108
-
-    def test_missing_bundle_rejected(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError, match=r"meta\.duckdb"):
-            sc.Catalog(tmp_path / "nope", read_only=True).open()
+    def test_an_opened_catalog_starts_no_working_copy(self, root: Path) -> None:
+        with sc.Catalog.open(root) as cat, pytest.raises(RuntimeError, match=r"Catalog\.create\(.*exist_ok=True\)"):
+            cat.product("p").working_copy()

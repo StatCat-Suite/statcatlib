@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import contextlib
+import shutil
+import tempfile
+import weakref
+from collections.abc import Generator, Iterator
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -13,6 +18,7 @@ from sdmxlib.model.urn import SdmxUrn
 import statcatlib as sc
 
 if TYPE_CHECKING:
+    import duckdb
     import lancedb.table
 
     from statcatlib.store.lance import LanceIndex
@@ -29,21 +35,100 @@ def untyped(value: object) -> Any:
     return value
 
 
-def require_index(store: sc.Catalog) -> LanceIndex:
-    """The store's search index, narrowed from ``LanceIndex | None``.
+class ScratchStore(sc.WorkingCopy, sc.EditionView):
+    """A working copy that also answers its view's queries: one object, as 0.11's ``Catalog`` was.
 
-    `Catalog._lance` is `None` until `build_index` runs, and a test that
+    For the tests that write and read through one name (``store.put(...)``
+    then ``store.query(...)``), so they stay as they were. It is a
+    `WorkingCopy`, so ingest accepts it, and its reads are its own view's,
+    which sees every write at once. Built from a working copy by
+    `scratch_store`; it reaches private state on purpose.
+    """
+
+    @classmethod
+    def _from(cls, wc: sc.WorkingCopy) -> ScratchStore:
+        scratch = object.__new__(cls)
+        scratch.__dict__.update(wc.__dict__)
+        return scratch
+
+
+#: Every `ScratchStore` opened, so `_close_scratch_stores` can close those a test leaves open.
+_OPENED: list[ScratchStore] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_scratch_stores() -> Iterator[None]:
+    """Close the scratch stores a test opened and left open, when it ends.
+
+    Each holds a DuckDB database, and each database its own thread pool, so
+    stores left to the garbage collector exhaust the process's threads over a
+    full run. Stores a module-scoped fixture opened are opened before this
+    fixture starts, and stay open for the module.
+    """
+    start = len(_OPENED)
+    yield
+    for scratch in _OPENED[start:]:
+        scratch.close()
+    del _OPENED[start:]
+
+
+def open_scratch(path: Path | None = None, product: str = "p", **options: Any) -> ScratchStore:
+    """A `ScratchStore` over a new catalog at *path*, or in a temporary directory.
+
+    The temporary directory is deleted when the store is garbage collected.
+    *options* go to `Product.working_copy`.
+    """
+    owned = path is None
+    root = Path(tempfile.mkdtemp(prefix="statcat-test-")) / "catalog" if path is None else path
+    cat = sc.Catalog.create(root, exist_ok=True)
+    scratch = ScratchStore._from(cat.product(product).working_copy(**options))
+    _OPENED.append(scratch)
+    weakref.finalize(scratch, cat.close)
+    if owned:
+        weakref.finalize(scratch, shutil.rmtree, root.parent, ignore_errors=True)
+    return scratch
+
+
+@contextlib.contextmanager
+def scratch_store(path: Path | None = None, product: str = "p", **options: Any) -> Generator[ScratchStore]:
+    """`open_scratch` as a context manager, which closes the working copy at the end."""
+    scratch = open_scratch(path, product, **options)
+    try:
+        yield scratch
+    finally:
+        scratch.close()
+
+
+def seal_and_view(store: sc.WorkingCopy) -> sc.EditionView:
+    """Seal *store* and return a view of the edition it became, through a catalog opened read-only."""
+    root = store._writer.root
+    edition = store.seal()
+    cat = sc.Catalog.open(root)
+    view = cat.product(edition.product_id).view()
+    weakref.finalize(view, cat.close)
+    return view
+
+
+def cursor_of(store: sc.EditionView) -> duckdb.DuckDBPyConnection:
+    """The store's cursor on its edition, for raw SQL in a test (private on purpose)."""
+    return store._cursor()
+
+
+def require_index(store: sc.EditionView) -> LanceIndex:
+    """The view's search index, narrowed from ``LanceIndex | None``.
+
+    The store's ``_lance`` is `None` until an index is built, and a test that
     reaches for it has already built one. Narrowing here rather than with an
     `assert` at each of the call sites keeps the reason in one place — and
     gives a failure that names the cause instead of an `AttributeError` on
     `None`.
     """
-    index = store._lance
+    index = store._store._lance
     assert index is not None, "store has no search index — call build_index() first"
     return index
 
 
-def search_table(store: sc.Catalog, lang: str = "en") -> lancedb.table.Table:
+def search_table(store: sc.EditionView, lang: str = "en") -> lancedb.table.Table:
     """One language's Lance table, straight from a store.
 
     `require_index` then `require_table`; both narrowings are failed
@@ -217,27 +302,55 @@ FIXTURE_DATASETS: list[sc.Dataset] = [
 
 
 @pytest.fixture(scope="module")
-def indexed_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.Catalog]:
-    """The fixture catalog, folder-backed and with a BM25 index built.
+def indexed_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.EditionView]:
+    """The fixture datasets, sealed, as a view of the sealed edition: the seal builds the BM25 index.
 
-    Separate from `store` because `search()` needs somewhere to put
-    ``search/``; an in-memory catalog has nowhere. That is why the search
-    tests were skipped rather than failing — removing the marker alone would
-    not have made them pass.
-
-    Module-scoped: `build_index` is the expensive part, and the tests only
-    read.
+    Module-scoped: the seal's index build is the expensive part, and the
+    tests only read.
     """
     pytest.importorskip("lancedb", reason="search needs statcatlib[search]")
     path = tmp_path_factory.mktemp("indexed") / "catalog"
-    with sc.Catalog(path) as catalog:
-        catalog.put(FIXTURE_DATASETS)
-        catalog.build_index()
-        yield catalog
+    with sc.Catalog.create(path) as catalog:
+        wc = catalog.product("p").working_copy()
+        wc.put(FIXTURE_DATASETS)
+        wc.seal()
+        catalog.refresh()
+        yield catalog.product("p").view()
 
 
 @pytest.fixture
-def store() -> sc.Catalog:
-    s = sc.Catalog().open()
-    s.put(FIXTURE_DATASETS)
-    return s
+def catalog(tmp_path: Path) -> Iterator[sc.Catalog]:
+    """A writable catalog, created empty in the test's temporary directory."""
+    with sc.Catalog.create(tmp_path / "catalog") as cat:
+        yield cat
+
+
+@pytest.fixture
+def wc(catalog: sc.Catalog) -> Iterator[sc.WorkingCopy]:
+    """A working copy of product ``p`` in `catalog`, closed at the end of the test."""
+    working_copy = catalog.product("p").working_copy()
+    yield working_copy
+    working_copy.close()
+
+
+@pytest.fixture
+def view(wc: sc.WorkingCopy) -> sc.EditionView:
+    """`wc`'s view, taken once: it sees later writes, since it shares the working copy's store."""
+    return wc.view()
+
+
+@pytest.fixture
+def sealed_view(catalog: sc.Catalog, wc: sc.WorkingCopy) -> sc.EditionView:
+    """The fixture datasets, sealed from `wc`, as ``catalog.product("p").view()``."""
+    wc.put(FIXTURE_DATASETS)
+    wc.seal()
+    catalog.refresh()
+    return catalog.product("p").view()
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Iterator[ScratchStore]:
+    """The fixture datasets in a `ScratchStore`: a working copy that also answers its view's queries."""
+    with scratch_store(tmp_path / "catalog") as s:
+        s.put(FIXTURE_DATASETS)
+        yield s

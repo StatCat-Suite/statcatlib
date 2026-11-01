@@ -6,54 +6,126 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import duckdb
+import msgspec
 import pytest
+import sdmxlib as sl
 from sdmxlib.edition import (
     OVERLAY_FORMAT,
+    Manifest,
     Overlay,
     OverlayAnnotation,
     OverlayEntry,
-    Producer,
     check_edition,
-    seal,
+    read_manifest,
 )
-from sdmxlib.testing import Dim, Shape
+from sdmxlib.testing import Dim, Shape, synthetic_edition
 
 import statcatlib as sc
-from statcatlib.bundle import STATCAT_SECTION, catalog_section, check_catalog, overlay_affects_search
+from statcatlib.bundle import STATCAT_SECTION, STATCAT_SECTION_FORMAT, check_catalog, overlay_affects_search
 from statcatlib.store.store import annotation_fingerprint
 from statcatlib.testing import synthetic_catalog
 
 pytestmark = pytest.mark.unit
 
 _SHAPE = Shape(dimensions=(Dim(codes=30, depth=2), Dim(codes=4)), observations=300, languages=("en", "fr"))
-_PRODUCER = Producer(name="tests", version="0")
+
+
+def _edition_dir(root: Path, edition: sc.Edition) -> Path:
+    return root / "products" / edition.product_id / edition.edition_id
+
+
+@pytest.fixture(scope="module")
+def synthetic(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A sealed synthetic edition, with observations and a search index; its directory."""
+    pytest.importorskip("lancedb", reason="the seal builds the index with statcatlib[search]")
+    root = tmp_path_factory.mktemp("synthetic") / "catalog"
+    return _edition_dir(root, synthetic_catalog(root, _SHAPE, seed=3))
+
+
+@pytest.fixture(scope="module")
+def no_observations(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A sealed edition holding catalog datasets and no observations; its directory."""
+    root = tmp_path_factory.mktemp("datasets") / "catalog"
+    with sc.Catalog.create(root) as cat:
+        wc = cat.product("p").working_copy()
+        wc.put(
+            sc.OpenDataset(
+                identifier="d", title=sc.InternationalString(en="D"), description=sc.InternationalString(en="D")
+            )
+        )
+        edition = wc.seal()
+    return _edition_dir(root, edition)
+
+
+def _check(edition_dir: Path, manifest: Manifest) -> list[str]:
+    """Run `check_catalog` against *edition_dir* as if *manifest* were its manifest."""
+    with sl.LocalRegistry.edition(edition_dir) as reg:
+        return [str(f) for f in check_catalog(edition_dir, manifest, reg, "open")]
+
+
+def _with_section(manifest: Manifest, **changes: object) -> Manifest:
+    section = {**manifest.extensions[STATCAT_SECTION], **changes}
+    return msgspec.structs.replace(manifest, extensions={**manifest.extensions, STATCAT_SECTION: section})
 
 
 class TestCheckCatalog:
-    def test_a_sealed_synthetic_catalog_passes_every_check(self, tmp_path: Path) -> None:
-        rec = synthetic_catalog(tmp_path / "product", _SHAPE, seed=3)
-        section = catalog_section(rec.cat)
-        rec.cat.close()
-        rec.reg.close()
-        seal(rec.edition_dir, product_id="synthetic", producer=_PRODUCER, extensions={STATCAT_SECTION: section})
-
-        report = check_edition(rec.edition_dir, at="publish", extensions={STATCAT_SECTION: check_catalog})
+    def test_a_sealed_synthetic_edition_passes_every_check(self, synthetic: Path) -> None:
+        report = check_edition(synthetic, at="publish", extensions={STATCAT_SECTION: check_catalog})
 
         assert report.ok, [str(f) for f in report.findings]
         assert report.checked[-1] == STATCAT_SECTION
+        section = read_manifest(synthetic).extensions[STATCAT_SECTION]
         assert section["datasets"] == 1
         search = section["search"]
         assert isinstance(search, dict)
         assert set(search["languages"]) == {"en", "fr"}
 
+    def test_the_section_is_format_3_of_a_data_product(self, synthetic: Path) -> None:
+        section = read_manifest(synthetic).extensions[STATCAT_SECTION]
+        assert section["format"] == STATCAT_SECTION_FORMAT == 3
+        assert section["kind"] == "data"
+
+    def test_the_section_records_the_search_annotation_types(self, synthetic: Path) -> None:
+        """GH-48: a server reads the types from the section; the default build reads `SEARCH_ANNOTATION_TYPES`."""
+        search = read_manifest(synthetic).extensions[STATCAT_SECTION]["search"]
+        assert isinstance(search, dict)
+        annotations = search["annotations"]
+        assert isinstance(annotations, dict)
+        assert sorted(annotations["types"]) == sorted(sc.SEARCH_ANNOTATION_TYPES)
+
+    def test_another_format_is_refused(self, no_observations: Path) -> None:
+        manifest = _with_section(read_manifest(no_observations), format=2)
+        assert _check(no_observations, manifest) == [
+            f"[{STATCAT_SECTION}] manifest.json: statcat section format 2, this build reads 3"
+        ]
+
+    def test_an_unknown_kind_is_refused(self, no_observations: Path) -> None:
+        manifest = _with_section(read_manifest(no_observations), kind="dataset")
+        (finding,) = _check(no_observations, manifest)
+        assert "kind 'dataset'" in finding
+
+    def test_a_structure_kind_without_bindings_is_accepted(self, no_observations: Path) -> None:
+        """Format 3 reserves ``structure`` for structure products (Phase 3)."""
+        manifest = read_manifest(no_observations)
+        assert manifest.bindings == ()
+        assert _check(no_observations, _with_section(manifest, kind="structure")) == []
+
+    def test_a_structure_kind_with_bindings_is_refused(self, synthetic: Path) -> None:
+        manifest = read_manifest(synthetic)
+        assert manifest.bindings
+        findings = _check(synthetic, _with_section(manifest, kind="structure"))
+        assert findings == [
+            f"[{STATCAT_SECTION}] {b.dataflow}: a structure product's edition binds a dataflow to observations"
+            for b in manifest.bindings
+        ]
+
 
 class TestAnnotationFingerprint:
     @pytest.fixture
     def conn(self, tmp_path: Path) -> Iterator[duckdb.DuckDBPyConnection]:
-        rec = synthetic_catalog(tmp_path / "product", _SHAPE, seed=3, index=False)
-        yield rec.reg.connection
-        rec.cat.close()
-        rec.reg.close()
+        reg = synthetic_edition(tmp_path / "product", _SHAPE, seed=3, seal=False)
+        yield reg.connection
+        reg.close()
 
     def _add(self, conn: duckdb.DuckDBPyConnection, annotation_type: str, title: str | None = "t") -> int:
         row = conn.execute(

@@ -26,8 +26,8 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 from sdmxlib.model.istring import InternationalString
 
 from statcatlib.sources.sdmx import ingest_sdmx
-from statcatlib.store.store import Catalog, CodelistIndexPolicy
-from tests.conftest import concept_of, search_table
+from statcatlib.store.store import CodelistIndexPolicy
+from tests.conftest import concept_of, cursor_of, open_scratch, search_table
 
 pytestmark = pytest.mark.integration
 
@@ -160,12 +160,12 @@ def _stub_model(dim: int = 8):
 class TestCodelistIndexPolicy:
     def test_fts_only_policy_bypasses_size_cap(self) -> None:
         """A codelist over the cap is still emitted when listed in an fts_only policy."""
-        store = Catalog().open()
+        store = open_scratch()
         registry, geo_urn = _make_registry_with_big_geo()
         ingest_sdmx(store, registry)
 
         # Cap of 3 would skip CL_GEO (5 codes). Policy lifts that.
-        items = store._collect_code_texts(
+        items = store._store._collect_code_texts(
             max_codes_per_codelist=3,
             codelist_policies=[CodelistIndexPolicy(urns=[geo_urn])],
         )
@@ -174,13 +174,13 @@ class TestCodelistIndexPolicy:
 
     def test_warning_suppressed_for_policy_covered_codelist(self) -> None:
         """Codelists explicitly opted-in must not trigger the oversize warning."""
-        store = Catalog().open()
+        store = open_scratch()
         registry, geo_urn = _make_registry_with_big_geo()
         ingest_sdmx(store, registry)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            store._collect_code_texts(
+            store._store._collect_code_texts(
                 max_codes_per_codelist=3,
                 codelist_policies=[CodelistIndexPolicy(urns=[geo_urn])],
             )
@@ -194,7 +194,7 @@ class TestCodelistIndexPolicy:
         every code row.  The policy is the way to say "Tantivy is right
         for this codelist; don't burn vector budget on it."
         """
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         registry, geo_urn = _make_registry_with_big_geo()
         ingest_sdmx(store, registry)
         store.build_index(
@@ -205,7 +205,7 @@ class TestCodelistIndexPolicy:
             codelist_policies=[CodelistIndexPolicy(urns=[geo_urn])],
         )
 
-        assert store._lance is not None
+        assert store._store._lance is not None
         rows = search_table(store).search().where(f"codelist_urn = '{geo_urn}'", prefilter=True).limit(100).to_list()
         assert rows, "no geo code rows landed in Lance"
         assert all(r.get("embedding") is None for r in rows), (
@@ -217,11 +217,11 @@ class TestCodelistIndexPolicy:
 
         Regression gate per the issue's acceptance criteria.
         """
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         registry, _ = _make_registry_with_big_geo()
         ingest_sdmx(store, registry)
-        items_no_policy = store._collect_code_texts(max_codes_per_codelist=500)
-        items_empty_policy = store._collect_code_texts(
+        items_no_policy = store._store._collect_code_texts(max_codes_per_codelist=500)
+        items_empty_policy = store._store._collect_code_texts(
             max_codes_per_codelist=500,
             codelist_policies=(),
         )
@@ -236,7 +236,7 @@ class TestCodelistIndexPolicy:
         stub every other test uses never reaches the check; 768 is the width
         the failure was reported at.
         """
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         registry, geo_urn = _make_registry_with_big_geo()
         ingest_sdmx(store, registry)
         model = _stub_model(dim=768)
@@ -261,18 +261,18 @@ class TestCodelistIndexPolicy:
 
 class TestConceptIndexing:
     def test_collect_concept_texts_emits_rows(self) -> None:
-        store = Catalog().open()
+        store = open_scratch()
         ingest_sdmx(store, _make_registry_with_concepts())
-        items = store._collect_concept_texts()
+        items = store._store._collect_concept_texts()
         assert len(items) > 0
         labels = {r["text"] for r in items if r["lang"] == "en"}
         assert any("Gross Domestic Product" in t for t in labels)
         assert any("basket of consumer goods" in t for t in labels)
 
     def test_concept_rows_have_concept_columns(self) -> None:
-        store = Catalog().open()
+        store = open_scratch()
         ingest_sdmx(store, _make_registry_with_concepts())
-        items = store._collect_concept_texts()
+        items = store._store._collect_concept_texts()
         gdp = next(r for r in items if r["concept_id"] == "GDP" and r["lang"] == "en")
         assert gdp["entity_type"] == "concept"
         assert (gdp["concept_urn"] or "").endswith(".GDP")
@@ -282,11 +282,11 @@ class TestConceptIndexing:
         assert gdp["dimension_id"] == ""
 
     def test_build_index_writes_concept_rows_with_embeddings(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry_with_concepts())
         store.build_index(embedding_model=_stub_model(), include_concepts=True)
 
-        assert store._lance is not None
+        assert store._store._lance is not None
         rows = search_table(store).search().where("entity_type = 'concept'", prefilter=True).limit(100).to_list()
         assert rows, "no concept rows landed in Lance"
         assert all(r.get("embedding") is not None for r in rows), (
@@ -294,17 +294,17 @@ class TestConceptIndexing:
         )
 
     def test_build_index_skips_concepts_when_disabled(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry_with_concepts())
         store.build_index(include_concepts=False)
 
-        assert store._lance is not None
+        assert store._store._lance is not None
         rows = search_table(store).search().where("entity_type = 'concept'", prefilter=True).limit(10).to_list()
         assert rows == []
 
     def test_dataset_search_excludes_concept_rows(self, tmp_path: pathlib.Path) -> None:
-        """Catalog.search must continue to surface dataset rows only."""
-        store = Catalog(tmp_path / "catalog").open()
+        """`datasets.find` surfaces dataset rows only."""
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry_with_concepts())
         store.build_index(embedding_model=_stub_model(), include_concepts=True)
 
@@ -320,7 +320,7 @@ class TestSearchAnythingMode:
     """cat.search now spans every indexed kind, RRF-merged."""
 
     def test_cross_kind_hits(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry_with_concepts())
         store.build_index(include_codes=True, include_concepts=True)
 
@@ -332,7 +332,7 @@ class TestSearchAnythingMode:
         assert kinds <= {"dataset", "concept", "code"}
 
     def test_kinds_filter_narrows_to_one_kind(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry_with_concepts())
         store.build_index(include_codes=True, include_concepts=True)
 
@@ -342,10 +342,10 @@ class TestSearchAnythingMode:
 
 class TestScopeGet:
     def test_concepts_get_returns_payload(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry_with_concepts())
         # build_index not required for .get() — it reads sdmx.concept directly.
-        row = store._c.execute("SELECT concept_urn FROM sdmx.concept WHERE concept_id = 'GDP'").fetchone()
+        row = cursor_of(store).execute("SELECT concept_urn FROM sdmx.concept WHERE concept_id = 'GDP'").fetchone()
         assert row is not None
         gdp = store.concepts.get(row[0])
         assert gdp is not None
@@ -354,10 +354,10 @@ class TestScopeGet:
         assert "monetary value" in gdp.description
 
     def test_codes_get_returns_payload(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         registry, _ = _make_registry_with_big_geo()
         ingest_sdmx(store, registry)
-        row = store._c.execute("SELECT code_urn FROM sdmx.code WHERE code_id = 'CA'").fetchone()
+        row = cursor_of(store).execute("SELECT code_urn FROM sdmx.code WHERE code_id = 'CA'").fetchone()
         assert row is not None
         ca = store.codes.get(row[0])
         assert ca is not None
@@ -367,7 +367,7 @@ class TestScopeGet:
 
 class TestSidecarV4:
     def test_sidecar_records_new_fields(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         registry, geo_urn = _make_registry_with_big_geo()
         ingest_sdmx(store, registry)
         store.build_index(

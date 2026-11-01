@@ -11,6 +11,7 @@ import pytest
 from sdmxlib import InternationalString
 
 import statcatlib as sc
+from tests.conftest import ScratchStore, cursor_of, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -23,8 +24,8 @@ def _i(text: str) -> InternationalString:
 
 
 @pytest.fixture
-def store() -> sc.Catalog:
-    return sc.Catalog().open()
+def store() -> ScratchStore:
+    return open_scratch()
 
 
 def _dataset() -> sc.OpenDataset:
@@ -42,7 +43,7 @@ def _dataset() -> sc.OpenDataset:
     )
 
 
-def test_dataset_bridge_values_round_trip(store: sc.Catalog) -> None:
+def test_dataset_bridge_values_round_trip(store: ScratchStore) -> None:
     store.put(_dataset())
     got = store.get(sc.OpenDataset, f"DS-{QUOTED}")
     assert got is not None
@@ -55,7 +56,7 @@ def test_dataset_bridge_values_round_trip(store: sc.Catalog) -> None:
     assert got.spatial_coverage[1].bbox is None
 
 
-def test_rewriting_a_dataset_replaces_its_bridge_rows(store: sc.Catalog) -> None:
+def test_rewriting_a_dataset_replaces_its_bridge_rows(store: ScratchStore) -> None:
     store.put(_dataset())
     store.put(sc.OpenDataset(identifier=f"DS-{QUOTED}", title=_i("Quotes"), description=_i("Emptied")))
     got = store.get(sc.OpenDataset, f"DS-{QUOTED}")
@@ -63,7 +64,7 @@ def test_rewriting_a_dataset_replaces_its_bridge_rows(store: sc.Catalog) -> None
     assert (got.keywords, got.themes, got.subject, got.spatial_coverage) == ([], [], [], [])
 
 
-def test_concept_scheme_values_round_trip(store: sc.Catalog) -> None:
+def test_concept_scheme_values_round_trip(store: ScratchStore) -> None:
     scheme_uri = f"urn:scheme:{QUOTED}"
     store.put(
         sc.ConceptScheme(
@@ -83,13 +84,13 @@ def test_concept_scheme_values_round_trip(store: sc.Catalog) -> None:
     assert got.concepts["CHILD"].broader == (QUOTED,)
 
 
-def test_a_map_key_holding_a_quote_is_stored_as_given(store: sc.Catalog) -> None:
+def test_a_map_key_holding_a_quote_is_stored_as_given(store: ScratchStore) -> None:
     # sdmxlib's normalize_tag will refuse such a tag (StatCat-Suite/sdmxlib#280),
     # so the key reaches the helper directly: the binding, not the tag rule,
     # is what keeps it out of the SQL.
-    store._insert_rows(
+    store._store._insert_rows(
         "INSERT INTO dataset_keyword (dataset_id, keyword, ordinal)",
         [("DS-KEY", {QUOTED: "value"}, 0)],
     )
-    rows = store._c.execute("SELECT keyword FROM dataset_keyword WHERE dataset_id = 'DS-KEY'").fetchall()
+    rows = cursor_of(store).execute("SELECT keyword FROM dataset_keyword WHERE dataset_id = 'DS-KEY'").fetchall()
     assert rows == [({QUOTED: "value"},)]

@@ -1,7 +1,7 @@
 """Tests for statcatlib.query composable filter objects.
 
 These tests exercise the ExistsFilter-based API (has_code, has_dimensions,
-distribution, has_service) against a populated Catalog.  Code-based
+distribution, has_service) against a populated working copy.  Code-based
 filter tests use proper SDMX ingest so the SDMX structural tables are populated.
 """
 
@@ -16,7 +16,7 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 
 import statcatlib as sc
 import statcatlib.query as q
-from tests.conftest import concept_of
+from tests.conftest import ScratchStore, concept_of, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -35,11 +35,11 @@ def _i(en: str, fr: str | None = None) -> InternationalString:
     return InternationalString(en=en, fr=fr or en)
 
 
-def _make_store() -> sc.Catalog:
+def _make_store() -> ScratchStore:
     """A store with two datasets: one aggregate (via SDMX ingest), one open."""
     import attrs
 
-    s = sc.Catalog().open()
+    s = open_scratch()
 
     # Build SDMX registry: DSD with GEO=[ON,QC] and SEX=[M,F] dimensions
     cl_geo = Codelist(
@@ -121,7 +121,7 @@ def _make_store() -> sc.Catalog:
 
 
 @pytest.fixture
-def store() -> sc.Catalog:
+def store() -> ScratchStore:
     return _make_store()
 
 
@@ -131,24 +131,24 @@ def store() -> sc.Catalog:
 
 
 class TestHasCode:
-    def test_has_code_matches(self, store: sc.Catalog) -> None:
+    def test_has_code_matches(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_code("GEO", "ON")).execute()
         assert result.total == 1
         assert result.items[0].identifier == _AGG_ID
 
-    def test_has_code_no_match(self, store: sc.Catalog) -> None:
+    def test_has_code_no_match(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_code("GEO", "BC")).execute()
         assert result.total == 0
 
-    def test_has_code_wrong_dimension(self, store: sc.Catalog) -> None:
+    def test_has_code_wrong_dimension(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_code("FREQ", "ON")).execute()
         assert result.total == 0
 
-    def test_has_code_second_code(self, store: sc.Catalog) -> None:
+    def test_has_code_second_code(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_code("GEO", "QC")).execute()
         assert result.total == 1
 
-    def test_has_code_different_dimension(self, store: sc.Catalog) -> None:
+    def test_has_code_different_dimension(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_code("SEX", "F")).execute()
         assert result.total == 1
 
@@ -159,19 +159,19 @@ class TestHasCode:
 
 
 class TestHasDimensions:
-    def test_has_single_dimension(self, store: sc.Catalog) -> None:
+    def test_has_single_dimension(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_dimensions(["GEO"])).execute()
         assert result.total == 1
 
-    def test_has_both_dimensions(self, store: sc.Catalog) -> None:
+    def test_has_both_dimensions(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_dimensions(["GEO", "SEX"])).execute()
         assert result.total == 1
 
-    def test_missing_dimension_no_match(self, store: sc.Catalog) -> None:
+    def test_missing_dimension_no_match(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_dimensions(["GEO", "AGE"])).execute()
         assert result.total == 0
 
-    def test_empty_dimensions_list(self, store: sc.Catalog) -> None:
+    def test_empty_dimensions_list(self, store: ScratchStore) -> None:
         # Empty list: all datasets trivially match (HAVING COUNT >= 0)
         result = store.query(sc.BaseDataset).filter(q.has_dimensions([])).execute()
         assert result.total >= 0  # implementation-defined; must not raise
@@ -183,20 +183,20 @@ class TestHasDimensions:
 
 
 class TestDistributionFilter:
-    def test_filter_by_media_type(self, store: sc.Catalog) -> None:
+    def test_filter_by_media_type(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.distribution(media_type="text/csv")).execute()
         assert result.total == 2  # both datasets have CSV
 
-    def test_filter_by_format(self, store: sc.Catalog) -> None:
+    def test_filter_by_format(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.distribution(format="JSON")).execute()
         assert result.total == 1
         assert result.items[0].identifier == _AGG_ID
 
-    def test_filter_by_format_no_match(self, store: sc.Catalog) -> None:
+    def test_filter_by_format_no_match(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.distribution(format="SDMX-ML")).execute()
         assert result.total == 0
 
-    def test_two_separate_format_filters_and_semantics(self, store: sc.Catalog) -> None:
+    def test_two_separate_format_filters_and_semantics(self, store: ScratchStore) -> None:
         """Dataset must have BOTH a CSV and a JSON distribution."""
         result = (
             store.query(sc.BaseDataset)
@@ -207,21 +207,21 @@ class TestDistributionFilter:
         assert result.total == 1
         assert result.items[0].identifier == _AGG_ID
 
-    def test_combined_media_type_and_format_same_row(self, store: sc.Catalog) -> None:
+    def test_combined_media_type_and_format_same_row(self, store: ScratchStore) -> None:
         """Both kwargs must match the same distribution row."""
         result = store.query(sc.BaseDataset).filter(q.distribution(media_type="text/csv", format="CSV")).execute()
         assert result.total == 2  # both datasets have a csv-format text/csv distribution
 
-    def test_incompatible_kwargs_no_match(self, store: sc.Catalog) -> None:
+    def test_incompatible_kwargs_no_match(self, store: ScratchStore) -> None:
         """media_type=text/csv AND format=JSON — no single row satisfies both."""
         result = store.query(sc.BaseDataset).filter(q.distribution(media_type="text/csv", format="JSON")).execute()
         assert result.total == 0
 
-    def test_filter_by_endpoint_url(self, store: sc.Catalog) -> None:
+    def test_filter_by_endpoint_url(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.distribution(endpoint_url=_SVC_URL)).execute()
         assert [d.identifier for d in result.items] == [_AGG_ID]
 
-    def test_endpoint_url_and_format_same_row(self, store: sc.Catalog) -> None:
+    def test_endpoint_url_and_format_same_row(self, store: ScratchStore) -> None:
         """The service hangs off the CSV distribution, not the JSON one."""
         assert store.query(sc.BaseDataset).filter(q.distribution(endpoint_url=_SVC_URL, format="CSV")).count() == 1
         assert store.query(sc.BaseDataset).filter(q.distribution(endpoint_url=_SVC_URL, format="JSON")).count() == 0
@@ -247,11 +247,11 @@ class TestDistributionFilter:
 
 
 class TestHasServiceFilter:
-    def test_filter_by_endpoint_url(self, store: sc.Catalog) -> None:
+    def test_filter_by_endpoint_url(self, store: ScratchStore) -> None:
         result = store.query(sc.BaseDataset).filter(q.has_service(endpoint_url=_SVC_URL)).execute()
         assert [d.identifier for d in result.items] == [_AGG_ID]
 
-    def test_endpoint_url_no_match(self, store: sc.Catalog) -> None:
+    def test_endpoint_url_no_match(self, store: ScratchStore) -> None:
         assert store.query(sc.BaseDataset).filter(q.has_service(endpoint_url="https://other.example.com")).count() == 0
 
     def test_unknown_key_raises(self) -> None:
@@ -269,18 +269,18 @@ class TestHasServiceFilter:
 
 
 class TestCombined:
-    def test_field_and_exists_combined(self, store: sc.Catalog) -> None:
+    def test_field_and_exists_combined(self, store: ScratchStore) -> None:
         """Narrow by AggregateDataset type AND has_code."""
         result = store.query(sc.AggregateDataset).filter(q.has_code("GEO", "ON")).execute()
         assert result.total == 1
         assert isinstance(result.items[0], sc.AggregateDataset)
 
-    def test_exists_and_kwargs_combined(self, store: sc.Catalog) -> None:
+    def test_exists_and_kwargs_combined(self, store: ScratchStore) -> None:
         """Combine has_code with publisher kwarg."""
         result = store.query(sc.BaseDataset).filter(q.has_code("GEO", "ON")).filter(publisher="PUB").execute()
         assert result.total == 1
 
-    def test_multiple_exists_filters(self, store: sc.Catalog) -> None:
+    def test_multiple_exists_filters(self, store: ScratchStore) -> None:
         """has_code AND distribution in the same query."""
         result = (
             store.query(sc.BaseDataset).filter(q.has_code("GEO", "ON")).filter(q.distribution(format="CSV")).execute()
@@ -288,7 +288,7 @@ class TestCombined:
         assert result.total == 1
         assert result.items[0].identifier == _AGG_ID
 
-    def test_exists_with_no_match_returns_empty(self, store: sc.Catalog) -> None:
+    def test_exists_with_no_match_returns_empty(self, store: ScratchStore) -> None:
         result = (
             store.query(sc.BaseDataset)
             .filter(q.has_code("GEO", "ON"))
@@ -303,9 +303,9 @@ class TestCombined:
 # ---------------------------------------------------------------------------
 
 
-def _make_map_store() -> sc.Catalog:
+def _make_map_store() -> ScratchStore:
     """A store with datasets that have spatial coverage and keywords."""
-    s = sc.Catalog().open()
+    s = open_scratch()
 
     ds1 = sc.OpenDataset(
         identifier="MAP-DS1",
@@ -342,27 +342,27 @@ def _make_map_store() -> sc.Catalog:
 
 
 @pytest.fixture
-def map_store() -> sc.Catalog:
+def map_store() -> ScratchStore:
     return _make_map_store()
 
 
 class TestHasSpatial:
-    def test_spatial_exact_match(self, map_store: sc.Catalog) -> None:
+    def test_spatial_exact_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
         assert result.total == 2
         ids = {ds.identifier for ds in result.items}
         assert ids == {"MAP-DS1", "MAP-DS2"}
 
-    def test_spatial_specific_region(self, map_store: sc.Catalog) -> None:
+    def test_spatial_specific_region(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Ontario")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
-    def test_spatial_no_match(self, map_store: sc.Catalog) -> None:
+    def test_spatial_no_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Australia")).execute()
         assert result.total == 0
 
-    def test_spatial_no_coverage(self, map_store: sc.Catalog) -> None:
+    def test_spatial_no_coverage(self, map_store: ScratchStore) -> None:
         """Dataset without spatial coverage should not match."""
         result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
         ids = {ds.identifier for ds in result.items}
@@ -370,54 +370,54 @@ class TestHasSpatial:
 
 
 class TestHasKeyword:
-    def test_keyword_match(self, map_store: sc.Catalog) -> None:
+    def test_keyword_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.has_keyword("economy")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
-    def test_keyword_shared(self, map_store: sc.Catalog) -> None:
+    def test_keyword_shared(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.has_keyword("employment")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
-    def test_keyword_no_match(self, map_store: sc.Catalog) -> None:
+    def test_keyword_no_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.has_keyword("finance")).execute()
         assert result.total == 0
 
 
 class TestTitleContains:
-    def test_title_contains_match(self, map_store: sc.Catalog) -> None:
+    def test_title_contains_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.title_contains("GDP")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
-    def test_title_contains_case_insensitive(self, map_store: sc.Catalog) -> None:
+    def test_title_contains_case_insensitive(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.title_contains("gdp")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
-    def test_title_contains_partial(self, map_store: sc.Catalog) -> None:
+    def test_title_contains_partial(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.title_contains("Survey")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
-    def test_title_contains_no_match(self, map_store: sc.Catalog) -> None:
+    def test_title_contains_no_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.title_contains("inflation")).execute()
         assert result.total == 0
 
 
 class TestDescriptionContains:
-    def test_description_contains_match(self, map_store: sc.Catalog) -> None:
+    def test_description_contains_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.description_contains("Canadian")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
-    def test_description_contains_case_insensitive(self, map_store: sc.Catalog) -> None:
+    def test_description_contains_case_insensitive(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.description_contains("labour")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
-    def test_description_contains_no_match(self, map_store: sc.Catalog) -> None:
+    def test_description_contains_no_match(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.description_contains("nonexistent")).execute()
         assert result.total == 0
 
@@ -427,8 +427,8 @@ class TestMapFilterAccentInsensitive:
     "Montreal" finds "Montréal", "Trois Rivieres" finds "Trois-Rivières"."""
 
     @staticmethod
-    def _store() -> sc.Catalog:
-        s = sc.Catalog().open()
+    def _store() -> ScratchStore:
+        s = open_scratch()
         s.put(
             sc.OpenDataset(
                 identifier="ACC1",
@@ -473,14 +473,14 @@ class TestMapFilterAccentInsensitive:
 
 
 class TestMapFilterCombined:
-    def test_spatial_and_keyword(self, map_store: sc.Catalog) -> None:
+    def test_spatial_and_keyword(self, map_store: ScratchStore) -> None:
         result = (
             map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).filter(q.has_keyword("economy")).execute()
         )
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
-    def test_title_and_spatial(self, map_store: sc.Catalog) -> None:
+    def test_title_and_spatial(self, map_store: ScratchStore) -> None:
         result = (
             map_store.query(sc.BaseDataset)
             .filter(q.title_contains("Employment"))
@@ -490,7 +490,7 @@ class TestMapFilterCombined:
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
-    def test_map_filter_with_kwarg(self, map_store: sc.Catalog) -> None:
+    def test_map_filter_with_kwarg(self, map_store: ScratchStore) -> None:
         result = map_store.query(sc.BaseDataset).filter(q.title_contains("GDP"), publisher="SC").execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
@@ -502,8 +502,8 @@ class TestSpatialLabels:
     the FR query path historically broke on a DuckDB GROUP BY constraint."""
 
     @pytest.fixture
-    def bilingual_store(self) -> sc.Catalog:
-        s = sc.Catalog().open()
+    def bilingual_store(self) -> ScratchStore:
+        s = open_scratch()
         s.put(
             sc.OpenDataset(
                 identifier="SL-DS1",
@@ -527,17 +527,17 @@ class TestSpatialLabels:
         )
         return s
 
-    def test_en_returns_empty(self, bilingual_store: sc.Catalog) -> None:
+    def test_en_returns_empty(self, bilingual_store: ScratchStore) -> None:
         # EN is the canonical key in the dict that callers iterate, so an
         # empty mapping signals "nothing to remap" — not "no data".
         assert bilingual_store.spatial_labels("en") == {}
 
-    def test_fr_maps_en_labels_to_fr(self, bilingual_store: sc.Catalog) -> None:
+    def test_fr_maps_en_labels_to_fr(self, bilingual_store: ScratchStore) -> None:
         labels = bilingual_store.spatial_labels("fr")
         assert labels == {"Canada": "Canada", "Ontario": "Ontario", "Quebec": "Québec"}
 
     def test_fr_falls_back_to_en_when_missing(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(
             sc.OpenDataset(
                 identifier="SL-EN-ONLY",
@@ -552,7 +552,7 @@ class TestSpatialLabels:
 
 def test_spatial_labels_pick_one_label_per_uri() -> None:
     """Rows sharing a uri with no concept but different labels give the least, every call."""
-    store = sc.Catalog().open()
+    store = open_scratch()
     store.put(
         [
             sc.OpenDataset(

@@ -1,88 +1,79 @@
-"""Synthetic statcat editions, for tests and benchmarks at any shape (GH-3).
+"""Throwaway catalogs and synthetic statcat editions, for tests and benchmarks (GH-3).
 
-`sdmxlib.testing.synthetic_edition` builds a conforming sdmxlib edition from a
-`sdmxlib.testing.Shape` and a seed. `synthetic_catalog` stops it before the
-seal and adds the catalog: a catalog dataset per dataflow and a search index
-over it. The same seed builds the same structures and observations, so a
-failure reproduces.
-
-The caller seals the edition. Close the catalog, then the registry, and only
-then call `sdmxlib.edition.seal` on ``edition_dir``.
+`temporary_catalog` creates a catalog in a temporary directory, which replaces
+statcatlib 0.11's ``Catalog(":memory:")``. `synthetic_catalog` builds a sealed
+edition of any shape: `sdmxlib.testing.synthetic_edition` builds a conforming
+sdmxlib edition from a `sdmxlib.testing.Shape` and a seed, and statcatlib adds
+the catalog, a dataset per dataflow and a search index over it. The same seed
+builds the same structures and observations, so a failure reproduces.
 
 Example:
-    from sdmxlib.edition import Producer, seal
     from sdmxlib.testing import Dim, Shape
 
-    from statcatlib.bundle import catalog_section
+    from statcatlib import Catalog
     from statcatlib.testing import synthetic_catalog
 
     shape = Shape(dimensions=(Dim(codes=5000, depth=4), Dim(codes=12)), observations=100_000, languages=("en", "fr"))
-    rec = synthetic_catalog("out/stress", shape, seed=7)
-    section = catalog_section(rec.cat)
-    rec.cat.close()
-    rec.reg.close()
-    seal(rec.edition_dir, product_id="stress", producer=Producer(name="bench", version="1"),
-         extensions={"statcat": section})
+    edition = synthetic_catalog("out/stress", shape, seed=7)
+    with Catalog.open("out/stress") as cat:
+        view = cat.product(edition.product_id).view()
 """
 
 from __future__ import annotations
 
+import contextlib
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from attrs import frozen
 from sdmxlib.testing import synthetic_edition
 
+from statcatlib.catalog import Catalog
 from statcatlib.sources.sdmx import prepare_sdmx
-from statcatlib.store import Catalog
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Generator
 
-    from sdmxlib import LocalRegistry
     from sdmxlib.testing import Shape
 
-__all__ = ["SyntheticCatalog", "synthetic_catalog"]
+    from statcatlib.store.working_copy import Edition
+
+__all__ = ["synthetic_catalog", "temporary_catalog"]
 
 
-@frozen
-class SyntheticCatalog:
-    """An unsealed synthetic edition holding a catalog, as `synthetic_catalog` returns it.
+@contextlib.contextmanager
+def temporary_catalog() -> Generator[Catalog]:
+    """A writable catalog in a temporary directory, deleted when the block ends.
 
-    Attributes:
-        cat: The catalog over the edition's store, open.
-        reg: The edition's builder registry, open and writable.
-        edition_dir: The unsealed edition's directory.
+    Yields:
+        The catalog, from `Catalog.create`.
     """
-
-    cat: Catalog
-    reg: LocalRegistry
-    edition_dir: Path
+    with tempfile.TemporaryDirectory(prefix="statcat-") as tmp, Catalog.create(Path(tmp) / "catalog") as cat:
+        yield cat
 
 
-def synthetic_catalog(path: str | Path, shape: Shape, *, seed: int = 0, index: bool = True) -> SyntheticCatalog:
-    """Build an unsealed statcat edition of the given shape at *path*.
+def synthetic_catalog(path: str | Path, shape: Shape, *, product_id: str = "synthetic", seed: int = 0) -> Edition:
+    """Create a catalog at *path* holding one sealed synthetic edition of the given shape.
 
-    The structures and observations are `sdmxlib.testing.synthetic_edition`'s.
-    Each dataflow becomes an `AggregateDataset`, and the search index is built
-    in ``<edition_dir>/search/`` unless *index* is false (it needs
-    ``statcatlib[search]``). The catalog and the registry are returned open.
-    The caller closes ``cat``, then ``reg``, and only then may seal
-    ``edition_dir`` with `sdmxlib.edition.seal`.
+    The structures and observations are `sdmxlib.testing.synthetic_edition`'s,
+    built straight into the product's unsealed edition, which a working copy
+    then resumes. Each dataflow becomes an `AggregateDataset`. The seal builds
+    the search index when ``statcatlib[search]`` is installed, and records the
+    edition live.
 
     Args:
-        path: The product directory to create. It must not exist or must be empty.
+        path: The catalog directory to create. It must not exist or must be empty.
         shape: Codelist sizes, hierarchy depth, observation count and languages.
+        product_id: The product to build.
         seed: What makes the edition reproducible.
-        index: Whether to build the search index.
 
     Returns:
-        The open catalog, its registry and the edition directory.
+        The sealed edition.
     """
-    reg = synthetic_edition(path, shape, seed=seed, seal=False)
-    edition_dir = reg.edition_dir
-    cat = Catalog.from_connection(reg.connection, search_dir=edition_dir / "search")
-    with cat.bulk_load():
-        cat.put(prepare_sdmx(cat.registry))
-    if index:
-        cat.build_index()
-    return SyntheticCatalog(cat=cat, reg=reg, edition_dir=edition_dir)
+    with Catalog.create(path) as cat:
+        product_dir = Path(path).absolute() / "products" / product_id
+        synthetic_edition(product_dir, shape, seed=seed, seal=False).close()
+        wc = cat.product(product_id).working_copy(resume=True)
+        with wc.bulk_load():
+            wc.put(prepare_sdmx(wc.registry))
+        return wc.seal()

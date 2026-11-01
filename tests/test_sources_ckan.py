@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from statcatlib.sources.ckan import (
     _parse_spatial,
     _parse_subjects,
 )
+from tests.conftest import ScratchStore, open_scratch, scratch_store, untyped
 
 pytestmark = pytest.mark.unit
 
@@ -488,6 +490,21 @@ class TestCkanPackageToDataset:
         assert "en" in ds.language
         assert "fr" in ds.language
 
+    def test_language_tags_are_stored_normalised(self):
+        """A ``language`` entry is stored as `sdmxlib.normalize_tag` spells it, ``_`` turned into ``-``."""
+        ds = _ckan_package_to_dataset({**_PKG, "language": ["EN", "fr_CA"]})
+        assert ds.language == ["en", "fr-ca"]
+
+    def test_language_tags_that_normalise_to_one_are_kept_once(self):
+        ds = _ckan_package_to_dataset({**_PKG, "language": json.dumps(["EN", "en", "fr"])})
+        assert ds.language == ["en", "fr"]
+
+    def test_a_malformed_language_tag_is_dropped_with_a_warning(self, caplog: pytest.LogCaptureFixture):
+        with caplog.at_level(logging.WARNING, logger="statcatlib.sources.ckan"):
+            ds = _ckan_package_to_dataset({**_PKG, "language": ["en", "not a tag"]})
+        assert ds.language == ["en"]
+        assert "dropped a language with the malformed language tag 'not a tag'" in caplog.text
+
     def test_landing_page(self):
         ds = _ckan_package_to_dataset(_PKG)
         assert ds.landing_page is not None
@@ -616,7 +633,7 @@ class TestIngestCkan:
             json=_make_search_response([_PKG], count=1),
         )
         _mock_schema(httpx_mock)
-        store = sc.Catalog().open()
+        store = open_scratch()
         datasets = sc.ingest_ckan(store, _CKAN_BASE, limit=10)
         assert len(datasets) == 1
         retrieved = store.get(sc.OpenDataset, "abc-123")
@@ -630,7 +647,7 @@ class TestIngestCkan:
             json=_make_search_response([pkg], count=1),
         )
         _mock_schema(httpx_mock)
-        store = sc.Catalog().open()
+        store = open_scratch()
         with caplog.at_level(logging.WARNING, logger="statcatlib.sources.ckan"):
             sc.ingest_ckan(store, _CKAN_BASE, limit=10)
         assert f"{_CKAN_BASE}: dropped 1 texts with malformed language tags: 'not a tag' (1)" in caplog.text
@@ -641,7 +658,7 @@ class TestIngestCkan:
             json=_make_search_response([_PKG], count=1),
         )
         _mock_schema(httpx_mock)
-        store = sc.Catalog().open()
+        store = open_scratch()
         datasets = sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         assert isinstance(datasets, list)
         assert all(isinstance(d, sc.OpenDataset) for d in datasets)
@@ -652,24 +669,19 @@ class TestIngestCkan:
             json=_make_search_response([_PKG], count=1),
         )
         _mock_schema(httpx_mock)
-        store = sc.Catalog().open()
+        store = open_scratch()
         datasets = sc.ingest_ckan(store, _CKAN_BASE, organization="statcan-statcan", limit=10)
         assert len(datasets) == 1
 
     def test_dataset_is_searchable_after_ingest(self, httpx_mock: HTTPXMock, tmp_path: Path):
-        """An ingested CKAN dataset is findable by title.
-
-        Folder-backed, because `search()` needs somewhere to put ``search/``
-        and must be given an index to read — which is why this was skipped
-        rather than failing.
-        """
+        """An ingested CKAN dataset is findable by title once the working copy's index is built."""
         pytest.importorskip("lancedb", reason="search needs statcatlib[search]")
         httpx_mock.add_response(
             url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
             json=_make_search_response([_PKG], count=1),
         )
         _mock_schema(httpx_mock)
-        with sc.Catalog(tmp_path / "catalog") as store:
+        with scratch_store(tmp_path / "catalog") as store:
             sc.ingest_ckan(store, _CKAN_BASE, limit=5)
             store.build_index()
             result = store.search("Labour Force Survey")
@@ -686,7 +698,7 @@ class TestIngestCkan:
         )
         _mock_schema(httpx_mock)
         _mock_schema(httpx_mock)
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         count = store.query(sc.OpenDataset).count()
@@ -699,7 +711,7 @@ class TestIngestCkan:
             json=_make_search_response([_PKG], count=1),
         )
         _mock_schema(httpx_mock)
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         assert store.language_alternates() == [
             {"primary_tag": "en", "alternate_tag": "en-t-fr", "source": _CKAN_BASE},
@@ -714,10 +726,46 @@ class TestIngestCkan:
             json=_make_search_response([_PKG], count=1),
         )
         httpx_mock.add_response(url=_SCHEMA_URL, status_code=status, json={"success": False})
-        store = sc.Catalog().open()
+        store = open_scratch()
         datasets = sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         assert len(datasets) == 1
         assert store.language_alternates() == []
+
+    def test_declared_language_pairs_are_stored_lowercase(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response([_PKG], count=1),
+        )
+        _mock_schema(httpx_mock, alternates={"EN": ["EN-t-FR"]})
+        store = open_scratch()
+        sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+        assert store.language_alternates() == [
+            {"primary_tag": "en", "alternate_tag": "en-t-fr", "source": _CKAN_BASE},
+        ]
+
+    def test_add_language_alternates_stores_lowercase_tags(self):
+        store = open_scratch()
+        store.add_language_alternates({"EN": ["EN-t-FR"]}, source=_CKAN_BASE)
+        assert store.language_alternates() == [
+            {"primary_tag": "en", "alternate_tag": "en-t-fr", "source": _CKAN_BASE},
+        ]
+
+    def test_ingested_language_tags_are_stored_normalised(self, httpx_mock: HTTPXMock):
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
+            json=_make_search_response([{**_PKG, "language": ["EN", "fr_CA"]}], count=1),
+        )
+        _mock_schema(httpx_mock)
+        store = open_scratch()
+        sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+        ds = store.get(sc.OpenDataset, "abc-123")
+        assert ds is not None
+        assert ds.language == ["en", "fr-ca"]
+
+    def test_a_view_is_refused_naming_working_copy(self):
+        """``ingest_ckan`` writes, so it takes a working copy; a view raises before any request."""
+        with scratch_store() as store, pytest.raises(TypeError, match=r"working_copy\(\)"):
+            sc.ingest_ckan(untyped(store.view()), _CKAN_BASE, limit=5)
 
     def test_schema_without_pairs_records_none(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(
@@ -725,7 +773,7 @@ class TestIngestCkan:
             json=_make_search_response([_PKG], count=1),
         )
         _mock_schema(httpx_mock, alternates=None)
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         assert store.language_alternates() == []
 
@@ -734,7 +782,7 @@ class TestIngestRegionCodes:
     """``geographic_region`` codes become identifiers labelled by their concepts (GH-83)."""
 
     @pytest.fixture
-    def store(self, httpx_mock: HTTPXMock) -> sc.Catalog:
+    def store(self, httpx_mock: HTTPXMock) -> Iterator[ScratchStore]:
         httpx_mock.add_response(
             url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
             json=_make_search_response(
@@ -746,16 +794,16 @@ class TestIngestRegionCodes:
             ),
         )
         _mock_schema(httpx_mock, fields=[_REGION_FIELD])
-        store = sc.Catalog().open()
-        sc.ingest_ckan(store, _CKAN_BASE, limit=5)
-        return store
+        with scratch_store() as store:
+            sc.ingest_ckan(store, _CKAN_BASE, limit=5)
+            yield store
 
-    def test_the_choices_are_stored_as_a_concept_scheme(self, store: sc.Catalog):
+    def test_the_choices_are_stored_as_a_concept_scheme(self, store: ScratchStore):
         scheme = store.get_concept_scheme(_REGION_SCHEME)
         assert scheme is not None
         assert scheme.concepts["10"].label.as_dict().get("fr") == "Terre-Neuve-et-Labrador"
 
-    def test_a_code_is_stored_as_the_region_uri_with_no_label(self, store: sc.Catalog):
+    def test_a_code_is_stored_as_the_region_uri_with_no_label(self, store: ScratchStore):
         ds = store.get(sc.OpenDataset, "nl")
         assert ds is not None
         assert ds.spatial_coverage == [
@@ -763,7 +811,7 @@ class TestIngestRegionCodes:
             sc.SpatialCoverage(uri=f"{_REGION_SCHEME}/10"),
         ]
 
-    def test_the_spatial_facet_is_keyed_by_region_uri(self, store: sc.Catalog):
+    def test_the_spatial_facet_is_keyed_by_region_uri(self, store: ScratchStore):
         assert store.facets("spatial")["spatial"] == {
             f"{_REGION_SCHEME}/0": 2,
             f"{_REGION_SCHEME}/10": 1,
@@ -773,18 +821,18 @@ class TestIngestRegionCodes:
     @pytest.mark.parametrize(
         ("lang", "label"), [("en", "Newfoundland and Labrador"), ("fr", "Terre-Neuve-et-Labrador")]
     )
-    def test_spatial_labels_come_from_the_concepts(self, store: sc.Catalog, lang: str, label: str):
+    def test_spatial_labels_come_from_the_concepts(self, store: ScratchStore, lang: str, label: str):
         assert store.spatial_labels(lang)[f"{_REGION_SCHEME}/10"] == label
 
-    def test_has_spatial_matches_a_concept_label(self, store: sc.Catalog):
+    def test_has_spatial_matches_a_concept_label(self, store: ScratchStore):
         found = store.query(sc.OpenDataset).filter(q.has_spatial("Québec", lang="fr")).collect()
         assert [ds.identifier for ds in found] == ["qc"]
 
-    def test_query_facets_are_keyed_by_region_uri(self, store: sc.Catalog):
+    def test_query_facets_are_keyed_by_region_uri(self, store: ScratchStore):
         result = store.query(sc.OpenDataset).filter(q.has_spatial("Québec", lang="fr")).with_facets("spatial").execute()
         assert result.facets["spatial"] == {f"{_REGION_SCHEME}/0": 1, f"{_REGION_SCHEME}/24": 1}
 
-    def test_a_facet_key_filters_back_to_its_datasets(self, store: sc.Catalog):
+    def test_a_facet_key_filters_back_to_its_datasets(self, store: ScratchStore):
         key = f"{_REGION_SCHEME}/24"
         found = store.query(sc.OpenDataset).filter(q.has_spatial_uri(key)).collect()
         assert [ds.identifier for ds in found] == ["qc"]
@@ -795,7 +843,7 @@ class TestIngestRegionCodes:
             json=_make_search_response([{**_PKG, "geographic_region": ["10", "Nunavik"]}], count=1),
         )
         _mock_schema(httpx_mock, fields=[_REGION_FIELD])
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
         assert store.facets("spatial")["spatial"] == {f"{_REGION_SCHEME}/10": 1, "Nunavik": 1}
         assert store.spatial_labels("fr")["Nunavik"] == "Nunavik"
@@ -810,7 +858,7 @@ class TestIngestRegionCodes:
         )
         httpx_mock.add_response(url=_SCHEMA_URL, status_code=503)
         with pytest.raises(httpx.HTTPStatusError, match="503"):
-            sc.ingest_ckan(sc.Catalog().open(), _CKAN_BASE, limit=5)
+            sc.ingest_ckan(open_scratch(), _CKAN_BASE, limit=5)
 
 
 def test_an_organization_without_slug_or_id_gives_no_publisher():

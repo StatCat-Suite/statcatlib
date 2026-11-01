@@ -22,7 +22,7 @@ from sdmxlib.model.urn import SdmxUrn
 
 import statcatlib as sc
 import statcatlib.query as q
-from tests.conftest import concept_of
+from tests.conftest import ScratchStore, concept_of, cursor_of, open_scratch, scratch_store, seal_and_view, untyped
 
 pytestmark = pytest.mark.integration
 
@@ -89,29 +89,26 @@ def _make_registry() -> tuple[InMemoryRegistry, str]:
 
 
 @pytest.fixture
-def sdmx_store() -> sc.Catalog:
-    """A Catalog populated with a minimal SDMX registry."""
-    store = sc.Catalog().open()
-    registry, _ = _make_registry()
-    sc.ingest_sdmx(store, registry)
-    return store
+def sdmx_store() -> Iterator[ScratchStore]:
+    """A working copy populated with a minimal SDMX registry."""
+    with scratch_store() as store:
+        registry, _ = _make_registry()
+        sc.ingest_sdmx(store, registry)
+        yield store
 
 
 @pytest.fixture(scope="module")
-def indexed_sdmx_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.Catalog]:
-    """The same registry, folder-backed with a BM25 index built over it.
-
-    `search()` needs somewhere to put ``search/``; the in-memory fixture
-    above has nowhere, which is why `TestFTS` was skipped rather than
-    failing.
-    """
+def indexed_sdmx_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.EditionView]:
+    """The same registry, sealed, as a view of the sealed edition: the seal builds the BM25 index."""
     pytest.importorskip("lancedb", reason="search needs statcatlib[search]")
     path = tmp_path_factory.mktemp("sdmx_indexed") / "catalog"
-    with sc.Catalog(path) as catalog:
+    with sc.Catalog.create(path) as catalog:
+        wc = catalog.product("p").working_copy()
         registry, _ = _make_registry()
-        sc.ingest_sdmx(catalog, registry)
-        catalog.build_index()
-        yield catalog
+        sc.ingest_sdmx(wc, registry)
+        wc.seal()
+        catalog.refresh()
+        yield catalog.product("p").view()
 
 
 # ---------------------------------------------------------------------------
@@ -121,26 +118,26 @@ def indexed_sdmx_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.
 
 class TestIngestSdmx:
     def test_returns_statistical_datasets(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _ = _make_registry()
         result = sc.ingest_sdmx(store, registry)
         assert len(result) == 1
         assert all(isinstance(ds, sc.StatisticalDataset) for ds in result)
 
     def test_identifier_format(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _ = _make_registry()
         result = sc.ingest_sdmx(store, registry)
         assert result[0].identifier == "TEST:DF_TEST(1.0)"
 
     def test_sdmx_dataflow_urn_set(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, flow_urn = _make_registry()
         result = sc.ingest_sdmx(store, registry)
         assert result[0].sdmx_dataflow_urn == flow_urn
 
     def test_title_and_description_populated(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _ = _make_registry()
         result = sc.ingest_sdmx(store, registry)
         ds = result[0]
@@ -149,7 +146,7 @@ class TestIngestSdmx:
         assert ds.description.as_dict().get("en") == "A test dataflow for integration testing"
 
     def test_dimension_names_populated(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _ = _make_registry()
         result = sc.ingest_sdmx(store, registry)
         ds = result[0]
@@ -157,16 +154,25 @@ class TestIngestSdmx:
         assert {d.as_dict().get("zxx") for d in ds.dimension_names} == {"GEO", "FREQ"}
 
     def test_sdmxlib_tables_populated(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _ = _make_registry()
         sc.ingest_sdmx(store, registry)
-        rows = store.connection.execute("SELECT COUNT(*) FROM sdmx.code").fetchone()
+        rows = cursor_of(store).execute("SELECT COUNT(*) FROM sdmx.code").fetchone()
         assert rows is not None
         assert rows[0] == 4  # CA, US, A, M
 
+    @pytest.mark.parametrize("ingest", [sc.ingest_sdmx, sc.ingest_sdmx_registry])
+    def test_a_view_is_refused_naming_working_copy(self, ingest):
+        """Ingest writes, so it takes a working copy; a read-only view raises TypeError."""
+        registry, _ = _make_registry()
+        with scratch_store() as store:
+            with pytest.raises(TypeError, match=r"working_copy\(\)"):
+                ingest(untyped(store.view()), registry)
+            assert store.query(sc.StatisticalDataset).all() == []
+
     def test_idempotent_reingest(self):
         """Re-ingesting the same registry should not duplicate datasets."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _ = _make_registry()
         sc.ingest_sdmx(store, registry)
         sc.ingest_sdmx(store, registry)
@@ -180,30 +186,30 @@ class TestIngestSdmx:
 
 
 class TestGetAfterIngest:
-    def test_get_returns_statistical_dataset(self, sdmx_store: sc.Catalog):
+    def test_get_returns_statistical_dataset(self, sdmx_store: ScratchStore):
         ds = sdmx_store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
         assert ds is not None
         assert isinstance(ds, sc.StatisticalDataset)
 
-    def test_get_preserves_urn(self, sdmx_store: sc.Catalog):
+    def test_get_preserves_urn(self, sdmx_store: ScratchStore):
         _, flow_urn = _make_registry()
         ds = sdmx_store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
         assert ds is not None
         assert ds.sdmx_dataflow_urn == flow_urn
 
-    def test_get_preserves_dimension_names(self, sdmx_store: sc.Catalog):
+    def test_get_preserves_dimension_names(self, sdmx_store: ScratchStore):
         ds = sdmx_store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
         assert ds is not None
         assert len(ds.dimension_names) == 2
 
-    def test_get_wrong_type_returns_none(self, sdmx_store: sc.Catalog):
+    def test_get_wrong_type_returns_none(self, sdmx_store: ScratchStore):
         # Dataset (base) does exist under that id — but StatisticalDataset lookup
         # on a plain Dataset id should return None. Here we test the reverse:
         # all ingested datasets are StatisticalDataset so get(Dataset) should work.
         ds = sdmx_store.get(sc.BaseDataset, "TEST:DF_TEST(1.0)")
         assert ds is not None
 
-    def test_get_missing_returns_none(self, sdmx_store: sc.Catalog):
+    def test_get_missing_returns_none(self, sdmx_store: ScratchStore):
         assert sdmx_store.get(sc.StatisticalDataset, "NONEXISTENT") is None
 
 
@@ -213,33 +219,33 @@ class TestGetAfterIngest:
 
 
 class TestStructuralQueries:
-    def test_has_code_matches(self, sdmx_store: sc.Catalog):
+    def test_has_code_matches(self, sdmx_store: ScratchStore):
         result = sdmx_store.query(sc.StatisticalDataset).filter(q.has_code("GEO", "CA")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "TEST:DF_TEST(1.0)"
 
-    def test_has_code_no_match(self, sdmx_store: sc.Catalog):
+    def test_has_code_no_match(self, sdmx_store: ScratchStore):
         result = sdmx_store.query(sc.StatisticalDataset).filter(q.has_code("GEO", "ZZ")).execute()
         assert result.total == 0
 
-    def test_has_code_wrong_dimension(self, sdmx_store: sc.Catalog):
+    def test_has_code_wrong_dimension(self, sdmx_store: ScratchStore):
         # Code exists but under a different dimension
         result = sdmx_store.query(sc.StatisticalDataset).filter(q.has_code("FREQ", "CA")).execute()
         assert result.total == 0
 
-    def test_has_dimensions_single_match(self, sdmx_store: sc.Catalog):
+    def test_has_dimensions_single_match(self, sdmx_store: ScratchStore):
         result = sdmx_store.query(sc.StatisticalDataset).filter(q.has_dimensions(["GEO"])).execute()
         assert result.total == 1
 
-    def test_has_dimensions_both_match(self, sdmx_store: sc.Catalog):
+    def test_has_dimensions_both_match(self, sdmx_store: ScratchStore):
         result = sdmx_store.query(sc.StatisticalDataset).filter(q.has_dimensions(["GEO", "FREQ"])).execute()
         assert result.total == 1
 
-    def test_has_dimensions_no_match(self, sdmx_store: sc.Catalog):
+    def test_has_dimensions_no_match(self, sdmx_store: ScratchStore):
         result = sdmx_store.query(sc.StatisticalDataset).filter(q.has_dimensions(["GEO", "FREQ", "MISSING"])).execute()
         assert result.total == 0
 
-    def test_has_code_plain_dataset_not_matched(self, sdmx_store: sc.Catalog):
+    def test_has_code_plain_dataset_not_matched(self, sdmx_store: ScratchStore):
         """Plain datasets with no sdmx_dataflow_urn should not match structural filters."""
         sdmx_store.put(
             sc.OpenDataset(
@@ -259,20 +265,20 @@ class TestStructuralQueries:
 
 
 class TestPublisherMapping:
-    def test_publisher_set_from_agency(self, sdmx_store: sc.Catalog):
+    def test_publisher_set_from_agency(self, sdmx_store: ScratchStore):
         ds = sdmx_store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
         assert ds is not None
         assert ds.publisher is not None
         assert ds.publisher.id == "TEST"
 
-    def test_an_agency_without_a_name_is_labelled_by_its_id(self, sdmx_store: sc.Catalog):
+    def test_an_agency_without_a_name_is_labelled_by_its_id(self, sdmx_store: ScratchStore):
         """An agency with no name is labelled by its ID as a code, under ``zxx``."""
         ds = sdmx_store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
         assert ds is not None
         assert ds.publisher is not None
         assert ds.publisher.name == sc.InternationalString(zxx="TEST")
 
-    def test_facets_publisher_works_after_ingest(self, sdmx_store: sc.Catalog):
+    def test_facets_publisher_works_after_ingest(self, sdmx_store: ScratchStore):
         counts = sdmx_store.facets("publisher")
         assert "publisher" in counts
         assert len(counts["publisher"]) > 0
@@ -284,7 +290,7 @@ class TestPublisherMapping:
 
 
 class TestFTS:
-    def test_search_hits_title(self, indexed_sdmx_store: sc.Catalog):
+    def test_search_hits_title(self, indexed_sdmx_store: sc.EditionView):
         result = indexed_sdmx_store.search("Dataflow")
         assert result.total >= 1
         # `search()` yields `Hit` wrappers; the entity is on `.payload`.
@@ -294,15 +300,15 @@ class TestFTS:
             "DF_TEST" in hit.payload.identifier for hit in result.items if isinstance(hit.payload, sc.BaseDataset)
         )
 
-    def test_search_hits_description(self, indexed_sdmx_store: sc.Catalog):
+    def test_search_hits_description(self, indexed_sdmx_store: sc.EditionView):
         result = indexed_sdmx_store.search("integration testing")
         assert result.total >= 1
 
-    def test_search_no_match(self, indexed_sdmx_store: sc.Catalog):
+    def test_search_no_match(self, indexed_sdmx_store: sc.EditionView):
         result = indexed_sdmx_store.search("xyzzy_nonexistent_token_1234")
         assert result.total == 0
 
-    def test_query_with_search(self, indexed_sdmx_store: sc.Catalog):
+    def test_query_with_search(self, indexed_sdmx_store: sc.EditionView):
         result = indexed_sdmx_store.query(sc.StatisticalDataset).search("Dataflow").execute()
         assert result.total >= 1
 
@@ -313,33 +319,29 @@ class TestFTS:
 
 
 class TestPersistentStorage:
-    def test_write_close_reopen_query(self, tmp_path: object) -> None:
-        db_path = pathlib.Path(str(tmp_path)) / "bundle"
-
+    def test_write_seal_reopen_query(self, tmp_path: pathlib.Path) -> None:
         # Write
         registry, flow_urn = _make_registry()
-        with sc.Catalog(db_path) as store:
-            sc.ingest_sdmx(store, registry)
-            assert store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)") is not None
+        store = open_scratch(tmp_path / "catalog")
+        sc.ingest_sdmx(store, registry)
+        assert store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)") is not None
 
-        # Reopen and query — catalog tables must survive close/open
-        with sc.Catalog(db_path) as store:
-            ds = store.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
-            assert ds is not None
-            assert ds.sdmx_dataflow_urn == flow_urn
-            assert ds.publisher is not None
-            assert ds.publisher.id == "TEST"
+        # Seal, reopen read-only and query: the catalog tables survive the seal.
+        view = seal_and_view(store)
+        ds = view.get(sc.StatisticalDataset, "TEST:DF_TEST(1.0)")
+        assert ds is not None
+        assert ds.sdmx_dataflow_urn == flow_urn
+        assert ds.publisher is not None
+        assert ds.publisher.id == "TEST"
 
-    def test_structural_query_survives_reopen(self, tmp_path: object) -> None:
-        db_path = pathlib.Path(str(tmp_path)) / "bundle"
-
+    def test_structural_query_survives_seal(self, tmp_path: pathlib.Path) -> None:
         registry, _ = _make_registry()
-        with sc.Catalog(db_path) as store:
-            sc.ingest_sdmx(store, registry)
+        store = open_scratch(tmp_path / "catalog")
+        sc.ingest_sdmx(store, registry)
 
-        with sc.Catalog(db_path) as store:
-            result = store.query(sc.StatisticalDataset).filter(q.has_code("GEO", "CA")).execute()
-            assert result.total == 1
+        view = seal_and_view(store)
+        result = view.query(sc.StatisticalDataset).filter(q.has_code("GEO", "CA")).execute()
+        assert result.total == 1
 
 
 # ---------------------------------------------------------------------------
@@ -442,31 +444,39 @@ class TestHierarchyIngest:
     """
 
     def test_both_hierarchies_persisted(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, h_admin_urn, h_stat_urn = _make_multi_hierarchy_registry()
         sc.ingest_sdmx(store, registry)
 
-        rows = store.connection.execute(
-            "SELECT hierarchy_urn, COUNT(*) FROM sdmx.hierarchy_node "
-            "WHERE hierarchy_urn IN (?, ?) "
-            "GROUP BY hierarchy_urn ORDER BY hierarchy_urn",
-            [h_admin_urn, h_stat_urn],
-        ).fetchall()
+        rows = (
+            cursor_of(store)
+            .execute(
+                "SELECT hierarchy_urn, COUNT(*) FROM sdmx.hierarchy_node "
+                "WHERE hierarchy_urn IN (?, ?) "
+                "GROUP BY hierarchy_urn ORDER BY hierarchy_urn",
+                [h_admin_urn, h_stat_urn],
+            )
+            .fetchall()
+        )
         # 4 nodes per hierarchy (CA, ON, QC, TOR) across 2 hierarchies.
         assert {row[0] for row in rows} == {h_admin_urn, h_stat_urn}
         assert all(row[1] == 4 for row in rows)
 
     def test_distinct_parent_graphs_per_hierarchy(self):
         """TOR's parent differs: ON under admin, CA under statistical."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, h_admin_urn, h_stat_urn = _make_multi_hierarchy_registry()
         sc.ingest_sdmx(store, registry)
 
         def _parent_of(hierarchy_urn: str, node_id: str) -> str | None:
-            row = store.connection.execute(
-                "SELECT parent_path FROM sdmx.hierarchy_node WHERE hierarchy_urn = ? AND node_id = ?",
-                [hierarchy_urn, node_id],
-            ).fetchone()
+            row = (
+                cursor_of(store)
+                .execute(
+                    "SELECT parent_path FROM sdmx.hierarchy_node WHERE hierarchy_urn = ? AND node_id = ?",
+                    [hierarchy_urn, node_id],
+                )
+                .fetchone()
+            )
             assert row is not None, f"missing node {node_id} in {hierarchy_urn}"
             parent = row[0]
             # Not `str(row[0])`: a NULL parent must stay `None`, not
@@ -485,14 +495,18 @@ class TestHierarchyIngest:
 
     def test_depth_and_ancestor_ids_populated(self):
         """Pre-materialised columns let consumers query without a recursive CTE."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, h_admin_urn, _ = _make_multi_hierarchy_registry()
         sc.ingest_sdmx(store, registry)
 
-        rows = store.connection.execute(
-            "SELECT node_id, depth, ancestor_ids FROM sdmx.hierarchy_node WHERE hierarchy_urn = ? ORDER BY node_id",
-            [h_admin_urn],
-        ).fetchall()
+        rows = (
+            cursor_of(store)
+            .execute(
+                "SELECT node_id, depth, ancestor_ids FROM sdmx.hierarchy_node WHERE hierarchy_urn = ? ORDER BY node_id",
+                [h_admin_urn],
+            )
+            .fetchall()
+        )
         by_id = {row[0]: (row[1], row[2]) for row in rows}
 
         ca_depth, ca_ancestors = by_id["CA"]
@@ -509,21 +523,23 @@ class TestHierarchyIngest:
         assert set(tor_ancestors or []) == {"CA", "ON"}
         assert len(tor_ancestors or []) == tor_depth
 
-    def test_hierarchies_survive_reopen(self, tmp_path: object) -> None:
-        """Persistent path: hierarchy_node rows present after close + reopen."""
-        db_path = pathlib.Path(str(tmp_path)) / "bundle"
+    def test_hierarchies_survive_seal(self, tmp_path: pathlib.Path) -> None:
+        """Sealed edition: hierarchy_node rows present after the seal, read through a read-only view."""
         registry, h_admin_urn, _ = _make_multi_hierarchy_registry()
+        store = open_scratch(tmp_path / "catalog")
+        sc.ingest_sdmx(store, registry)
 
-        with sc.Catalog(db_path) as store:
-            sc.ingest_sdmx(store, registry)
-
-        with sc.Catalog(db_path) as store:
-            row = store.connection.execute(
+        view = seal_and_view(store)
+        row = (
+            cursor_of(view)
+            .execute(
                 "SELECT COUNT(*) FROM sdmx.hierarchy_node WHERE hierarchy_urn = ?",
                 [h_admin_urn],
-            ).fetchone()
-            assert row is not None
-            assert row[0] == 4
+            )
+            .fetchone()
+        )
+        assert row is not None
+        assert row[0] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +692,7 @@ class TestHasCodeWithPredicate:
 
     def test_descendants_of_with_explicit_hierarchy_matches_dataflow(self):
         """``descendants_of(root, hierarchy=h)`` finds dataflows whose codelist has descendants."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, df_urn, h_admin = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -691,7 +707,7 @@ class TestHasCodeWithPredicate:
 
     def test_descendants_of_with_explicit_hierarchy_no_match(self):
         """Root code with no descendants in the hierarchy returns no datasets."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _df_urn, h_admin = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -705,7 +721,7 @@ class TestHasCodeWithPredicate:
 
     def test_descendants_of_no_hierarchy_falls_back_to_codelist_parent_chain(self):
         """Without a HierarchyAssociation, statcatlib falls back to ancestor_ids on sdmx.code."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, df_urn, _h = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -716,7 +732,7 @@ class TestHasCodeWithPredicate:
 
     def test_descendants_of_no_hierarchy_resolves_via_hierarchy_association(self):
         """With a HierarchyAssociation in the registry, statcatlib routes through hierarchy_node."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, df_urn, _h = _make_descent_registry(with_ha=True)
         sc.ingest_sdmx(store, registry)
 
@@ -731,7 +747,7 @@ class TestHasCodeWithPredicate:
 
     def test_descendants_of_leaf_no_hierarchy_no_match(self):
         """Leaf code descended-of yields nothing — covers the ELSE branch's negative case."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _df_urn, _h = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -751,7 +767,7 @@ class TestHasCodeWithPredicate:
         CA -> ON -> TOR) so the two paths give opposite answers and this
         actually witnesses which one ran.
         """
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _df_urn, _h = _make_descent_registry(with_ha=True, scoped=False, divergent=True)
         sc.ingest_sdmx(store, registry)
 
@@ -766,7 +782,7 @@ class TestHasCodeWithPredicate:
         Paired with the test above on the identical divergent fixture —
         together they pin down which branch ran, which neither can do alone.
         """
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, df_urn, _h = _make_descent_registry(with_ha=False, divergent=True)
         sc.ingest_sdmx(store, registry)
 
@@ -781,7 +797,7 @@ class TestHasCodeWithPredicate:
         nothing and self-inclusive descent finds the dataflow. Matches
         sdmxlib's ``q.hcode.ancestors``, which excludes the node itself.
         """
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, df_urn, h_admin = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -920,11 +936,11 @@ class TestDescentJoinShape:
     def test_compiles_to_a_join_on_code_id_not_a_list_scan(self):
         from statcatlib.store.store import _QueryContext
 
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _df_urn, _h = _make_descent_registry(with_ha=True)
         sc.ingest_sdmx(store, registry)
 
-        ctx = _QueryContext(row_alias="d", registry=store.registry)
+        ctx = _QueryContext(row_alias="d", registry=store.view().registry)
         sql, _params = q.within("REF_AREA", "CA").to_sql(ctx)
 
         assert "unnest(codes)" in sql, "descendant set is not unnested to rows"
@@ -937,7 +953,7 @@ class TestDescentJoinShape:
     @pytest.mark.parametrize(("root", "expected"), [("CA", 40), ("P00", 40), ("P00-000", 0)])
     def test_answers_correctly_over_a_wide_catalog(self, root, expected):
         """40 dataflows, ~470 codes. Same answers the small fixtures give."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_sdmx(store, _make_wide_descent_registry(n_flows=40, n_prov=15, n_sub=30))
 
         result = store.query(sc.StatisticalDataset).filter(q.within("REF_AREA", root)).execute()
@@ -953,7 +969,7 @@ class TestDescentJoinShape:
         """
         import time
 
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_sdmx(store, _make_wide_descent_registry(n_flows=100, n_prov=30, n_sub=100))
 
         start = time.perf_counter()
@@ -973,7 +989,7 @@ class TestWithin:
 
     def test_within_with_explicit_hierarchy_matches(self):
         """``within(dim, root, hierarchy=h)`` matches dataflows with descendants."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, df_urn, h_admin = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -984,7 +1000,7 @@ class TestWithin:
 
     def test_within_no_hierarchy_falls_back_to_codelist_parent_chain(self):
         """Without a HierarchyAssociation, ``within`` walks ``ancestor_ids``."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, df_urn, _h = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -995,7 +1011,7 @@ class TestWithin:
 
     def test_within_leaf_no_match(self):
         """Leaf code has no descendants — empty result."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         registry, _df_urn, h_admin = _make_descent_registry(with_ha=False)
         sc.ingest_sdmx(store, registry)
 
@@ -1006,7 +1022,7 @@ class TestWithin:
 class TestDimensionLabels:
     """Dimension labels carry every language of the concept name, and a code otherwise (GH-94)."""
 
-    def _store(self, *, with_concepts: bool) -> tuple[sc.Catalog, sc.AggregateDataset]:
+    def _store(self, *, with_concepts: bool) -> tuple[ScratchStore, sc.AggregateDataset]:
         registry, _ = _make_registry()
         if with_concepts:
             registry.add(
@@ -1019,7 +1035,7 @@ class TestDimensionLabels:
                     ],
                 )
             )
-        store = sc.Catalog().open()
+        store = open_scratch()
         ds = sc.ingest_sdmx(store, registry)[0]
         return store, ds
 

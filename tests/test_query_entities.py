@@ -10,6 +10,7 @@ import pytest
 from sdmxlib import InternationalString
 
 import statcatlib as sc
+from tests.conftest import ScratchStore, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -24,8 +25,8 @@ def _i(en: str, fr: str | None = None) -> InternationalString:
 
 
 @pytest.fixture
-def entity_store() -> sc.Catalog:
-    s = sc.Catalog().open()
+def entity_store() -> ScratchStore:
+    s = open_scratch()
 
     ecb = sc.OpenDataset(
         identifier="DS-ECB",
@@ -80,30 +81,30 @@ def entity_store() -> sc.Catalog:
 
 
 class TestAgentQuery:
-    def test_query_all_agents(self, entity_store: sc.Catalog) -> None:
+    def test_query_all_agents(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Agent).execute()
         assert result.total == 3
 
-    def test_query_agent_by_type(self, entity_store: sc.Catalog) -> None:
+    def test_query_agent_by_type(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Agent).filter(type="organization").execute()
         assert result.total == 2
 
-    def test_query_agent_by_id(self, entity_store: sc.Catalog) -> None:
+    def test_query_agent_by_id(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Agent).filter(id="ECB").execute()
         assert result.total == 1
         assert result.items[0].id == "ECB"
 
-    def test_query_agent_by_name(self, entity_store: sc.Catalog) -> None:
+    def test_query_agent_by_name(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Agent).filter(name="Eurostat").execute()
         assert result.total == 1
         assert result.items[0].id == "ESTAT"
 
-    def test_query_agent_no_match(self, entity_store: sc.Catalog) -> None:
+    def test_query_agent_no_match(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Agent).filter(id="NONEXISTENT").execute()
         assert result.total == 0
         assert result.items == []
 
-    def test_agent_roundtrip_fields(self, entity_store: sc.Catalog) -> None:
+    def test_agent_roundtrip_fields(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Agent).filter(id="ECB").execute()
         agent = result.items[0]
         assert isinstance(agent, sc.Agent)
@@ -111,20 +112,20 @@ class TestAgentQuery:
         assert agent.name.as_dict().get("en") == "European Central Bank"
         assert agent.type == "organization"
 
-    def test_all_terminal_method(self, entity_store: sc.Catalog) -> None:
+    def test_all_terminal_method(self, entity_store: ScratchStore) -> None:
         agents = entity_store.query(sc.Agent).filter(type="organization").all()
         assert isinstance(agents, list)
         assert len(agents) == 2
 
-    def test_first_terminal_method(self, entity_store: sc.Catalog) -> None:
+    def test_first_terminal_method(self, entity_store: ScratchStore) -> None:
         agent = entity_store.query(sc.Agent).filter(id="ECB").first()
         assert agent is not None
         assert agent.id == "ECB"
 
-    def test_first_returns_none_on_empty(self, entity_store: sc.Catalog) -> None:
+    def test_first_returns_none_on_empty(self, entity_store: ScratchStore) -> None:
         assert entity_store.query(sc.Agent).filter(id="MISSING").first() is None
 
-    def test_count_terminal_method(self, entity_store: sc.Catalog) -> None:
+    def test_count_terminal_method(self, entity_store: ScratchStore) -> None:
         n = entity_store.query(sc.Agent).filter(type="organization").count()
         assert n == 2
 
@@ -135,24 +136,24 @@ class TestAgentQuery:
 
 
 class TestDistributionQuery:
-    def test_query_all_distributions(self, entity_store: sc.Catalog) -> None:
+    def test_query_all_distributions(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Distribution).execute()
         assert result.total == 3
 
-    def test_query_by_format(self, entity_store: sc.Catalog) -> None:
+    def test_query_by_format(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Distribution).filter(format="CSV").execute()
         assert result.total == 2
 
-    def test_query_by_media_type(self, entity_store: sc.Catalog) -> None:
+    def test_query_by_media_type(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Distribution).filter(media_type="application/json").execute()
         assert result.total == 1
         assert result.items[0].format == "JSON"
 
-    def test_query_by_dataset_id(self, entity_store: sc.Catalog) -> None:
+    def test_query_by_dataset_id(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Distribution).filter(dataset_id="DS-ECB").execute()
         assert result.total == 2
 
-    def test_distribution_roundtrip_fields(self, entity_store: sc.Catalog) -> None:
+    def test_distribution_roundtrip_fields(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Distribution).filter(id="DIST-ECB-CSV").execute()
         assert result.total == 1
         dist = result.items[0]
@@ -161,11 +162,11 @@ class TestDistributionQuery:
         assert dist.media_type == "text/csv"
         assert dist.format == "CSV"
 
-    def test_distribution_no_match(self, entity_store: sc.Catalog) -> None:
+    def test_distribution_no_match(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Distribution).filter(format="SDMX-ML").execute()
         assert result.total == 0
 
-    def test_limit_and_offset(self, entity_store: sc.Catalog) -> None:
+    def test_limit_and_offset(self, entity_store: ScratchStore) -> None:
         all_result = entity_store.query(sc.Distribution).execute()
         limited = entity_store.query(sc.Distribution).limit(2).execute()
         assert len(limited.items) == 2

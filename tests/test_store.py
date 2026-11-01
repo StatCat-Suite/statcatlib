@@ -1,4 +1,4 @@
-"""Tests for Catalog (DuckDB backend)."""
+"""Tests for writes through a working copy and reads through its view (DuckDB backend)."""
 
 from typing import Any
 
@@ -6,7 +6,7 @@ import pytest
 from sdmxlib import InternationalString
 
 import statcatlib as sc
-from tests.conftest import FIXTURE_DATASETS
+from tests.conftest import FIXTURE_DATASETS, ScratchStore, cursor_of, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -39,7 +39,7 @@ def _untyped(value: object) -> Any:
 
 class TestPut:
     def test_put_single(self):
-        s = sc.Catalog().open()
+        s = open_scratch()
         ds = sc.OpenDataset(identifier="X", title=_i("X"), description=_i("d"))
         s.put(ds)
         assert s.get(sc.BaseDataset, "X") is not None
@@ -49,7 +49,7 @@ class TestPut:
         assert store.get(sc.BaseDataset, "CO2") is not None
 
     def test_put_overwrites(self):
-        s = sc.Catalog().open()
+        s = open_scratch()
         ds1 = sc.OpenDataset(identifier="X", title=_i("Original"), description=_i("d"))
         ds2 = sc.OpenDataset(identifier="X", title=_i("Updated"), description=_i("d"))
         s.put(ds1)
@@ -68,7 +68,7 @@ class TestExtras:
     """
 
     def _roundtrip(self, extras: dict[str, str]) -> dict[str, str]:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(sc.OpenDataset(identifier="X", title=_i("X"), description=_i("d"), extras=extras))
         ds = s.get(sc.BaseDataset, "X")
         assert ds is not None
@@ -97,14 +97,14 @@ class TestExtras:
     )
     def test_non_string_values_are_refused(self, value: object):
         """Each of these used to be silently stringified."""
-        s = sc.Catalog().open()
+        s = open_scratch()
         ds = sc.OpenDataset(identifier="X", title=_i("X"), description=_i("d"))
         ds.extras = _untyped({"k": value})
         with pytest.raises(TypeError, match=r"extras\['k'\] must be str"):
             s.put(ds)
 
     def test_non_string_keys_are_refused(self):
-        s = sc.Catalog().open()
+        s = open_scratch()
         ds = sc.OpenDataset(identifier="X", title=_i("X"), description=_i("d"))
         ds.extras = _untyped({1: "v"})
         with pytest.raises(TypeError, match="extras keys must be str"):
@@ -112,7 +112,7 @@ class TestExtras:
 
     def test_error_names_the_key_and_the_type(self):
         """A large mapping is unhelpful to debug without both."""
-        s = sc.Catalog().open()
+        s = open_scratch()
         ds = sc.OpenDataset(identifier="X", title=_i("X"), description=_i("d"))
         ds.extras = _untyped({"ok": "yes", "bad": 3})
         with pytest.raises(TypeError) as exc:
@@ -161,50 +161,50 @@ class TestGet:
 
 
 class TestSearch:
-    """`Catalog.search` over an indexed catalog.
+    """`EditionView.search` over a sealed, indexed edition.
 
     `search()` yields `Hit` wrappers, so the entity is on `.payload`.
     """
 
-    def test_search_by_title(self, indexed_store: sc.Catalog):
+    def test_search_by_title(self, indexed_store: sc.EditionView):
         result = indexed_store.search("exchange rate")
         assert any(_identifier(hit) == "EXR" for hit in result.items)
 
-    def test_search_case_insensitive(self, indexed_store: sc.Catalog):
+    def test_search_case_insensitive(self, indexed_store: sc.EditionView):
         result = indexed_store.search("EXCHANGE RATE")
         assert any(_identifier(hit) == "EXR" for hit in result.items)
 
-    def test_search_by_description(self, indexed_store: sc.Catalog):
+    def test_search_by_description(self, indexed_store: sc.EditionView):
         result = indexed_store.search("GDP growth rate")
         assert any(_identifier(hit) == "GDP" for hit in result.items)
 
-    def test_search_returns_total(self, indexed_store: sc.Catalog):
+    def test_search_returns_total(self, indexed_store: sc.EditionView):
         result = indexed_store.search("quarterly")
         assert result.total > 0
 
-    def test_search_limit(self, indexed_store: sc.Catalog):
+    def test_search_limit(self, indexed_store: sc.EditionView):
         result = indexed_store.search("rate", limit=2)
         assert len(result.items) <= 2
 
-    def test_search_offset(self, indexed_store: sc.Catalog):
+    def test_search_offset(self, indexed_store: sc.EditionView):
         all_results = indexed_store.search("monthly")
         offset_results = indexed_store.search("monthly", offset=1)
         assert offset_results.total == all_results.total
         if all_results.total > 1:
             assert _identifier(offset_results.items[0]) != _identifier(all_results.items[0])
 
-    def test_search_no_results(self, indexed_store: sc.Catalog):
+    def test_search_no_results(self, indexed_store: sc.EditionView):
         result = indexed_store.search("xyzzy_nonexistent_term")
         assert result.items == []
         assert result.total == 0
 
-    def test_search_returns_both_kinds(self, indexed_store: sc.Catalog):
+    def test_search_returns_both_kinds(self, indexed_store: sc.EditionView):
         result = indexed_store.search("monthly")
         payloads = [hit.payload for hit in result.items]
         assert any(isinstance(p, sc.AggregateDataset) for p in payloads)
         assert any(isinstance(p, sc.OpenDataset) for p in payloads)
 
-    def test_search_includes_open_dataset(self, indexed_store: sc.Catalog):
+    def test_search_includes_open_dataset(self, indexed_store: sc.EditionView):
         result = indexed_store.search("labour force")
         assert any(_identifier(hit) == "LFS" for hit in result.items)
 
@@ -251,8 +251,8 @@ class TestThemeSchemeIsolation:
     _STATCAN = "urn:test:statcan"
     _EUROVOC = "urn:test:eurovoc"
 
-    def _build_store(self) -> sc.Catalog:
-        s = sc.Catalog().open()
+    def _build_store(self) -> ScratchStore:
+        s = open_scratch()
         statcan = sc.ConceptScheme(
             uri=self._STATCAN,
             label=InternationalString(en="StatCan"),
@@ -284,9 +284,9 @@ class TestThemeSchemeIsolation:
     def test_same_notation_different_scheme_stored_separately(self) -> None:
         s = self._build_store()
         # Both concepts are stored with distinct URIs
-        rows = s.connection.execute(
-            "SELECT uri, in_scheme, notation FROM statcat.concept ORDER BY in_scheme"
-        ).fetchall()
+        rows = (
+            cursor_of(s).execute("SELECT uri, in_scheme, notation FROM statcat.concept ORDER BY in_scheme").fetchall()
+        )
         assert len(rows) == 2
         uris = {r[0] for r in rows}
         assert f"{self._EUROVOC}/13" in uris
@@ -336,7 +336,7 @@ class TestFilter:
 
 class TestTransaction:
     def test_transaction_commits(self):
-        s = sc.Catalog().open()
+        s = open_scratch()
         with s.transaction():
             s.put(sc.OpenDataset(identifier="TX1", title=_i("T1"), description=_i("d")))
             s.put(sc.OpenDataset(identifier="TX2", title=_i("T2"), description=_i("d")))
@@ -344,7 +344,7 @@ class TestTransaction:
         assert s.get(sc.OpenDataset, "TX2") is not None
 
     def test_transaction_rolls_back(self):
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(sc.OpenDataset(identifier="BEFORE", title=_i("Before"), description=_i("d")))
         with pytest.raises(RuntimeError, match="boom"):  # noqa: PT012, SIM117
             with s.transaction():
@@ -355,7 +355,7 @@ class TestTransaction:
         assert s.get(sc.OpenDataset, "FAIL") is None
 
     def test_transaction_with_bulk_load(self, tmp_path):
-        s = sc.Catalog(str(tmp_path / "catalog")).open()
+        s = open_scratch(tmp_path / "catalog")
         with s.bulk_load(), s.transaction():
             s.put(sc.OpenDataset(identifier="BL1", title=_i("BL1"), description=_i("d")))
             s.put(sc.OpenDataset(identifier="BL2", title=_i("BL2"), description=_i("d")))
@@ -364,7 +364,7 @@ class TestTransaction:
 
     def test_bulk_load_reentrant(self, tmp_path):
         """Nested bulk_load() is a no-op — only the outermost checkpoints."""
-        s = sc.Catalog(str(tmp_path / "catalog")).open()
+        s = open_scratch(tmp_path / "catalog")
         with s.bulk_load():
             s.put(sc.OpenDataset(identifier="OUTER", title=_i("Outer"), description=_i("d")))
             with s.bulk_load():

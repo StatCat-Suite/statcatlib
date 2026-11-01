@@ -14,8 +14,7 @@ import pathlib
 import pytest
 import sdmxlib as sl
 
-from statcatlib.store.store import Catalog
-from tests.conftest import concept_of
+from tests.conftest import ScratchStore, concept_of, open_scratch
 
 _DQ_TEXT = (
     "The national non-response rate for income was 2.0 percent. As a result of "
@@ -38,8 +37,8 @@ def _topic_urn(item_id: str) -> sl.SdmxUrn[sl.Code]:
     )
 
 
-def _catalog_with_refmeta(path: pathlib.Path) -> tuple[Catalog, sl.SdmxUrn[sl.Code]]:
-    cat = Catalog(path / "cat").open()
+def _catalog_with_refmeta(path: pathlib.Path) -> tuple[ScratchStore, sl.SdmxUrn[sl.Code]]:
+    cat = open_scratch(path / "cat")
     msd = sl.MetadataStructure(
         id="MSD_RG",
         maintainer="STC",
@@ -74,7 +73,7 @@ def _catalog_with_refmeta(path: pathlib.Path) -> tuple[Catalog, sl.SdmxUrn[sl.Co
     return cat, code
 
 
-def _indexed_catalog(path: pathlib.Path) -> tuple[Catalog, sl.SdmxUrn[sl.Code]]:
+def _indexed_catalog(path: pathlib.Path) -> tuple[ScratchStore, sl.SdmxUrn[sl.Code]]:
     cat, code = _catalog_with_refmeta(path)
     cat.build_index(include_reference_metadata=True)  # bm25-only, no embedding model
     return cat, code
@@ -85,7 +84,7 @@ def _indexed_catalog(path: pathlib.Path) -> tuple[Catalog, sl.SdmxUrn[sl.Code]]:
 
 def test_collect_skips_scalar_provenance(tmp_path: pathlib.Path) -> None:
     cat, _ = _catalog_with_refmeta(tmp_path)
-    rows = cat._collect_reference_metadata_texts()
+    rows = cat._store._collect_reference_metadata_texts()
     paths = {r["attribute_path"] for r in rows}
     assert "DATA_QUALITY_TOPIC" in paths  # i18n prose indexed
     assert "CATALOGUE_ID" not in paths  # scalar id skipped
@@ -93,7 +92,7 @@ def test_collect_skips_scalar_provenance(tmp_path: pathlib.Path) -> None:
 
 def test_collect_row_shape(tmp_path: pathlib.Path) -> None:
     cat, _ = _catalog_with_refmeta(tmp_path)
-    row = next(r for r in cat._collect_reference_metadata_texts() if r["lang"] == "en")
+    row = next(r for r in cat._store._collect_reference_metadata_texts() if r["lang"] == "en")
     assert row["entity_type"] == "reference_metadata"
     assert row["section_title"] == "Data Quality Topic"
     assert (row["set_urn"] or "").endswith("MS_RG_004(1.0)")
@@ -103,15 +102,15 @@ def test_collect_row_shape(tmp_path: pathlib.Path) -> None:
 def test_metadataflow_filter(tmp_path: pathlib.Path) -> None:
     cat, _ = _catalog_with_refmeta(tmp_path)
     mdf_urn = "urn:sdmx:org.sdmx.infomodel.metadatastructure.Metadataflow=STC:MDF_RG(1.0)"
-    assert cat._collect_reference_metadata_texts(metadataflow_urns=[mdf_urn])
+    assert cat._store._collect_reference_metadata_texts(metadataflow_urns=[mdf_urn])
     other = "urn:sdmx:org.sdmx.infomodel.metadatastructure.Metadataflow=STC:OTHER(1.0)"
-    assert cat._collect_reference_metadata_texts(metadataflow_urns=[other]) == []
+    assert cat._store._collect_reference_metadata_texts(metadataflow_urns=[other]) == []
 
 
 def test_xhtml_section_is_down_converted_to_markdown(tmp_path: pathlib.Path) -> None:
     # A section stored as XHTML (text_type=XHTML) is indexed as markdown —
     # no tags in the search text, tables recovered as markdown.
-    cat = Catalog(tmp_path / "cat").open()
+    cat = open_scratch(tmp_path / "cat")
     msd = sl.MetadataStructure(
         id="MSD_X",
         maintainer="STC",
@@ -142,7 +141,7 @@ def test_xhtml_section_is_down_converted_to_markdown(tmp_path: pathlib.Path) -> 
     )
     cat.registry.add_all([msd, mdf, ms])
 
-    row = next(r for r in cat._collect_reference_metadata_texts() if r["lang"] == "en")
+    row = next(r for r in cat._store._collect_reference_metadata_texts() if r["lang"] == "en")
     assert "<table>" not in row["text"]  # tags gone
     assert "<p>" not in row["text"]
     assert "| Geo | Rate |" in row["text"]  # table recovered as markdown

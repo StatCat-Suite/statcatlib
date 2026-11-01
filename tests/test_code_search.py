@@ -16,8 +16,7 @@ from sdmxlib.model.in_memory_registry import InMemoryRegistry
 from sdmxlib.model.istring import InternationalString
 
 from statcatlib.sources.sdmx import ingest_sdmx
-from statcatlib.store.store import Catalog
-from tests.conftest import concept_of
+from tests.conftest import ScratchStore, concept_of, open_scratch
 
 pytestmark = pytest.mark.integration
 
@@ -70,9 +69,9 @@ def _make_registry() -> InMemoryRegistry:
     return registry
 
 
-def _build_store_with_sdmx() -> Catalog:
-    """Create an in-memory Catalog with one SDMX dataset (2 dims, 4 codes)."""
-    store = Catalog().open()
+def _build_store_with_sdmx() -> ScratchStore:
+    """A scratch store with one SDMX dataset (2 dims, 4 codes)."""
+    store = open_scratch()
     ingest_sdmx(store, _make_registry())
     return store
 
@@ -80,18 +79,18 @@ def _build_store_with_sdmx() -> Catalog:
 class TestCollectCodeTexts:
     def test_returns_code_rows(self) -> None:
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         assert len(items) > 0
 
     def test_entity_type_is_code(self) -> None:
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         for row in items:
             assert row["entity_type"] == "code"
 
     def test_text_contains_code_label(self) -> None:
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         en_texts = [r["text"] for r in items if r["lang"] == "en"]
         labels = {"Canada", "United States", "Annual", "Monthly"}
         found = {label for label in labels if any(label in t for t in en_texts)}
@@ -99,27 +98,27 @@ class TestCollectCodeTexts:
 
     def test_text_contains_dataset_title(self) -> None:
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         en_texts = [r["text"] for r in items if r["lang"] == "en"]
         assert all("Test Dataflow" in t for t in en_texts)
 
     def test_text_contains_dimension_label(self) -> None:
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         en_texts = [r["text"] for r in items if r["lang"] == "en"]
         geo_texts = [t for t in en_texts if "Canada" in t]
         assert any("Geography" in t for t in geo_texts)
 
     def test_bilingual_rows(self) -> None:
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         langs = {r["lang"] for r in items}
         assert "en" in langs
         assert "fr" in langs
 
     def test_french_labels(self) -> None:
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         fr_texts = [r["text"] for r in items if r["lang"] == "fr"]
         assert any("Flux de test" in t for t in fr_texts)
         assert any("Géographie" in t for t in fr_texts)
@@ -127,7 +126,7 @@ class TestCollectCodeTexts:
     def test_structured_columns_populated(self) -> None:
         """Code rows must carry dimension_id/code_id alongside the labels."""
         store = _build_store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         canada = next(r for r in items if r["lang"] == "en" and r["code_label"] == "Canada")
         assert canada["dimension_id"] == "GEO"
         assert canada["code_id"] == "CA"
@@ -137,24 +136,24 @@ class TestCollectCodeTexts:
         store = _build_store_with_sdmx()
         # Both codelists have 2 codes, so max=1 should skip them all, and say so.
         with pytest.warns(UserWarning, match="skipped 2 codelist"):
-            items = store._collect_code_texts(max_codes_per_codelist=1)
+            items = store._store._collect_code_texts(max_codes_per_codelist=1)
         assert len(items) == 0
 
     def test_empty_without_sdmx(self) -> None:
-        store = Catalog().open()
-        items = store._collect_code_texts()
+        store = open_scratch()
+        items = store._store._collect_code_texts()
         assert items == []
 
 
 class TestBuildIndexWithCodes:
     def test_build_index_includes_codes(self, tmp_path: pathlib.Path) -> None:
         """Verify build_index with include_codes adds code rows to the index."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         registry = _make_registry()
         ingest_sdmx(store, registry)
 
-        dataset_texts = store._collect_search_texts()
-        code_texts = store._collect_code_texts()
+        dataset_texts = store._store._collect_search_texts()
+        code_texts = store._store._collect_code_texts()
         assert len(code_texts) > 0
         assert len(dataset_texts) > 0
 
@@ -163,7 +162,7 @@ class TestBuildIndexWithCodes:
 
     def test_build_index_excludes_codes(self, tmp_path: pathlib.Path) -> None:
         """Verify include_codes=False skips code rows."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         registry = _make_registry()
         ingest_sdmx(store, registry)
 
@@ -175,7 +174,7 @@ class TestCodesScope:
     """Tests for cat.codes.find()."""
 
     def test_find_locates_label(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         store.build_index(include_codes=True)
 
@@ -184,7 +183,7 @@ class TestCodesScope:
 
     def test_find_returns_structured_fields(self, tmp_path: pathlib.Path) -> None:
         """Hits expose dimension_id and code_id directly — no text re-parsing."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         store.build_index(include_codes=True)
 
@@ -199,7 +198,7 @@ class TestCodesScope:
         assert canada.source == "bm25"
 
     def test_find_french(self, tmp_path: pathlib.Path) -> None:
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         store.build_index(include_codes=True)
 
@@ -208,7 +207,7 @@ class TestCodesScope:
 
     def test_find_dataset_filter(self, tmp_path: pathlib.Path) -> None:
         """dataset_ids restricts matches to the named datasets only."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         store.build_index(include_codes=True)
 
@@ -223,14 +222,14 @@ class TestCodesScope:
 
     def test_find_returns_empty_without_index(self, tmp_path: pathlib.Path) -> None:
         """Without a built index, codes.find degrades gracefully."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
-        store._lance = None
+        store._store._lance = None
         assert store.codes.find("anything").items == []
 
     def test_find_excludes_dataset_rows(self, tmp_path: pathlib.Path) -> None:
         """Dataset-level rows must never leak into codes.find results."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         store.build_index(include_codes=True)
 
@@ -277,7 +276,7 @@ class TestEmbedCodes:
 
     def test_embed_codes_default_false_skips_code_embedding(self, tmp_path: pathlib.Path) -> None:
         """Default behaviour: code rows are indexed for BM25 but not embedded."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         model = self._stub_model()
         encoded: list[str] = []
@@ -293,7 +292,7 @@ class TestEmbedCodes:
 
     def test_embed_codes_true_encodes_code_rows(self, tmp_path: pathlib.Path) -> None:
         """Opt-in: embed_codes=True encodes every code row's text."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         model = self._stub_model()
         encoded: list[str] = []
@@ -305,7 +304,7 @@ class TestEmbedCodes:
 
     def test_find_works_with_embed_codes_false(self, tmp_path: pathlib.Path) -> None:
         """BM25 over code rows still works when embeddings are skipped."""
-        store = Catalog(tmp_path / "catalog").open()
+        store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         store.build_index(embedding_model=self._stub_model(), include_codes=True)
 

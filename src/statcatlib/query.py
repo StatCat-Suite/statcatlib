@@ -95,8 +95,7 @@ class CompileContext:
         join_params: Parameters for those joins, in insertion order.
         schemas: Logical-to-physical schema name map. Identity by
             default (``"sdmx"`` -> ``"sdmx"``); override to remap.
-        registry: The catalog's co-located `sdmxlib.LocalRegistry`, when
-            one is open. Filters that delegate to sdmxlib's path language
+        registry: The edition's sdmxlib registry, when one is open. Filters that delegate to sdmxlib's path language
             build their relation through it — see `SdmxCodeFilter`. Left
             ``None`` by callers that compile filters without a catalog
             (the unit tests do), which is why it is optional rather than
@@ -108,7 +107,7 @@ class CompileContext:
     join_sqls: list[str] = field(factory=list)
     join_params: list[object] = field(factory=list)
     schemas: dict[str, str] = field(factory=dict)
-    registry: sl.LocalRegistry | None = None
+    registry: sl.EditionRegistry | None = None
     _alias_counter: int = 0
 
     def schema(self, logical: str) -> str:
