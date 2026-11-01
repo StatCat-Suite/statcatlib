@@ -23,7 +23,7 @@ import statcatlib as sc
 store = sc.Catalog()
 
 # Catalog folder — persistent across restarts
-# Opening it creates my_catalog/ with meta.duckdb, lake.ducklake and parquet/
+# Opening it creates my_catalog/ with meta.duckdb and lake.ducklake
 store = sc.Catalog("my_catalog")
 ```
 

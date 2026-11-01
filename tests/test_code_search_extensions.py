@@ -259,13 +259,14 @@ def _attach_footnote(
     store._c.execute(
         """
         INSERT INTO sdmx.metadata_value
-            (set_urn, attribute_path, sibling_index, value_kind, scalar, i18n)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (set_urn, attribute_path, sibling_index, ordinal, value_kind, scalar, i18n)
+        VALUES (?, ?, ?, (SELECT count(*) FROM sdmx.metadata_value WHERE set_urn = ?), ?, ?, ?)
         """,
         [
             set_urn,
             attribute_path,
             sibling_index,
+            set_urn,
             "i18n" if i18n else "scalar",
             scalar,
             i18n,

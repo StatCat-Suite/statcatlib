@@ -99,9 +99,9 @@ nav:
   - Tutorial: tutorial.md
   - How Search Works: search.md
   - Bundle Format: bundle-format.md
+  - Upgrading: upgrading.md
   - API Reference:
     - Catalog: api/store.md
-    - Bundles: api/bundles.md
     - Domain Model: api/model.md
     - Query Filters: api/query.md
     - Source Connectors: api/sources.md

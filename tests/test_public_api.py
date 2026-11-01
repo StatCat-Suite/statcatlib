@@ -136,8 +136,8 @@ class TestDomainModelExports:
 
         assert sc.InternationalString is not None
         s = sc.InternationalString(en="hello", fr="bonjour")
-        assert s.get("en") == "hello"
-        assert s.get("fr") == "bonjour"
+        assert s.as_dict().get("en") == "hello"
+        assert s.as_dict().get("fr") == "bonjour"
 
 
 # ---------------------------------------------------------------------------

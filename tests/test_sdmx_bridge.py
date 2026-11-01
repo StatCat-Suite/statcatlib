@@ -82,14 +82,14 @@ class TestDatasetFromDataflow:
     def test_title_bilingual(self) -> None:
         flow, dsd = _make_minimal()
         ds = dataset_from_dataflow(flow, dsd)
-        assert ds.title.get("en") == "Test Dataflow"
-        assert ds.title.get("fr") == "Flux de test"
+        assert ds.title.as_dict().get("en") == "Test Dataflow"
+        assert ds.title.as_dict().get("fr") == "Flux de test"
 
     def test_description_populated(self) -> None:
         flow, dsd = _make_minimal()
         ds = dataset_from_dataflow(flow, dsd)
         assert ds.description is not None
-        assert ds.description.get("en") == "Test description"
+        assert ds.description.as_dict().get("en") == "Test description"
 
     def test_sdmx_dataflow_urn_set(self) -> None:
         flow, dsd = _make_minimal()
@@ -138,7 +138,7 @@ class TestDimensionNames:
         """Without resolved concept refs, dimension IDs label as codes, under ``zxx``."""
         flow, dsd = _make_minimal()
         ds = dataset_from_dataflow(flow, dsd)
-        assert {d.get("zxx") for d in ds.dimension_names} == {"GEO", "FREQ"}
+        assert {d.as_dict().get("zxx") for d in ds.dimension_names} == {"GEO", "FREQ"}
         assert all(d.langs == ["zxx"] for d in ds.dimension_names)
 
     def test_empty_dsd_gives_no_dimensions(self) -> None:

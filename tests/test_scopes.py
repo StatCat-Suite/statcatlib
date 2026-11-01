@@ -247,10 +247,10 @@ class TestMultiSchemeScopes:
         eurovoc_refs = s.themes[_EUROVOC_URI].collect()
 
         assert len(statcan_refs) == 1
-        assert statcan_refs[0].label.get("en") == "Labour"
+        assert statcan_refs[0].label.as_dict().get("en") == "Labour"
 
         assert len(eurovoc_refs) == 1
-        assert eurovoc_refs[0].label.get("en") == "Energy"
+        assert eurovoc_refs[0].label.as_dict().get("en") == "Energy"
 
     def test_concept_datasets_scoped(self):
         s = self._build_store()

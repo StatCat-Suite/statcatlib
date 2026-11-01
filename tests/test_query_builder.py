@@ -10,7 +10,7 @@ pytestmark = pytest.mark.unit
 class TestChaining:
     def test_filter_chaining(self, store):
         result = store.query(sc.BaseDataset).filter(publisher="ECB").filter(status="current").execute()
-        assert all(ds.publisher is not None and ds.publisher.name.get("en") == "ECB" for ds in result.items)
+        assert all(ds.publisher is not None and ds.publisher.name.as_dict().get("en") == "ECB" for ds in result.items)
         assert all(ds.status == "current" for ds in result.items)
 
     def test_filter_and_search(self, indexed_store: sc.Catalog):
@@ -35,12 +35,12 @@ class TestChaining:
 
     def test_sort_by_title(self, store):
         result = store.query(sc.BaseDataset).sort_by("title", lang="en").execute()
-        titles = [ds.title.get("en") for ds in result.items]
+        titles = [ds.title.as_dict().get("en") for ds in result.items]
         assert titles == sorted(titles, key=lambda t: t or "")
 
     def test_sort_by_title_desc(self, store):
         result = store.query(sc.BaseDataset).sort_by("title", lang="en", desc=True).execute()
-        titles = [ds.title.get("en") for ds in result.items]
+        titles = [ds.title.as_dict().get("en") for ds in result.items]
         assert titles == sorted(titles, key=lambda t: t or "", reverse=True)
 
     def test_sort_by_title_requires_lang(self, store):
@@ -80,13 +80,13 @@ class TestTerminalMethods:
     def test_all(self, store):
         items = store.query(sc.Dataset, publisher="ECB").all()
         assert isinstance(items, list)
-        assert all(ds.publisher is not None and ds.publisher.name.get("en") == "ECB" for ds in items)
+        assert all(ds.publisher is not None and ds.publisher.name.as_dict().get("en") == "ECB" for ds in items)
 
     def test_first_returns_one(self, store):
         ds = store.query(sc.Dataset, publisher="ECB").first()
         assert ds is not None
         assert ds.publisher is not None
-        assert ds.publisher.name.get("en") == "ECB"
+        assert ds.publisher.name.as_dict().get("en") == "ECB"
 
     def test_first_returns_none_on_empty(self, store):
         ds = store.query(sc.Dataset, publisher="NOBODY").first()
@@ -262,7 +262,7 @@ class TestInclude:
         items = store.query(sc.BaseDataset).filter(publisher="ECB").include("publisher").all()
         assert len(items) > 0
         assert all(ds.publisher is not None for ds in items)
-        assert all(ds.publisher.name.get("en") == "ECB" for ds in items)
+        assert all(ds.publisher.name.as_dict().get("en") == "ECB" for ds in items)
 
     def test_include_skips_undeclared_relationships(self, store):
         items = store.query(sc.BaseDataset).filter(publisher="ECB").include("publisher").all()

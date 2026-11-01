@@ -11,7 +11,6 @@ check runs only when the index recorded annotations.
 """
 
 from collections.abc import Callable, Iterator
-from pathlib import Path
 
 import pytest
 from sdmxlib.testing import Dim, Shape
@@ -31,16 +30,12 @@ def _assert_idle(cat: sc.Catalog) -> None:
 
 
 @pytest.fixture(scope="module")
-def bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    path = tmp_path_factory.mktemp("idle") / "bundle"
-    synthetic_catalog(path, Shape(dimensions=(Dim(codes=4),), observations=10, languages=("en",)))
-    return path
-
-
-@pytest.fixture
-def cat(bundle: Path) -> Iterator[sc.Catalog]:
-    with sc.Catalog(bundle, read_only=True) as opened:
-        yield opened
+def cat(tmp_path_factory: pytest.TempPathFactory) -> Iterator[sc.Catalog]:
+    path = tmp_path_factory.mktemp("idle") / "product"
+    rec = synthetic_catalog(path, Shape(dimensions=(Dim(codes=4),), observations=10, languages=("en",)), index=True)
+    yield rec.cat
+    rec.cat.close()
+    rec.reg.close()
 
 
 def test_open_of_an_indexed_catalog(cat: sc.Catalog) -> None:

@@ -7,8 +7,8 @@ StatDCAT-AP, CKAN, SDMX and PROV-O catalogs. Ingest materializes the catalog
 into one DuckDB database with two schema owners: statcatlib's `statcat` star
 schema and sdmxlib's `sdmx` structural tables. SQL JOINs over URN foreign keys
 traverse the graph, and LanceDB (`statcatlib[search]`) adds per-language BM25
-and vector search. A published catalog ships as a portable bundle with a
-sha256 manifest.
+and vector search. A sealed catalog ships as an sdmxlib edition with a
+manifest of file digests.
 
 `README.md` is the user guide and PyPI description; `CLAUDE.md` records the
 design decisions in full. This file indexes the code contracts.
@@ -51,8 +51,9 @@ design decisions in full. This file indexes the code contracts.
 - `Catalog.open()` refuses a search manifest version above
   `lance._MANIFEST_VERSION`. A stale index in a readable format warns and keeps
   serving; nothing on the open or search path rebuilds it (GH-3).
-- `publish_bundle` runs after `build_index()`. Any later write to the bundle
-  fails the manifest's file check.
+- An edition is sealed after `build_index()`, with the `statcat` section from
+  `bundle.catalog_section`. Any later write to the edition fails the
+  manifest's files check.
 - Every test file sets `pytestmark`; `just ci` selects tests by marker.
 
 ## Global Side Effects
@@ -61,7 +62,8 @@ design decisions in full. This file indexes the code contracts.
   schemas; DuckLake holds observations under `parquet/`.
 - `{catalog}/search/` holds generation-suffixed LanceDB tables and the
   `index.json` manifest, replaced atomically on rebuild.
-- `bundle.manifest.json` is written by `publish_bundle`.
+- An edition's `manifest.json` is written by `sdmxlib.edition.seal`;
+  statcatlib writes no manifest itself until Phase 2a S2.
 - Network access comes from SDMX registries (through sdmxlib) and the CKAN
   Action API (`httpx`), and from embedding model downloads when vector search
   is enabled.

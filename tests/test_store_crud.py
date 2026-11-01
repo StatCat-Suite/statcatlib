@@ -115,8 +115,8 @@ class TestOpenDataset:
         s.put(orig)
         ds = s.get(sc.OpenDataset, "OPEN-001")
         assert ds is not None
-        assert ds.title.get("en") == "Open Dataset"
-        assert ds.title.get("fr") == "Ensemble de données ouvert"
+        assert ds.title.as_dict().get("en") == "Open Dataset"
+        assert ds.title.as_dict().get("fr") == "Ensemble de données ouvert"
         assert ds.publisher is not None
         assert ds.publisher.id == "PUB"
         assert ds.status == "current"
@@ -133,7 +133,7 @@ class TestOpenDataset:
         s.put(updated)
         ds = s.get(sc.OpenDataset, "OPEN-001")
         assert ds is not None
-        assert ds.title.get("en") == "Updated Title"
+        assert ds.title.as_dict().get("en") == "Updated Title"
         assert ds.status == "archived"
 
 

@@ -27,14 +27,9 @@ dependencies = [
     # by DuckDB 1.x, so by statcatlib 0.8 or earlier.
     "duckdb>=2.0.0",
     "httpx>=0.28",
-    # >=0.70: needs Python 3.14 and DuckDB 2.0; `reg.data()` is gone, and a
-    # component without a concept is refused as it is built. >=0.70.1:
-    # `reg.obs()` asks Eurostat for CSV it serves, so `ingest_data()` can
-    # fetch from it (sdmxlib GH-50). >=0.72: `sdmxlib.bundle`, the manifest
-    # and checker `publish_bundle` and `check_bundle` build on (GH-3).
-    # <0.73: the suite is pre-1.0, so a minor may break; the PR that adopts
-    # sdmxlib 0.73 raises the cap (GH-67).
-    "sdmxlib>=0.72.0,<0.73",
+    # <0.81: every suite library is pre-1.0, so a minor bump may break
+    # (GH-67).
+    "sdmxlib>=0.80.0,<0.81",
 ]
 
 [project.optional-dependencies]

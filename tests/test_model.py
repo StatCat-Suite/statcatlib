@@ -20,14 +20,14 @@ class TestConcept:
     def test_construction(self):
         c = sc.Concept(notation="ECONOMY", label=_i("Economy"))
         assert c.notation == "ECONOMY"
-        assert c.label.get("en") == "Economy"
+        assert c.label.as_dict().get("en") == "Economy"
         assert c.broader == ()
         assert c.narrower == ()
 
     def test_with_alt_label_and_definition(self):
         c = sc.Concept(notation="T1", label=_i("Theme 1"), definition=_i("A theme"))
         assert c.definition is not None
-        assert c.definition.get("en") == "A theme"
+        assert c.definition.as_dict().get("en") == "A theme"
 
     def test_evolve(self):
         c = sc.Concept(notation="A", label=_i("A"))
@@ -57,7 +57,7 @@ class TestConceptRef:
 class TestAgent:
     def test_construction(self):
         a = sc.Agent(name=_i("ECB"), id="ECB")
-        assert a.name.get("en") == "ECB"
+        assert a.name.as_dict().get("en") == "ECB"
         assert a.id == "ECB"
         assert a.type is None
 
@@ -75,7 +75,7 @@ class TestOpenDataset:
             description=_i("A test dataset"),
         )
         assert ds.identifier == "DS001"
-        assert ds.title.get("en") == "Test Dataset"
+        assert ds.title.as_dict().get("en") == "Test Dataset"
         assert ds.kind == "open"
         assert ds.publisher is None
         assert ds.keywords == []
@@ -97,7 +97,7 @@ class TestOpenDataset:
             language=["en", "fr"],
         )
         assert ds.publisher is not None
-        assert ds.publisher.name.get("en") == "ECB"
+        assert ds.publisher.name.as_dict().get("en") == "ECB"
         assert len(ds.themes) == 1
         assert ds.frequency is not None
         assert ds.frequency.id == "MONTHLY"
@@ -138,7 +138,7 @@ class TestAggregateDataset:
             sdmx_dataflow_urn=urn,
         )
         assert len(ds.dimension_names) == 2
-        assert ds.dimension_names[0].get("en") == "Reference Area"
+        assert ds.dimension_names[0].as_dict().get("en") == "Reference Area"
         assert ds.num_series == 30
         assert ds.sdmx_dataflow_urn == urn
 
@@ -251,7 +251,7 @@ class TestVariable:
     def test_construction(self):
         v = sc.Variable(id="AGE", label=_i("Age"))
         assert v.id == "AGE"
-        assert v.label.get("en") == "Age"
+        assert v.label.as_dict().get("en") == "Age"
         assert v.value_type is None
 
     def test_microdata_with_variables(self):

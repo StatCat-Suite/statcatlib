@@ -21,8 +21,7 @@ Catalog(path: str | Path, *, embedding_model: Any | None = None)
 
 Name a catalog folder at `path`. Construction is cheap and does **not** touch the
 disk — the DuckDB connection opens on `.open()` or on entering a `with` block,
-which creates `path/meta.duckdb`, `path/lake.ducklake` and `path/parquet/` if
-they do not exist.
+which creates `path/meta.duckdb` and `path/lake.ducklake` if they do not exist.
 Querying an unopened catalog raises `RuntimeError`.
 
 Pass `embedding_model` to enable semantic and hybrid search. The model must have
@@ -80,13 +79,6 @@ store.connection -> duckdb.DuckDBPyConnection
 
 The underlying DuckDB connection. Use for raw SQL queries or to pass to
 sdmxlib's `LocalRegistry`.
-
-```python
-store.parquet_dir -> Path | None
-```
-
-Path to the `parquet/` directory inside the bundle folder. `None` for in-memory
-stores or connection-mode stores.
 
 ### Context manager
 

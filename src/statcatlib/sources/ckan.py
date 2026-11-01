@@ -7,22 +7,29 @@ The open.canada.ca portal stores many metadata fields as JSON-encoded
 strings rather than native JSON objects. The helpers here handle both
 representations defensively.
 
-Language tags are kept as the portal sends them, including RFC 6497
+Every language tag the portal sends is kept, including RFC 6497
 transformed-content tags such as ``en-t-fr`` (English translated from
-French). CKAN declares no default language, so a plain string is stored
-under ``und`` and a code stored as text under ``zxx``. No field is given an
-English value the portal did not send (GH-84).
+French), in the lowercase form `sdmxlib.normalize_tag` returns. The reader
+strips each tag and replaces ``_`` with ``-`` first, so ``fr_CA`` is stored
+as ``fr-ca``. A tag that is still malformed is dropped from its field with a
+WARNING, and `ingest_ckan` logs how many it dropped. CKAN declares no default
+language, so a plain string is stored under ``und`` and a code stored as text
+under ``zxx``. No field is given an English value the portal did not send
+(GH-84).
 """
 
 from __future__ import annotations
 
 import json
+import logging
+from collections import Counter
 from collections.abc import Mapping
+from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Self
 
 import httpx
-from sdmxlib import InternationalString
+from sdmxlib import InternationalString, InvalidTagError, normalize_tag
 
 from statcatlib.model.agents import Agent
 from statcatlib.model.dataset import OpenDataset
@@ -57,6 +64,11 @@ _FREQ_LABEL_TO_ID: dict[str, str] = {
 }
 
 _ROWS_PER_PAGE = 100
+
+log = logging.getLogger(__name__)
+
+#: The malformed tags `_lang_map` dropped during one `ingest_ckan` call, by tag.
+_dropped_tags: ContextVar[Counter[str] | None] = ContextVar("_dropped_tags", default=None)
 
 #: HTTP statuses a portal without ckanext-scheming answers the schema action with.
 _NO_SCHEMING_STATUSES = frozenset({400, 404})
@@ -331,12 +343,30 @@ def _seq(v: object) -> list[object]:
 
 
 def _lang_map(raw: Mapping[object, object]) -> dict[str, str]:
-    """The non-empty string values of *raw*, keyed by language tag as given."""
-    return {
-        tag.strip(): text
-        for tag, text in raw.items()
-        if isinstance(tag, str) and tag.strip() and isinstance(text, str) and text.strip()
-    }
+    """The non-empty string values of *raw*, keyed by normalised language tag.
+
+    Each tag is stripped, ``_`` becomes ``-``, and `sdmxlib.normalize_tag`
+    lowercases and checks it. A malformed tag is dropped with a WARNING and
+    counted for `ingest_ckan`. When two tags normalise to one, the first
+    text is kept with a WARNING.
+    """
+    texts: dict[str, str] = {}
+    for tag, text in raw.items():
+        if not (isinstance(tag, str) and isinstance(text, str) and text.strip()):
+            continue
+        repaired = tag.strip().replace("_", "-")
+        try:
+            normalised = normalize_tag(repaired)
+        except InvalidTagError:
+            log.warning("dropped a text with the malformed language tag %r", tag)
+            if (dropped := _dropped_tags.get()) is not None:
+                dropped[tag] += 1
+            continue
+        if normalised in texts:
+            log.warning("the language tag %r normalises to %r, already held: kept the first text", tag, normalised)
+            continue
+        texts[normalised] = text
+    return texts
 
 
 def _parse_istring(raw: object) -> InternationalString:
@@ -640,10 +670,18 @@ def ingest_ckan(
             rows=limit,
         )
         alternates = client.alternate_languages()
-        regions = client.field_choices("geographic_region")
+        dropped: Counter[str] = Counter()
+        token = _dropped_tags.set(dropped)
+        try:
+            regions = client.field_choices("geographic_region")
+            datasets = [_ckan_package_to_dataset(pkg, regions=regions) for pkg in raw_packages]
+        finally:
+            _dropped_tags.reset(token)
+    if dropped:
+        tags = ", ".join(f"{tag!r} ({n})" for tag, n in sorted(dropped.items()))
+        log.warning("%s: dropped %d texts with malformed language tags: %s", base_url, dropped.total(), tags)
     if regions is not None:
         store.put(regions)
-    datasets = [_ckan_package_to_dataset(pkg, regions=regions) for pkg in raw_packages]
     store.put(datasets)
     if alternates:
         store.add_language_alternates(alternates, source=base_url)

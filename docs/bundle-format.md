@@ -1,5 +1,12 @@
 # The statcat bundle format
 
+!!! warning "This page describes statcatlib 0.11"
+    statcatlib on `main` cannot publish a bundle until Phase 2a's next
+    slice (S2) ships the edition writer. This page describes the 0.11
+    format, with `publish_bundle`, `statcat bundle check` and
+    `tests/test_bundle_spec.py`, which are removed. S2 rewrites the page.
+    See [Upgrading](upgrading.md).
+
 A statcat bundle is an [sdmxlib bundle](https://statcat-suite.github.io/sdmxlib/bundle/)
 that also holds a catalog and its search index. sdmxlib's page specifies the
 directory, the manifest, its token and checksums, overlays, and sdmxlib's
@@ -351,8 +358,7 @@ sdmxlib's `files` check also fails on any write made after publishing: a
 rebuilt index, or a data path rewritten by `statcat bundle rebind` or by
 `open_bundle`'s default `Auto()` policy repointing a moved bundle (both
 change `lake.ducklake`). A server MUST open a published bundle with a
-policy that never writes, such as `Embedded()`
-([Bundles](api/bundles.md)).
+policy that never writes, such as `Embedded()`.
 
 ## 7. Producing a bundle
 

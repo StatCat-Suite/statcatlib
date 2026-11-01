@@ -56,7 +56,7 @@ class TestPut:
         s.put(ds2)
         result = s.get(sc.BaseDataset, "X")
         assert result is not None
-        assert result.title.get("en") == "Updated"
+        assert result.title.as_dict().get("en") == "Updated"
 
 
 class TestExtras:
@@ -148,7 +148,7 @@ class TestGet:
         assert ds is not None
         assert ds.num_series == 5
         assert ds.publisher is not None
-        assert ds.publisher.name.get("en") == "ECB"
+        assert ds.publisher.name.as_dict().get("en") == "ECB"
         assert ds.frequency is not None
         assert ds.frequency.id == "DAILY"
         assert ds.status == "current"
@@ -311,7 +311,7 @@ class TestThemeSchemeIsolation:
 class TestFilter:
     def test_filter_by_publisher(self, store):
         result = store.query(sc.BaseDataset, publisher="ECB").execute()
-        assert all(ds.publisher is not None and ds.publisher.name.get("en") == "ECB" for ds in result.items)
+        assert all(ds.publisher is not None and ds.publisher.name.as_dict().get("en") == "ECB" for ds in result.items)
         assert result.total >= 1
 
     def test_filter_by_status(self, store):

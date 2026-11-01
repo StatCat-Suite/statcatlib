@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -128,19 +129,36 @@ def _make_search_response(packages: list[dict[str, Any]], count: int | None = No
 class TestParseIstring:
     def test_dict_bilingual(self):
         result = _parse_istring({"en": "Hello", "fr": "Bonjour"})
-        assert result.get("en") == "Hello"
-        assert result.get("fr") == "Bonjour"
+        assert result.as_dict().get("en") == "Hello"
+        assert result.as_dict().get("fr") == "Bonjour"
 
     def test_dict_en_only(self):
         result = _parse_istring({"en": "Hello"})
-        assert result.get("en") == "Hello"
-        assert result.get("fr") is None
+        assert result.as_dict().get("en") == "Hello"
+        assert result.as_dict().get("fr") is None
 
     def test_json_string_bilingual(self):
         raw = json.dumps({"en": "Hello", "fr": "Bonjour"})
         result = _parse_istring(raw)
-        assert result.get("en") == "Hello"
-        assert result.get("fr") == "Bonjour"
+        assert result.as_dict().get("en") == "Hello"
+        assert result.as_dict().get("fr") == "Bonjour"
+
+    def test_underscore_tag_is_stored_lowercase_with_a_hyphen(self):
+        """``fr_CA`` is repaired to ``fr-CA`` and stored as `sdmxlib.normalize_tag` returns it."""
+        result = _parse_istring({"fr_CA": "Bonjour", "en": "Hello"})
+        assert result.as_dict() == {"fr-ca": "Bonjour", "en": "Hello"}
+
+    def test_malformed_tag_is_dropped_with_a_warning(self, caplog: pytest.LogCaptureFixture):
+        with caplog.at_level(logging.WARNING, logger="statcatlib.sources.ckan"):
+            result = _parse_istring({"en": "Hello", "not a tag": "Bonjour", "fr": "Salut"})
+        assert result.as_dict() == {"en": "Hello", "fr": "Salut"}
+        assert "malformed language tag 'not a tag'" in caplog.text
+
+    def test_tags_that_normalise_to_one_keep_the_first_text(self, caplog: pytest.LogCaptureFixture):
+        with caplog.at_level(logging.WARNING, logger="statcatlib.sources.ckan"):
+            result = _parse_istring({"EN": "First", "en": "Second"})
+        assert result.as_dict() == {"en": "First"}
+        assert "'en' normalises to 'en', already held" in caplog.text
 
     def test_plain_string_is_undetermined(self):
         """CKAN declares no default language, so untagged text is ``und``, never English."""
@@ -151,7 +169,7 @@ class TestParseIstring:
         """open.canada.ca sends translated text under RFC 6497 tags; each is kept as given."""
         result = _parse_istring({"en-t-fr": "Hydrography", "fr": "Hydrographie"})
         assert result.as_dict() == {"en-t-fr": "Hydrography", "fr": "Hydrographie"}
-        assert result.get("en") is None
+        assert result.as_dict().get("en") is None
 
     def test_json_string_with_transformed_tag(self):
         result = _parse_istring(json.dumps({"en": "Title", "fr-t-en": "Titre"}))
@@ -202,7 +220,7 @@ class TestParseFrequency:
         assert freq is not None
         assert freq.id == "MONTHLY"
         assert freq.label is not None
-        assert freq.label.get("fr") == "Mensuelle"
+        assert freq.label.as_dict().get("fr") == "Mensuelle"
 
     def test_plain_string_label(self):
         freq = _parse_frequency("Annual")
@@ -243,27 +261,27 @@ class TestParseKeywords:
         raw = {"en": ["labour", "employment"], "fr": ["travail", "emploi"]}
         kws = _parse_keywords(raw)
         assert len(kws) == 2
-        assert kws[0].get("en") == "labour"
-        assert kws[0].get("fr") == "travail"
+        assert kws[0].as_dict().get("en") == "labour"
+        assert kws[0].as_dict().get("fr") == "travail"
 
     def test_json_encoded_dict(self):
         raw = json.dumps({"en": ["a"], "fr": ["b"]})
         kws = _parse_keywords(raw)
         assert len(kws) == 1
-        assert kws[0].get("en") == "a"
+        assert kws[0].as_dict().get("en") == "a"
 
     def test_more_en_than_fr(self):
         raw = {"en": ["a", "b", "c"], "fr": ["x"]}
         kws = _parse_keywords(raw)
         assert len(kws) == 3
-        assert kws[1].get("fr") is None
-        assert kws[2].get("fr") is None
+        assert kws[1].as_dict().get("fr") is None
+        assert kws[2].as_dict().get("fr") is None
 
     def test_more_fr_than_en(self):
         raw: dict[str, list[str]] = {"en": [], "fr": ["x", "y"]}
         kws = _parse_keywords(raw)
         assert len(kws) == 2
-        assert kws[0].get("fr") == "x"
+        assert kws[0].as_dict().get("fr") == "x"
 
     def test_transformed_content_tags_paired_by_position(self):
         raw = {"en-t-fr": ["water", "maps"], "fr": ["eau", "cartes"]}
@@ -358,8 +376,8 @@ class TestCkanPackageToDataset:
 
     def test_title_from_title_translated(self):
         ds = _ckan_package_to_dataset(_PKG)
-        assert ds.title.get("en") == "Labour Force Survey"
-        assert ds.title.get("fr") == "Enquête sur la population active"
+        assert ds.title.as_dict().get("en") == "Labour Force Survey"
+        assert ds.title.as_dict().get("fr") == "Enquête sur la population active"
 
     def test_title_fallback_to_plain_title(self):
         pkg = dict(_PKG)
@@ -385,8 +403,8 @@ class TestCkanPackageToDataset:
 
     def test_description_bilingual(self):
         ds = _ckan_package_to_dataset(_PKG)
-        assert ds.description.get("en") == "Monthly survey of the Canadian labour force."
-        assert ds.description.get("fr") == "Enquête mensuelle sur la population active canadienne."
+        assert ds.description.as_dict().get("en") == "Monthly survey of the Canadian labour force."
+        assert ds.description.as_dict().get("fr") == "Enquête mensuelle sur la population active canadienne."
 
     def test_publisher_name(self):
         ds = _ckan_package_to_dataset(_PKG)
@@ -414,7 +432,7 @@ class TestCkanPackageToDataset:
         assert ds.frequency is not None
         assert ds.frequency.id == "MONTHLY"
         assert ds.frequency.label is not None
-        assert ds.frequency.label.get("fr") == "Mensuelle"
+        assert ds.frequency.label.as_dict().get("fr") == "Mensuelle"
 
     def test_themes_from_subject(self):
         ds = _ckan_package_to_dataset(_PKG)
@@ -426,13 +444,13 @@ class TestCkanPackageToDataset:
     def test_keywords_bilingual(self):
         ds = _ckan_package_to_dataset(_PKG)
         assert len(ds.keywords) == 3
-        assert ds.keywords[0].get("en") == "labour"
-        assert ds.keywords[0].get("fr") == "travail"
+        assert ds.keywords[0].as_dict().get("en") == "labour"
+        assert ds.keywords[0].as_dict().get("fr") == "travail"
 
     def test_spatial_coverage(self):
         ds = _ckan_package_to_dataset(_PKG)
         assert len(ds.spatial_coverage) == 2
-        labels = [cov.label.get("und") for cov in ds.spatial_coverage if cov.label]
+        labels = [cov.label.as_dict().get("und") for cov in ds.spatial_coverage if cov.label]
         assert labels == ["Canada", "Provinces and territories"]
 
     def test_temporal_coverage(self):
@@ -454,8 +472,8 @@ class TestCkanPackageToDataset:
         ds = _ckan_package_to_dataset(_PKG)
         d = ds.distributions[0]
         assert d.title is not None
-        assert d.title.get("en") == "CSV Download"
-        assert d.title.get("fr") == "Téléchargement CSV"
+        assert d.title.as_dict().get("en") == "CSV Download"
+        assert d.title.as_dict().get("fr") == "Téléchargement CSV"
 
     def test_licence(self):
         ds = _ckan_package_to_dataset(_PKG)
@@ -562,7 +580,7 @@ class TestCkanClient:
             scheme = client.field_choices("geographic_region")
         assert scheme is not None
         assert scheme.uri == _REGION_SCHEME
-        assert scheme.label.get("fr") == "Nom de la région géographique"
+        assert scheme.label.as_dict().get("fr") == "Nom de la région géographique"
         assert list(scheme.concepts) == ["0", "10", "24"]
         assert scheme.concepts["10"].label == InternationalString(
             en="Newfoundland and Labrador", fr="Terre-Neuve-et-Labrador"
@@ -603,7 +621,19 @@ class TestIngestCkan:
         assert len(datasets) == 1
         retrieved = store.get(sc.OpenDataset, "abc-123")
         assert retrieved is not None
-        assert retrieved.title.get("en") == "Labour Force Survey"
+        assert retrieved.title.as_dict().get("en") == "Labour Force Survey"
+
+    def test_counts_the_malformed_tags_it_dropped(self, httpx_mock: HTTPXMock, caplog: pytest.LogCaptureFixture):
+        pkg = {**_PKG, "title_translated": {"en": "Labour Force Survey", "not a tag": "x"}}
+        httpx_mock.add_response(
+            url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=10&start=0",
+            json=_make_search_response([pkg], count=1),
+        )
+        _mock_schema(httpx_mock)
+        store = sc.Catalog().open()
+        with caplog.at_level(logging.WARNING, logger="statcatlib.sources.ckan"):
+            sc.ingest_ckan(store, _CKAN_BASE, limit=10)
+        assert f"{_CKAN_BASE}: dropped 1 texts with malformed language tags: 'not a tag' (1)" in caplog.text
 
     def test_returns_list_of_datasets(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(
@@ -723,7 +753,7 @@ class TestIngestRegionCodes:
     def test_the_choices_are_stored_as_a_concept_scheme(self, store: sc.Catalog):
         scheme = store.get_concept_scheme(_REGION_SCHEME)
         assert scheme is not None
-        assert scheme.concepts["10"].label.get("fr") == "Terre-Neuve-et-Labrador"
+        assert scheme.concepts["10"].label.as_dict().get("fr") == "Terre-Neuve-et-Labrador"
 
     def test_a_code_is_stored_as_the_region_uri_with_no_label(self, store: sc.Catalog):
         ds = store.get(sc.OpenDataset, "nl")

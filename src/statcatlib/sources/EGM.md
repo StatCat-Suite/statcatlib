@@ -115,8 +115,11 @@ Internal helpers that tests import directly:
   `_seq` accessors narrow each value and return `None` or an empty container
   on a type mismatch. Keep new CKAN fields behind these accessors rather than
   typing raw JSON as `Any`.
-- CKAN language tags are kept as the portal sends them, `en-t-fr` and
-  `fr-t-en` included. No field gets an English value the portal did not send:
+- Every CKAN language tag is kept, `en-t-fr` and `fr-t-en` included, in the
+  form `sdmxlib.normalize_tag` returns. `_lang_map` strips each tag and
+  replaces `_` with `-` first. A tag still malformed is dropped with a
+  WARNING and counted, and `ingest_ckan` logs the count per `base_url`; of two
+  tags that normalise to one, the first text is kept, with a WARNING. No field gets an English value the portal did not send:
   a plain string is stored under `und`, and a code stored as text (a subject
   slug, a frequency code, an organization slug used as its name) under `zxx`.
   Empty values are dropped, and a field with none left is empty (GH-84).

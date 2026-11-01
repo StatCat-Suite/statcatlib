@@ -14,14 +14,10 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from sdmxlib.bundle import Producer
-from sdmxlib.testing import Dim, Shape
 
 import statcatlib as sc
-from statcatlib.bundle import check_bundle, publish_bundle
 from statcatlib.store import schema
 from statcatlib.store.store import IncompatibleCatalogError
-from statcatlib.testing import synthetic_catalog
 
 pytestmark = pytest.mark.unit
 
@@ -137,26 +133,3 @@ class TestGuard:
             assert schema.get_schema_version(conn) == schema.SCHEMA_VERSION
         finally:
             conn.close()
-
-
-@pytest.fixture
-def unindexed_bundle(tmp_path: Path) -> Path:
-    path = tmp_path / "bundle"
-    synthetic_catalog(path, Shape(dimensions=(Dim(codes=4),), observations=10, languages=("en",)), index=False)
-    return path
-
-
-def test_publish_bundle_refuses_another_version(unindexed_bundle: Path) -> None:
-    """Publishing opens the catalog to describe it, so it meets the guard too."""
-    _set_statcat_version(unindexed_bundle / "meta.duckdb", _OTHER)
-    with pytest.raises(IncompatibleCatalogError, match=_OTHER):
-        publish_bundle(unindexed_bundle, bundle_id="synthetic", producer=Producer(name="tests", version="0"))
-
-
-def test_check_bundle_reports_another_version(unindexed_bundle: Path) -> None:
-    """The stamp changed after publishing, so sdmxlib's ``files`` check fails too; only statcat's is asserted."""
-    _set_statcat_version(unindexed_bundle / "meta.duckdb", _OTHER)
-    findings = [str(f) for f in check_bundle(unindexed_bundle, references=False).findings]
-    detail = f"statcat schema version {_OTHER}, not the one this build reads: rebuild the catalog"
-    assert f"[statcat] statcat._meta: {detail}" in findings
-    assert [f for f in findings if f.startswith("[statcat]")] == [f"[statcat] statcat._meta: {detail}"]

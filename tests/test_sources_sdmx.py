@@ -144,9 +144,9 @@ class TestIngestSdmx:
         registry, _ = _make_registry()
         result = sc.ingest_sdmx(store, registry)
         ds = result[0]
-        assert ds.title.get("en") == "Test Dataflow"
-        assert ds.title.get("fr") == "Flux de test"
-        assert ds.description.get("en") == "A test dataflow for integration testing"
+        assert ds.title.as_dict().get("en") == "Test Dataflow"
+        assert ds.title.as_dict().get("fr") == "Flux de test"
+        assert ds.description.as_dict().get("en") == "A test dataflow for integration testing"
 
     def test_dimension_names_populated(self):
         store = sc.Catalog().open()
@@ -154,7 +154,7 @@ class TestIngestSdmx:
         result = sc.ingest_sdmx(store, registry)
         ds = result[0]
         assert len(ds.dimension_names) == 2
-        assert {d.get("zxx") for d in ds.dimension_names} == {"GEO", "FREQ"}
+        assert {d.as_dict().get("zxx") for d in ds.dimension_names} == {"GEO", "FREQ"}
 
     def test_sdmxlib_tables_populated(self):
         store = sc.Catalog().open()
@@ -1027,7 +1027,7 @@ class TestDimensionLabels:
         store, ds = self._store(with_concepts=True)
         labels = {d.id: d.label for d in store.dimensions(ds).collect()}
         assert labels["GEO"] == InternationalString(en="Geography", fr="Géographie", de="Geografie")
-        assert store.dimensions(ds)["GEO"].collect().label.get("de") == "Geografie"
+        assert store.dimensions(ds)["GEO"].collect().label.as_dict().get("de") == "Geografie"
 
     def test_a_dimension_without_a_concept_name_is_labelled_by_its_id_as_a_code(self):
         store, ds = self._store(with_concepts=False)

@@ -1,9 +1,9 @@
 # Phase 2a: Catalogs of products and editions over sdmxlib 0.80
 
 *   **Author:** Gabriel Gellner
-*   **Status:** Reviewed. The EGM review (Stages 5–9, two resolution
-    rounds and one re-audit) is in `docs/design/egm/phase-2a-catalog-editions/`.
-    It awaits owner approval.
+*   **Status:** Approved, and merged in GH-100. The EGM review (Stages 5–9,
+    two resolution rounds and one re-audit) is in
+    `docs/design/egm/phase-2a-catalog-editions/`.
 *   **Date:** 2026-10-31
 *   **Issue:** GH-96. Implemented by GH-70. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#15.
@@ -79,7 +79,7 @@ and `journal/`. It left four questions to this design:
 
 - **Prune.** The RFC's Non-Goals place prune in Phases 4 to 6, but its
   decision 32 places a local prune in 2a. Settled by P7.
-- **The adoption gate.** RFC §11 has Phase 2a merge after sdmxlib-rest's
+- **The adoption gate.** RFC §11 had Phase 2a merge after sdmxlib-rest's
   adoption (sdmxlib-rest GH-81) ships. Spec §18.1 requires only that
   sdmxlib-rest has an adoption issue. GH-81 is that issue, so the spec's gate
   is met. Settled by P2.
@@ -445,7 +445,7 @@ advance, and the retry loop. Its producer is
     WorkingCopy on a Catalog from `create`. On a Catalog from `open`, it
     raises the named error of P4.
     - 2a writes data products only (`kind: "data"`). Structure products
-      arrive in Phase 4.
+      arrive in Phase 3.
     - If the product exists with a different `lifecycle`, it raises
       `InventoryRuleError(rule="lifecycle")` before it builds. A lifecycle
       change is a Phase 4 operation.

@@ -35,7 +35,6 @@ from sdmxlib import InternationalString
 from sdmxlib.model.registry import artefact_urn
 from sdmxlib.storage.schema import SCHEMA_VERSION as _SDMX_SCHEMA_VERSION
 
-from statcatlib.bundle import Embedded, normalize_lake_data_path, read_current_data_path
 from statcatlib.model.agents import Agent, ContactPoint
 from statcatlib.model.classification import Standard
 from statcatlib.model.dataset import (
@@ -745,7 +744,7 @@ def _istring_to_map(s: InternationalString | None) -> dict[str, str] | None:
     """Convert InternationalString to a Python dict for DuckDB MAP param."""
     if s is None:
         return None
-    return {lang: s[lang] for lang in s}
+    return s.as_dict()
 
 
 @define
@@ -1183,7 +1182,7 @@ def _contact_id(contact: ContactPoint) -> str:
     elif contact.phone:
         key = f"phone:{contact.phone}"
     elif contact.name:
-        key = "name:" + json.dumps(sorted(contact.name.items()), ensure_ascii=False)
+        key = "name:" + json.dumps(sorted(contact.name.as_dict().items()), ensure_ascii=False)
     else:
         msg = f"a contact point needs an email, url, phone or name to be stored: {contact!r}"
         raise ValueError(msg)
@@ -1990,6 +1989,7 @@ class QueryBuilder[T]:
             A new `QueryBuilder` with the search text applied. The original is
             unchanged — builders are immutable.
         """
+        lang = sdmxlib.normalize_tag(lang)
         return self._clone(text=text, search_lang=lang, search_operator=operator, search_fuzziness=fuzzy)
 
     def hybrid_search(self, text: str, *, lang: str = "en") -> QueryBuilder[T]:
@@ -2003,6 +2003,7 @@ class QueryBuilder[T]:
         Returns:
             A new `QueryBuilder` with the search text applied.
         """
+        lang = sdmxlib.normalize_tag(lang)
         return self._clone(hybrid_text=text, search_lang=lang)
 
     def sort_by(
@@ -2019,6 +2020,8 @@ class QueryBuilder[T]:
         language key (e.g. ``lang="en"``).  Raises ``ValueError`` if
         ``lang`` is omitted for a MAP column.
         """
+        if lang is not None:
+            lang = sdmxlib.normalize_tag(lang)
         new_sorts = [*self._sort_fields, _SortSpec(field=field, desc=desc, nulls=nulls, lang=lang)]
         return self._clone(sort_fields=new_sorts)
 
@@ -2078,6 +2081,8 @@ class QueryBuilder[T]:
         ``lang`` is required when selecting MAP columns (``title``,
         ``description``).  Raises ``ValueError`` for unknown column names.
         """
+        if lang is not None:
+            lang = sdmxlib.normalize_tag(lang)
         all_allowed = _SELECTABLE_COLUMNS | _MAP_SELECTABLE_COLUMNS
         for col in columns:
             if col not in all_allowed:
@@ -2094,6 +2099,8 @@ class QueryBuilder[T]:
 
         Terminals return bare values instead of objects or dicts.
         """
+        if lang is not None:
+            lang = sdmxlib.normalize_tag(lang)
         all_allowed = _SELECTABLE_COLUMNS | _MAP_SELECTABLE_COLUMNS
         if column not in all_allowed:
             msg = f"Invalid scalar column: {column!r}. Allowed: {sorted(all_allowed)}"
@@ -2359,6 +2366,7 @@ class CodesScope:
         nothing for FTS-only codelists), or ``"hybrid"`` (RRF merge of
         the two).
         """
+        lang = sdmxlib.normalize_tag(lang)
         store = self._store
         if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
@@ -2490,6 +2498,7 @@ class ConceptsScope:
         oversample: int = 200,
     ) -> SearchResult[Hit[ConceptHit]]:
         """Search concept rows; returns `Hit` objects wrapping `ConceptHit`."""
+        lang = sdmxlib.normalize_tag(lang)
         store = self._store
         if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
@@ -2621,6 +2630,7 @@ class ReferenceMetadataScope:
         scopes (``mode``, ``lang``, ``limit``, ``offset``, ``operator``,
         ``fuzzy``, ``rrf_k``, ``oversample``).
         """
+        lang = sdmxlib.normalize_tag(lang)
         store = self._store
         if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
@@ -2715,6 +2725,7 @@ class DatasetsScope:
         oversample: int = 200,
     ) -> SearchResult[Hit[BaseDataset]]:
         """Search datasets; returns `Hit` objects wrapping `BaseDataset`."""
+        lang = sdmxlib.normalize_tag(lang)
         store = self._store
         if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
@@ -2815,8 +2826,7 @@ class Catalog:
     _conn: duckdb.DuckDBPyConnection | None
     _owns_connection: bool
     _bundle_dir: Path | None
-    _data_path: str | Path | Embedded | None
-    _azure_credentials: dict[str, str] | None
+    _search_dir: Path | None
     _embedding_model: EmbeddingModel | None
     _embedding_metadata: EmbeddingMetadata | None
     _document_prefix: str
@@ -2831,8 +2841,6 @@ class Catalog:
         self,
         uri: str | Path = ":memory:",
         *,
-        data_path: str | Path | Embedded | None = None,
-        azure_credentials: dict[str, str] | None = None,
         embedding_model: EmbeddingModel | None = None,
         document_prefix: str = "",
         query_prefix: str = "",
@@ -2849,20 +2857,8 @@ class Catalog:
         Args:
             uri: ``":memory:"`` for an in-memory catalog (default), or a folder path for a persistent
                 catalog. Folder mode lays out ``<uri>/meta.duckdb`` (sentinel), ``<uri>/lake.ducklake``
-                (DuckLake catalog), ``<uri>/parquet/`` (DuckLake DATA_PATH — unless ``data_path``
-                overrides), and an optional ``<uri>/search/`` for the Lance index.
-            data_path: Override the DuckLake DATA_PATH (where observation parquet files live). Defaults to
-                ``<uri>/parquet/`` (folder mode). Pass a remote URI (e.g. ``abfss://...``) to keep
-                ``meta.duckdb`` + ``lake.ducklake`` local while landing observation parquet on object
-                storage. An explicit path takes precedence over the lake's stamp for this open
-                (DuckLake's ``OVERRIDE_DATA_PATH``) without rewriting it. Pass `statcatlib.bundle.Embedded` to
-                omit DATA_PATH from the ATTACH altogether and honour whatever the lake is stamped with.
-                Only valid in folder mode. No local ``parquet/`` directory is created either way — DuckLake
-                makes its own on first write.
-                Prefer `statcatlib.bundle.open_bundle`, which picks this for you from the bundle's layout.
-            azure_credentials: Forwarded to `sdmxlib.DuckDBDataStore`. Required when ``data_path`` is an
-                ``abfss://`` URI. See sdmxlib's ``DuckDBDataStore`` for accepted shapes
-                (``connection_string`` / service-principal / credential chain).
+                (DuckLake catalog), ``<uri>/parquet/`` (DuckLake DATA_PATH), and an optional
+                ``<uri>/search/`` for the Lance index.
             embedding_model: A sentence-transformers model (or any object exposing ``encode``) used to
                 embed text for semantic and hybrid search. When ``None`` (default) the catalog is BM25-only
                 and no ``embeddings.json`` sidecar is written.
@@ -2897,8 +2893,7 @@ class Catalog:
         self._cursor_local: threading.local = threading.local()
         self._owns_connection = True
         self._bundle_dir = None
-        self._data_path = data_path
-        self._azure_credentials = azure_credentials
+        self._search_dir = None
         self._embedding_model = embedding_model
         self._embedding_metadata = None
         self._document_prefix = document_prefix
@@ -2938,6 +2933,7 @@ class Catalog:
         if self._conn is not None:
             return self
         self._conn, self._bundle_dir = self._open_connection()
+        self._search_dir = self._bundle_dir / "search" if self._bundle_dir is not None else None
         self._owns_connection = True
         if self._embedding_model is not None and self._bundle_dir is None:
             msg = "embedding_model requires a folder-mode catalog (pass a path, not ':memory:')"
@@ -2958,20 +2954,13 @@ class Catalog:
         self._registry = self._open_registry(self._conn)
         # ATTACH the DuckLake sidecar (folder mode only — in-memory has no
         # lake). Sidecar layout because DuckDB rejects self-ATTACH; the
-        # ducklake catalog file sits next to meta.duckdb so the bundle is
-        # still one cleavage point on disk. DATA_PATH defaults to the
-        # in-bundle parquet/ directory but can be redirected (e.g. to an
-        # abfss:// URI) via ``data_path``.
+        # ducklake catalog file sits next to meta.duckdb, and its DATA_PATH
+        # is the catalog's own parquet/ directory.
         if self._bundle_dir is not None:
-            attach_url = f"'ducklake:{self._bundle_dir / 'lake.ducklake'}'"
-            data_path_literal, override = self._resolve_data_path(self._bundle_dir)
-            attach_options = self._attach_options(data_path_literal, override=override)
-
             self._data = sdmxlib.DuckDBDataStore.from_registry(
                 self._registry,
-                attach={"lake": (attach_url, attach_options)},
+                attach={"lake": self._lake_attach(self._bundle_dir)},
                 extensions=["ducklake"],
-                azure_credentials=self._azure_credentials,
             )
         else:
             # In-memory catalogs have no lake; write_observations is unavailable.
@@ -3042,14 +3031,10 @@ class Catalog:
         """Open the DuckDB connection and (for folder mode) prepare the bundle dir.
 
         Returns ``(connection, bundle_dir)`` where ``bundle_dir`` is
-        ``None`` for in-memory catalogs. The local ``parquet/`` directory
-        is only created when no ``data_path`` override is set — a remote
-        DATA_PATH must not leave a stray local directory behind.
+        ``None`` for in-memory catalogs. DuckLake creates ``parquet/`` on its
+        first write.
         """
         if str(self._uri) == ":memory:":
-            if self._data_path is not None:
-                msg = "data_path is not supported with an in-memory catalog (':memory:')"
-                raise ValueError(msg)
             return duckdb.connect(":memory:"), None
         # Absolute, so the stamp DuckLake records on first open is too: a
         # relative one is resolved against whatever the working directory is
@@ -3062,96 +3047,22 @@ class Catalog:
                 msg = f"read_only=True requires an existing catalog bundle; {meta_path} not found"
                 raise FileNotFoundError(msg)
             return duckdb.connect(str(meta_path), read_only=True), path
-        # Only the bundle directory is created. DuckLake makes its own
-        # DATA_PATH directory on first write, so creating ``parquet/`` here
-        # bought nothing and cost a real discriminator: an empty local
-        # ``parquet/`` beside a split bundle makes an unresolvable layout
-        # look co-located.
+        # Only the catalog directory is created. DuckLake makes its own
+        # DATA_PATH directory on first write.
         path.mkdir(parents=True, exist_ok=True)
         return duckdb.connect(str(path / "meta.duckdb")), path
 
-    def _attach_options(self, data_path_literal: str | None, *, override: bool = False) -> str:
-        """Render the DuckLake ATTACH option list.
+    def _lake_attach(self, bundle_dir: Path) -> tuple[str, str]:
+        """The DuckLake ATTACH URL and options for *bundle_dir*'s lake.
 
-        A ``None`` literal means honour the lake's own stamp: DuckLake only
-        compares (and only rejects) when DATA_PATH is supplied, so omitting
-        it is the one form that cannot disagree with what is stored.
-
-        An explicit ``data_path`` also sets ``OVERRIDE_DATA_PATH``: without
-        it DuckLake rejects any DATA_PATH not spelled exactly like the
-        stamp — even the same directory, absolute instead of relative —
-        so an explicit path could only ever restate the stamp. The
-        override is per-attach and never rewrites the stamp, and it is
-        allowed under ``READ_ONLY``. The default (``data_path=None``) stays
-        a checked ``<bundle>/parquet/``, so a plain ``Catalog(path)`` on a
-        split bundle still fails at ATTACH rather than reading an empty
-        local directory. *override* is the one exception, for a read-only
-        open of a catalog stamped with a relative path (`_resolve_data_path`).
+        DATA_PATH is ``<bundle_dir>/parquet/``, the absolute path `_open_connection`
+        spells, so it matches the path DuckLake recorded when it created the lake.
+        A read-only catalog attaches the lake ``READ_ONLY``.
         """
-        opts = [] if data_path_literal is None else [f"DATA_PATH '{data_path_literal}'"]
-        if data_path_literal is not None and (self._data_path is not None or override):
-            opts.append("OVERRIDE_DATA_PATH true")
+        options = [f"DATA_PATH '{bundle_dir / 'parquet'}/'"]
         if self._read_only:
-            opts.append("READ_ONLY")
-        return f"({', '.join(opts)})" if opts else ""
-
-    def _resolve_data_path(self, bundle_dir: Path) -> tuple[str | None, bool]:
-        """Return the DuckLake DATA_PATH literal, with trailing slash, and whether to override.
-
-        Remote URIs (``abfss://``, ``s3://``, ``gs://``, etc.) are passed
-        through verbatim; local paths are rendered as ``<bundle>/parquet/``
-        when no override is set, reconciled with the lake's stamp by
-        `_colocated_data_path`.
-
-        Returns `None` for `statcatlib.bundle.Embedded` — meaning "omit the
-        option entirely and let the lake's own stamp stand".
-        """
-        if isinstance(self._data_path, Embedded):
-            return None, False
-        if self._data_path is None:
-            return self._colocated_data_path(bundle_dir)
-        raw = str(self._data_path)
-        return (raw if raw.endswith("/") else f"{raw}/"), False
-
-    def _colocated_data_path(self, bundle_dir: Path) -> tuple[str, bool]:
-        """The DATA_PATH for a default open: ``<bundle>/parquet/``, as the lake spells it.
-
-        DuckLake compares DATA_PATH with its stamp as strings, so the same
-        directory spelled differently was refused (GH-23). The stamp is read
-        first:
-
-        - the same directory, spelled any way (a relative open, a symlink):
-          passed back verbatim, which DuckLake accepts unchanged;
-        - relative and ending in ``<bundle name>/parquet``, as
-          ``Catalog("relative")`` stamped it before GH-23: DuckLake resolves
-          it against the working directory, so it is replaced by the absolute
-          path. A read-write open rewrites the stamp, which repairs the
-          catalog; a read-only one overrides it for this attach only;
-        - anything else, a remote URI or another directory: the absolute
-          path, unchanged, so a split bundle still fails at ATTACH rather than
-          reading an empty local directory.
-        """
-        parquet = bundle_dir / "parquet"
-        target = f"{parquet}/"
-        lake = bundle_dir / "lake.ducklake"
-        if not lake.exists():
-            return target, False
-        try:
-            stamp = read_current_data_path(lake)
-        except duckdb.Error, FileNotFoundError:
-            return target, False
-        stamped = Path(stamp)
-        if "://" in stamp or stamp == target:
-            return target, False
-        if stamped.is_absolute():
-            return (stamp, False) if stamped.resolve() == parquet.resolve() else (target, False)
-        colocated = stamped.name == "parquet" and stamped.parent.name in {"", bundle_dir.name}
-        if not colocated:
-            return target, False
-        if self._read_only:
-            return target, True
-        normalize_lake_data_path(lake, target)
-        return target, False
+            options.append("READ_ONLY")
+        return f"'ducklake:{bundle_dir / 'lake.ducklake'}'", f"({', '.join(options)})"
 
     @classmethod
     def from_connection(
@@ -3162,6 +3073,7 @@ class Catalog:
         document_prefix: str = "",
         query_prefix: str = "",
         read_only: bool = False,
+        search_dir: Path | None = None,
     ) -> Self:
         """Wrap an existing DuckDB connection.
 
@@ -3184,6 +3096,9 @@ class Catalog:
             document_prefix: Prefix for documents embedded into the index.
             query_prefix: Prefix for queries embedded against the index.
             read_only: Open the catalog schema without creating it.
+            search_dir: Private. The ``search/`` directory of the edition
+                whose builder owns *conn*, so `build_index` and
+                `statcatlib.bundle.catalog_section` work on this catalog.
 
         Returns:
             A catalog over *conn*, already open.
@@ -3199,8 +3114,7 @@ class Catalog:
         instance._conn = conn
         instance._owns_connection = False
         instance._bundle_dir = None
-        instance._data_path = None
-        instance._azure_credentials = None
+        instance._search_dir = search_dir
         instance._embedding_model = None
         instance._embedding_metadata = None
         instance._document_prefix = document_prefix
@@ -3221,6 +3135,8 @@ class Catalog:
         # extensions/ATTACH; lake reads/writes only work if the caller has
         # already ATTACHed a ducklake.
         instance._data = sdmxlib.DuckDBDataStore.from_registry(instance._registry)
+        if search_dir is not None:
+            instance._init_lance()
         return instance
 
     def _init_lance(self) -> None:
@@ -3229,8 +3145,9 @@ class Catalog:
         Silently skips if lancedb is not installed — search methods will
         raise ``RuntimeError`` when invoked without the index.
         """
-        assert self._bundle_dir is not None  # noqa: S101
-        search_dir = self._bundle_dir / "search"
+        search_dir = self._search_dir
+        if search_dir is None:
+            return
         if self._read_only and not search_dir.exists():
             # Read-only catalogs must not create the search dir. Leaving
             # _lance unset means search APIs raise the usual "no index"
@@ -5101,10 +5018,10 @@ class Catalog:
         )
         self._embedding_metadata = meta
 
-        if self._bundle_dir is None:
+        if self._search_dir is None:
             return
         _write_embeddings_meta(
-            self._bundle_dir / "search",
+            self._search_dir,
             model_name=meta.model,
             document_prefix=meta.document_prefix,
             query_prefix=meta.query_prefix,
@@ -6364,6 +6281,7 @@ class Catalog:
             per_kind_oversample: Hits to take from each kind before merging, so
                 a kind that ranks poorly overall still gets considered.
         """
+        lang = sdmxlib.normalize_tag(lang)
         if self._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
         # Each kind delegates to its typed scope's bm25 ranking; vector
@@ -6475,6 +6393,7 @@ class Catalog:
 
     def agent_labels(self, lang: str = "en") -> dict[str, str]:
         """Return ``{agent_id: display_name}`` for the publisher facet sidebar."""
+        lang = sdmxlib.normalize_tag(lang)
         rows = self._c.execute(
             "SELECT id, name[?] FROM agent WHERE name[?] IS NOT NULL",
             [lang, lang],
@@ -6483,6 +6402,7 @@ class Catalog:
 
     def concept_labels(self, lang: str = "en", *, scheme_uri: str | None = None) -> dict[str, str]:
         """Return ``{concept_uri: display_label}`` for the theme/subject facet sidebar."""
+        lang = sdmxlib.normalize_tag(lang)
         if scheme_uri is not None:
             rows = self._c.execute(
                 "SELECT uri, label[?] FROM concept WHERE label[?] IS NOT NULL AND in_scheme = ?",
@@ -6508,6 +6428,7 @@ class Catalog:
         carry different labels gets the least, so the result is the same on
         every call.
         """
+        lang = sdmxlib.normalize_tag(lang)
         # The inner SELECT names the COALESCE results so the outer GROUP BY
         # aggregates plain columns: DuckDB rejects a COALESCE built from
         # grouped MAP-indexed expressions.
@@ -7188,6 +7109,7 @@ class Catalog:
         Joins catalog ``dataset`` -> ``sdmx.dataflow`` -> ``sdmx.dsd_component`` ->
         ``sdmx.code`` entirely in SQL.
         """
+        lang = sdmxlib.normalize_tag(lang)
         try:
             rows = self.connection.execute(
                 """
