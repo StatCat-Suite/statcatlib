@@ -1,21 +1,23 @@
 """statcatlib command-line interface.
 
-Top-level entry point installed as the ``statcatlib`` console script. Today's
-single command is `build_index`, which rebuilds a bundle's
-``search/`` LanceDB index. The CLI is intentionally thin — all real work
-lives in `statcatlib.Catalog.build_index`.
+Top-level entry point installed as the ``statcat`` console script. Today's
+single command is `build_index`, which builds the search index of a
+product's working copy. The CLI is intentionally thin — all real work lives
+in `statcatlib.WorkingCopy.build_index`.
 
 Requires the ``[search]`` extra (typer + sentence-transformers + lancedb).
 """
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import sys
 import time
 import warnings
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
@@ -33,6 +35,9 @@ from rich.progress import (
 
 import statcatlib as sc
 from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES
+
+if TYPE_CHECKING:
+    from sdmxlib.edition import Lifecycle
 
 __all__ = ["app", "main"]
 
@@ -86,7 +91,7 @@ def _parse_reference_metadata_blend(raw: str) -> sc.ReferenceMetadataBlend:
 
 app = typer.Typer(
     name="statcat",
-    help="Operational tools for statcatlib Catalog bundles.",
+    help="Operational tools for statcatlib catalogs.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -103,9 +108,9 @@ def _main() -> None:
 
     Without an explicit callback, Typer treats a single-command app as
     that command and the command name becomes implicit — so
-    ``statcat build-index <bundle>`` would parse ``build-index`` as the
-    BUNDLE argument. This empty callback keeps the subcommand seam in
-    place even while ``build-index`` is the only command.
+    ``statcat build-index <catalog> <product>`` would parse ``build-index``
+    as the CATALOG argument. This empty callback keeps the subcommand seam
+    in place even while ``build-index`` is the only command.
     """
 
 
@@ -183,14 +188,59 @@ def _load_encoder(model_name: str, device: str | None) -> EmbeddingModel:
     return model
 
 
+class _Lifecycle(enum.StrEnum):
+    """The ``--lifecycle`` choices: a product's lifecycle, as `Product.working_copy` takes it."""
+
+    REVISABLE = "revisable"
+    FINAL = "final"
+
+
+def _require_catalog(catalog: Path) -> None:
+    """Exit with code 1 unless *catalog* holds ``catalog.json``; nothing is created."""
+    if not (catalog / "catalog.json").is_file():
+        console.print(
+            f"[red]Not a statcatlib catalog:[/] {catalog}\n"
+            f"Expected to find [bold]catalog.json[/] at the top level. Create one with "
+            f"[bold]Catalog.create(path)[/]."
+        )
+        raise typer.Exit(code=1)
+
+
+def _resume(catalog: Path, product: str, lifecycle: Lifecycle) -> tuple[sc.Catalog, sc.WorkingCopy]:
+    """Open *catalog* for writing and resume *product*'s working copy, or exit with code 1."""
+    cat = sc.Catalog.create(catalog, exist_ok=True)
+    try:
+        return cat, cat.product(product).working_copy(resume=True, lifecycle=lifecycle)
+    except sc.InventoryRuleError as exc:
+        cat.close()
+        console.print(f"[red]Cannot resume the working copy:[/] {exc}. Pass --lifecycle to match.")
+        raise typer.Exit(code=1) from None
+    except FileNotFoundError:
+        cat.close()
+        console.print(
+            f"[red]No working copy to index:[/] {product} has no unsealed edition in {catalog}. "
+            f"Start one with [bold]cat.product({product!r}).working_copy()[/] and ingest into it."
+        )
+        raise typer.Exit(code=1) from None
+
+
 @app.command("build-index")
 def build_index(
-    bundle: Path = typer.Argument(
+    catalog: Path = typer.Argument(
         ...,
-        help="Path to a statcatlib Catalog bundle (the folder containing meta.duckdb).",
+        help="Path to a statcatlib catalog (the directory holding catalog.json).",
         exists=True,
         file_okay=False,
         dir_okay=True,
+    ),
+    product: str = typer.Argument(
+        ...,
+        help="The product whose working copy to index.",
+    ),
+    lifecycle: _Lifecycle = typer.Option(
+        _Lifecycle.REVISABLE,
+        "--lifecycle",
+        help="The product's lifecycle, as it was recorded.",
     ),
     model: str = typer.Option(
         _DEFAULT_MODEL,
@@ -249,7 +299,7 @@ def build_index(
         help=(
             "Blend an SDMX MetadataSet attribute into each code's search "
             "text, 'ATTRIBUTE_PATH[:max_chars]' (repeatable). "
-            "E.g. 'FOOTNOTE_TEXT:240'. Requires the bundle to carry "
+            "E.g. 'FOOTNOTE_TEXT:240'. Requires the edition to carry "
             "reference-metadata tables, else build fails fast."
         ),
     ),
@@ -278,12 +328,18 @@ def build_index(
         ),
     ),
 ) -> None:
-    """Build or rebuild the LanceDB vector index for a Catalog bundle.
+    """Build the search index of a product's working copy.
 
-    The bundle's ``search/embeddings.json`` sidecar is updated with the
-    chosen model, prefixes, embedding dimensionality, and row counts so
+    It resumes the product's unsealed edition: one an ingest started and has
+    not sealed. The edition's ``search/embeddings.json`` sidecar records the
+    chosen model, prefixes, embedding dimensionality, and row counts, so
     that a query-side client can call
-    `statcatlib.Catalog.check_index_compatible` to validate its encoder.
+    `statcatlib.EditionView.check_index_compatible` to validate its encoder.
+    The working copy stays unsealed. `statcatlib.WorkingCopy.seal` rebuilds
+    the index with the arguments of the last ``build_index`` call made on
+    that working copy object, so a seal in a later process rebuilds with the
+    defaults: call ``wc.build_index(...)`` with these options before
+    ``wc.seal()`` to seal this index.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -291,12 +347,7 @@ def build_index(
         datefmt="%H:%M:%S",
     )
 
-    if not (bundle / "meta.duckdb").is_file():
-        console.print(
-            f"[red]Not a statcatlib Catalog bundle:[/] {bundle}\n"
-            f"Expected to find [bold]meta.duckdb[/] at the top level."
-        )
-        raise typer.Exit(code=1)
+    _require_catalog(catalog)
 
     if embed_codes and not include_codes:
         console.print("[yellow]--embed-codes implies --include-codes; enabling.[/]")
@@ -311,7 +362,7 @@ def build_index(
     doc_pref, qry_pref = _resolve_prefixes(model, document_prefix, query_prefix)
 
     console.print(
-        f"[dim]bundle:[/] {bundle}\n"
+        f"[dim]catalog:[/] {catalog}  [dim]product:[/] {product}\n"
         f"[dim]model:[/]  {model}  ([dim]device={device}, batch_size={batch_size}[/])\n"
         f"[dim]prefixes:[/] document={doc_pref!r}  query={qry_pref!r}"
     )
@@ -328,8 +379,8 @@ def build_index(
     with console.status(f"[dim]Loading encoder {model!r}…[/]"):
         encoder = _load_encoder(model, device)
 
-    with console.status("[dim]Opening catalog…[/]"):
-        store = sc.Catalog(str(bundle)).open()
+    with console.status("[dim]Opening the working copy…[/]"):
+        cat, store = _resume(catalog, product, "final" if lifecycle is _Lifecycle.FINAL else "revisable")
 
     progress = Progress(
         SpinnerColumn(),
@@ -371,16 +422,20 @@ def build_index(
         )
 
     elapsed = time.monotonic() - start
-    meta = store.embedding_metadata
+    meta = store.view().embedding_metadata
     dim = meta.embedding_dim if meta is not None else None
     dim_str = f"dim={dim}" if dim is not None else "dim=?"
+    edition = store.edition_id
+    store.close()
+    cat.close()
     console.print(
-        f"[bold green]Done[/] — [green]{n:,}[/] datasets indexed ([{dim_str}], {elapsed:.1f}s) → {bundle / 'search'}"
+        f"[bold green]Done[/] — [green]{n:,}[/] datasets indexed ([{dim_str}], {elapsed:.1f}s) "
+        f"in the working copy {edition} of {product}"
     )
 
 
 def main() -> None:
-    """Console-script entry point for ``statcatlib``."""
+    """Console-script entry point for ``statcat``."""
     app()
 
 

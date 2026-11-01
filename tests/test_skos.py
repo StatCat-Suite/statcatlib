@@ -4,6 +4,7 @@ import pytest
 from sdmxlib import InternationalString
 
 import statcatlib as sc
+from tests.conftest import ScratchStore, cursor_of, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -133,8 +134,8 @@ class TestIsConceptInScheme:
 
 
 @pytest.fixture
-def store() -> sc.Catalog:
-    return sc.Catalog().open()
+def store() -> ScratchStore:
+    return open_scratch()
 
 
 def _make_scheme(uri: str = SCHEME_URI) -> sc.ConceptScheme:
@@ -244,8 +245,7 @@ class TestDatasetWithConceptRefs:
             themes=[sc.ConceptRef(uri="urn:external:concept/FOO")],
         )
         store.put(ds)
-        row = store.connection.execute("SELECT COUNT(*) FROM statcat.concept").fetchone()
-        assert row[0] == 0
+        assert cursor_of(store).execute("SELECT COUNT(*) FROM statcat.concept").fetchone() == (0,)
 
     def test_subject_refs(self, store):
         store.put(_make_scheme())

@@ -26,8 +26,8 @@ from sdmxlib.model.istring import InternationalString
 
 import statcatlib as sc
 from statcatlib.sources.sdmx import ingest_sdmx
-from statcatlib.store.store import SEARCH_CONTEXT_ANNOTATION_TYPE, SEARCH_EXCLUDE_ANNOTATION_TYPE, Catalog
-from tests.conftest import concept_of
+from statcatlib.store.store import SEARCH_CONTEXT_ANNOTATION_TYPE, SEARCH_EXCLUDE_ANNOTATION_TYPE
+from tests.conftest import ScratchStore, concept_of, cursor_of, open_scratch
 
 pytestmark = pytest.mark.integration
 
@@ -115,8 +115,8 @@ def _make_hierarchical_registry() -> InMemoryRegistry:
     return registry
 
 
-def _store_with_sdmx(tmp_path: pathlib.Path | None = None) -> Catalog:
-    store = Catalog(tmp_path / "catalog").open() if tmp_path is not None else Catalog().open()
+def _store_with_sdmx(tmp_path: pathlib.Path | None = None) -> ScratchStore:
+    store = open_scratch(None if tmp_path is None else tmp_path / "catalog")
     ingest_sdmx(store, _make_hierarchical_registry())
     return store
 
@@ -149,24 +149,24 @@ class TestMaxCodesWarning:
         store = _store_with_sdmx()
         # CL_GEO and CL_FREQ have 2 codes each; cap=1 drops both.
         with pytest.warns(UserWarning, match="skipped 2 codelist"):
-            store._collect_code_texts(max_codes_per_codelist=1)
+            store._store._collect_code_texts(max_codes_per_codelist=1)
 
     def test_no_warning_when_all_codelists_fit(self) -> None:
         store = _store_with_sdmx()
         # Cap of 500 (default) leaves both 2-code codelists in scope.
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            store._collect_code_texts(max_codes_per_codelist=500)
+            store._store._collect_code_texts(max_codes_per_codelist=500)
 
 
 class TestCodelistUrnsFilter:
     def test_filter_narrows_collected_rows(self) -> None:
         store = _store_with_sdmx()
         # Discover the CL_FREQ URN from the registry; filter to it alone.
-        cl_urn = store._c.execute("SELECT codelist_urn FROM sdmx.code WHERE code_id = 'A' LIMIT 1").fetchone()
+        cl_urn = cursor_of(store).execute("SELECT codelist_urn FROM sdmx.code WHERE code_id = 'A' LIMIT 1").fetchone()
         assert cl_urn is not None
         freq_urn = cl_urn[0]
-        items = store._collect_code_texts(codelist_urns=[freq_urn])
+        items = store._store._collect_code_texts(codelist_urns=[freq_urn])
         assert items, "filter should not produce an empty result for a valid codelist"
         assert all(r["codelist_urn"] == freq_urn for r in items)
         # GEO codes must be absent.
@@ -174,7 +174,7 @@ class TestCodelistUrnsFilter:
 
     def test_filter_none_indexes_all(self) -> None:
         store = _store_with_sdmx()
-        all_items = store._collect_code_texts()
+        all_items = store._store._collect_code_texts()
         code_ids = {r["code_id"] for r in all_items}
         assert {"CA", "ON", "A", "M"}.issubset(code_ids)
 
@@ -182,13 +182,13 @@ class TestCodelistUrnsFilter:
 class TestAltLabelBlending:
     def test_alt_label_appears_in_text_by_default(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         ontario = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         assert "Province of Ontario" in ontario["text"]
 
     def test_alt_label_suppressed_when_disabled(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts(include_alt_labels=False)
+        items = store._store._collect_code_texts(include_alt_labels=False)
         ontario = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         assert "Province of Ontario" not in ontario["text"]
         # Base prefLabel still present.
@@ -199,7 +199,7 @@ class TestAltLabelBlending:
         reading is "applies to all of them". Catalogs published before
         localised altLabels existed must not lose their synonyms."""
         store = _store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         assert "Province of Ontario" in on_en["text"]
@@ -210,7 +210,7 @@ class TestAltLabelBlending:
         alone — the point of the change: an English synonym in a French
         row pollutes the French corpus and dilutes its term statistics."""
         store = _store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         ca_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "CA")
         ca_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "CA")
         assert "the Dominion" in ca_en["text"]
@@ -220,14 +220,14 @@ class TestAltLabelBlending:
 
     def test_localised_alt_labels_are_suppressed_when_disabled(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts(include_alt_labels=False)
+        items = store._store._collect_code_texts(include_alt_labels=False)
         ca_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "CA")
         assert "le Dominion" not in ca_fr["text"]
         assert "Canada" in ca_fr["text"]
 
 
 def _attach_footnote(
-    store: Catalog,
+    store: ScratchStore,
     *,
     code_id: str,
     set_urn: str,
@@ -243,12 +243,16 @@ def _attach_footnote(
     fixture pinned to the storage shape the loader actually queries.
     Pass ``i18n`` for a localised value or ``scalar`` for an untagged one.
     """
-    row = store._c.execute(
-        "SELECT code_urn FROM sdmx.code WHERE code_id = ? LIMIT 1",
-        [code_id],
-    ).fetchone()
+    row = (
+        cursor_of(store)
+        .execute(
+            "SELECT code_urn FROM sdmx.code WHERE code_id = ? LIMIT 1",
+            [code_id],
+        )
+        .fetchone()
+    )
     assert row is not None, f"no code {code_id!r} in fixture"
-    store._c.execute(
+    cursor_of(store).execute(
         """
         INSERT INTO sdmx.metadata_target (set_urn, ordinal, target_urn)
         VALUES (?, ?, ?)
@@ -256,7 +260,7 @@ def _attach_footnote(
         """,
         [set_urn, sibling_index, row[0]],
     )
-    store._c.execute(
+    cursor_of(store).execute(
         """
         INSERT INTO sdmx.metadata_value
             (set_urn, attribute_path, sibling_index, ordinal, value_kind, scalar, i18n)
@@ -292,7 +296,7 @@ class TestReferenceMetadataBlend:
             set_urn="urn:test:set:FOOTNOTES",
             i18n={"en": "committed to protect privacy", "fr": "engagé à protéger la vie privée"},
         )
-        items = store._collect_code_texts(reference_metadata_blends=self._BLEND)
+        items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         assert "committed to protect privacy" in on_en["text"]
@@ -311,7 +315,7 @@ class TestReferenceMetadataBlend:
             set_urn="urn:test:set:SCALAR",
             scalar="https://example.org/notes/2021",
         )
-        items = store._collect_code_texts(reference_metadata_blends=self._BLEND)
+        items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         assert "https://example.org/notes/2021" in on_en["text"]
@@ -328,7 +332,7 @@ class TestReferenceMetadataBlend:
             i18n={"en": "localised note", "fr": "note localisée"},
             scalar="stale fallback",
         )
-        items = store._collect_code_texts(reference_metadata_blends=self._BLEND)
+        items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         assert "localised note" in on_en["text"]
@@ -345,7 +349,7 @@ class TestReferenceMetadataBlend:
             set_urn="urn:test:set:EN_ONLY",
             i18n={"en": "english only note"},
         )
-        items = store._collect_code_texts(reference_metadata_blends=self._BLEND)
+        items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         assert "english only note" in on_en["text"]
@@ -361,7 +365,7 @@ class TestReferenceMetadataBlend:
             i18n={"en": "A" * 400, "fr": "B" * 400},
         )
         blends = (sc.ReferenceMetadataBlend(attribute_path="FOOTNOTE_TEXT", max_chars=10),)
-        items = store._collect_code_texts(reference_metadata_blends=blends)
+        items = store._store._collect_code_texts(reference_metadata_blends=blends)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         assert "A" * 10 in on_en["text"]
@@ -376,7 +380,7 @@ class TestReferenceMetadataBlend:
             set_urn="urn:test:set:ONLY_ON",
             i18n={"en": "ontario note", "fr": "note ontarienne"},
         )
-        items = store._collect_code_texts(reference_metadata_blends=self._BLEND)
+        items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         ca_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "CA")
         assert "ontario note" not in ca_en["text"]
         assert "Canada" in ca_en["text"]
@@ -392,7 +396,7 @@ class TestSearchContextBlending:
 
     def test_context_appears_in_text_by_default(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         assert "Geographic areas" in on_en["text"]
         # Leaf label still leads the text (a bare "Ontario" query stays correct).
@@ -400,7 +404,7 @@ class TestSearchContextBlending:
 
     def test_context_is_per_language_not_smeared(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         # Each language gets its OWN-language context, with no cross-leak.
@@ -410,7 +414,7 @@ class TestSearchContextBlending:
 
     def test_context_suppressed_when_types_empty(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts(context_annotation_types=())
+        items = store._store._collect_code_texts(context_annotation_types=())
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         assert "Geographic areas" not in on_en["text"]
         # Base prefLabel + altLabel are unaffected.
@@ -419,14 +423,14 @@ class TestSearchContextBlending:
 
     def test_codes_without_context_annotation_unaffected(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         # CA carries no searchContext — its text is just the label path.
         ca_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "CA")
         assert "Canada" in ca_en["text"]
         assert "Geographic areas" not in ca_en["text"]
 
 
-def _store_with_excluded_leaf() -> Catalog:
+def _store_with_excluded_leaf() -> ScratchStore:
     """GEO codelist whose leaf ``DB1`` carries ``statcat:searchExclude``."""
     geo_cl = Codelist(
         id="CL_GEO_X",
@@ -452,7 +456,7 @@ def _store_with_excluded_leaf() -> Catalog:
     registry = InMemoryRegistry()
     for artefact in (geo_cl, dsd, flow):
         registry.add(artefact)
-    store = Catalog().open()
+    store = open_scratch()
     ingest_sdmx(store, registry)
     return store
 
@@ -461,24 +465,24 @@ class TestSearchExclude:
     """statcat:searchExclude keeps a code out of the corpus, not out of the catalog."""
 
     def test_excluded_code_gets_no_rows_by_default(self) -> None:
-        items = _store_with_excluded_leaf()._collect_code_texts()
+        items = _store_with_excluded_leaf()._store._collect_code_texts()
         assert {r["code_id"] for r in items} == {"CA"}
         assert {r["lang"] for r in items} == {"en", "fr"}
 
     def test_exclusion_disabled_when_types_empty(self) -> None:
-        items = _store_with_excluded_leaf()._collect_code_texts(exclude_annotation_types=())
+        items = _store_with_excluded_leaf()._store._collect_code_texts(exclude_annotation_types=())
         assert {r["code_id"] for r in items} == {"CA", "DB1"}
 
     def test_excluded_code_stays_in_the_structural_tables(self) -> None:
         store = _store_with_excluded_leaf()
-        row = store._c.execute("SELECT parent_id FROM sdmx.code WHERE code_id = 'DB1'").fetchone()
+        row = cursor_of(store).execute("SELECT parent_id FROM sdmx.code WHERE code_id = 'DB1'").fetchone()
         assert row == ("CA",)
 
 
 class TestHierarchyFields:
     def test_parent_id_and_depth_populated_by_default(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts()
+        items = store._store._collect_code_texts()
         ontario = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         canada = next(r for r in items if r["lang"] == "en" and r["code_id"] == "CA")
         assert ontario["parent_id"] == "CA"
@@ -488,7 +492,7 @@ class TestHierarchyFields:
 
     def test_hierarchy_fields_can_be_suppressed(self) -> None:
         store = _store_with_sdmx()
-        items = store._collect_code_texts(carry_hierarchy_fields=False)
+        items = store._store._collect_code_texts(carry_hierarchy_fields=False)
         ontario = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         assert ontario["parent_id"] == ""
         assert ontario["depth"] == 0

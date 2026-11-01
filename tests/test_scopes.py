@@ -9,7 +9,7 @@ from sdmxlib.model.datastructure import DataStructure, Dimension
 from sdmxlib.model.in_memory_registry import InMemoryRegistry
 
 import statcatlib as sc
-from tests.conftest import concept_of
+from tests.conftest import ScratchStore, concept_of, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -28,9 +28,9 @@ def _concept_uri(scheme_uri: str, notation: str) -> str:
 
 
 @pytest.fixture
-def scheme_store() -> sc.Catalog:
+def scheme_store() -> ScratchStore:
     """Store with a concept scheme and datasets that cite concepts from it."""
-    s = sc.Catalog().open()
+    s = open_scratch()
     scheme = sc.ConceptScheme(
         uri=_SCHEME_URI,
         label=_i("Test Themes"),
@@ -211,8 +211,8 @@ class TestConceptScope:
 
 
 class TestMultiSchemeScopes:
-    def _build_store(self) -> sc.Catalog:
-        s = sc.Catalog().open()
+    def _build_store(self) -> ScratchStore:
+        s = open_scratch()
         statcan = sc.ConceptScheme(
             uri=_STATCAN_URI,
             label=_i("StatCan Themes"),
@@ -419,7 +419,7 @@ class TestScopeExports:
 # ---------------------------------------------------------------------------
 
 
-def _make_sdmx_store() -> sc.Catalog:
+def _make_sdmx_store() -> ScratchStore:
     """Store with two dataflows sharing a GEO codelist, different FREQ codelists."""
     geo_cl = Codelist(
         id="CL_GEO",
@@ -467,18 +467,18 @@ def _make_sdmx_store() -> sc.Catalog:
     for obj in [geo_cl, freq_a, freq_q, dsd1, dsd2, flow1, flow2]:
         registry.add(obj)
 
-    store = sc.Catalog().open()
+    store = open_scratch()
     sc.ingest_sdmx(store, registry)
     return store
 
 
 class TestCodelistsScopeProperty:
     def test_is_codelists_scope(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         assert isinstance(store.codelists, sc.CodelistsScope)
 
     def test_getitem_returns_codelist_scope(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         scope = store.codelists["urn:test"]
         assert isinstance(scope, sc.CodelistScope)
         assert scope.urn == "urn:test"
@@ -500,7 +500,7 @@ class TestCodelistsScopeProperty:
         assert len(items) == 3
 
     def test_empty_store_returns_empty(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         assert len(store.codelists) == 0
         assert store.codelists.collect() == []
 
@@ -563,7 +563,7 @@ class TestCodelistsScopeEnrich:
         registry = InMemoryRegistry()
         for obj in [geo, dsd, flow]:
             registry.add(obj)
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_sdmx(store, registry)
         results = store.codelists.filter(text_contains="Geographie").enrich(n=sc.each("datasets").count()).rows()
         assert any("Géographie" in str(r["label"] or "") for r in results)
@@ -582,7 +582,7 @@ class TestCodelistsScopeEnrich:
         registry = InMemoryRegistry()
         for obj in [cl, dsd, flow]:
             registry.add(obj)
-        store = sc.Catalog().open()
+        store = open_scratch()
         sc.ingest_sdmx(store, registry)
         results = store.codelists.filter(text_contains="Sub area").enrich(n=sc.each("datasets").count()).rows()
         assert any("Sub-area" in str(r["label"] or "") for r in results)
@@ -712,7 +712,7 @@ class TestBatchLabels:
         assert labels["CA"] == "Canada"
 
     def test_codelist_scope_batch_labels_empty_store(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         labels = store.codelist(self.GEO_URN).batch_labels(["CA"])
         assert labels == {"CA": "CA"}  # fallback on CatalogException
 
@@ -750,7 +750,7 @@ class TestBatchLabels:
         assert labels[(self.GEO_URN, "CA")] == "Canada"
 
     def test_codelists_scope_batch_labels_empty_store(self):
-        store = sc.Catalog().open()
+        store = open_scratch()
         pairs = [(self.GEO_URN, "CA")]
         labels = store.codelists.batch_labels(pairs)
         assert labels[(self.GEO_URN, "CA")] == "CA"

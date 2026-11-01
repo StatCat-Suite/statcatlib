@@ -12,6 +12,8 @@ import pytest
 from sdmxlib import InternationalString
 
 import statcatlib as sc
+from statcatlib.store.store import _Store
+from tests.conftest import ScratchStore, open_scratch, seal_and_view
 
 pytestmark = pytest.mark.unit
 
@@ -33,7 +35,7 @@ def _ds(identifier: str) -> sc.OpenDataset:
     )
 
 
-def _store_with_chain() -> sc.Catalog:
+def _store_with_chain() -> ScratchStore:
     """Store with a four-node lineage chain: RAW → CLEAN → DERIVED → REPORT.
 
     RAW is the root (no lineage).
@@ -41,7 +43,7 @@ def _store_with_chain() -> sc.Catalog:
     DERIVED was derived from CLEAN.
     REPORT was derived from DERIVED.
     """
-    store = sc.Catalog().open()
+    store = open_scratch()
     for ds_id in ["RAW", "CLEAN", "DERIVED", "REPORT"]:
         store.put(_ds(ds_id))
 
@@ -58,7 +60,7 @@ def _store_with_chain() -> sc.Catalog:
 
 class TestAddLineage:
     def test_minimal(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SOURCE", "DS1", "derived_from")
         rows = store.dataset("DS1").lineage_records()
@@ -68,7 +70,7 @@ class TestAddLineage:
         assert rows[0]["relationship"] == "derived_from"
 
     def test_all_fields(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         at = datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC)
         store.add_lineage(
@@ -92,7 +94,7 @@ class TestAddLineage:
         assert r["notes"] == "Extracted from source documentation"
 
     def test_default_confidence_is_asserted(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SRC", "DS1", "derived_from")
         rows = store.dataset("DS1").lineage_records()
@@ -100,7 +102,7 @@ class TestAddLineage:
 
     def test_idempotent_upsert(self) -> None:
         """Re-recording the same (source, target, relationship) triple upserts."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SRC", "DS1", "derived_from", notes="v1")
         store.add_lineage("SRC", "DS1", "derived_from", notes="v2")
@@ -110,7 +112,7 @@ class TestAddLineage:
 
     def test_multiple_sources_same_target(self) -> None:
         """A target may have multiple source edges (data fusion)."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SRC1", "DS1", "derived_from")
         store.add_lineage("SRC2", "DS1", "derived_from")
@@ -121,7 +123,7 @@ class TestAddLineage:
 
     def test_different_relationship_types_are_separate_rows(self) -> None:
         """Same source+target but different relationship creates a new row."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SRC", "DS1", "derived_from")
         store.add_lineage("SRC", "DS1", "revision_of")
@@ -131,13 +133,21 @@ class TestAddLineage:
         assert rels == {"derived_from", "revision_of"}
 
     def test_all_relationship_types_accepted(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
-        for rel in sc.Catalog.LINEAGE_RELATIONSHIPS:
+        for rel in _Store.LINEAGE_RELATIONSHIPS:
             store.add_lineage("SRC", "DS1", rel)
         rows = store.dataset("DS1").lineage_records()
         stored_rels = {r["relationship"] for r in rows}
-        assert stored_rels == set(sc.Catalog.LINEAGE_RELATIONSHIPS)
+        assert stored_rels == set(_Store.LINEAGE_RELATIONSHIPS)
+
+    def test_sealed_edition_keeps_edges_and_refuses_new_ones(self) -> None:
+        """The seal carries the edges into the edition; a sealed working copy refuses `add_lineage`."""
+        store = _store_with_chain()
+        view = seal_and_view(store)
+        assert [r["source_id"] for r in view.dataset("CLEAN").lineage_records(role="target")] == ["RAW"]
+        with pytest.raises(RuntimeError, match="sealed"):
+            store.add_lineage("CLEAN", "REPORT", "derived_from")
 
 
 # ---------------------------------------------------------------------------
@@ -147,16 +157,16 @@ class TestAddLineage:
 
 class TestLineageRecords:
     def test_empty_for_new_dataset(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         assert store.dataset("DS1").lineage_records() == []
 
     def test_empty_for_nonexistent_dataset(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         assert store.dataset("NONEXISTENT").lineage_records() == []
 
     def test_returns_dicts_with_expected_keys(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SRC", "DS1", "derived_from")
         rows = store.dataset("DS1").lineage_records()
@@ -178,7 +188,7 @@ class TestLineageRecords:
 
     def test_role_source(self) -> None:
         """role='source' returns rows where the dataset is the upstream input."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("DS1", "CHILD", "derived_from")
         store.add_lineage("PARENT", "DS1", "derived_from")
@@ -189,7 +199,7 @@ class TestLineageRecords:
 
     def test_role_target(self) -> None:
         """role='target' returns rows where the dataset is the downstream output."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("DS1", "CHILD", "derived_from")
         store.add_lineage("PARENT", "DS1", "derived_from")
@@ -200,7 +210,7 @@ class TestLineageRecords:
 
     def test_role_either_returns_both(self) -> None:
         """Default role='either' returns rows where dataset is source OR target."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("DS1", "CHILD", "derived_from")
         store.add_lineage("PARENT", "DS1", "derived_from")
@@ -209,7 +219,7 @@ class TestLineageRecords:
         assert len(rows) == 2
 
     def test_filter_by_relationship(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SRC", "DS1", "derived_from")
         store.add_lineage("SRC2", "DS1", "revision_of")
@@ -219,7 +229,7 @@ class TestLineageRecords:
         assert len(rows) == 1
 
     def test_filter_by_confidence(self) -> None:
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("DS1"))
         store.add_lineage("SRC1", "DS1", "derived_from", confidence="asserted")
         store.add_lineage("SRC2", "DS1", "revision_of", confidence="extracted")
@@ -272,7 +282,7 @@ class TestUpstream:
 
     def test_source_not_in_catalog_excluded(self) -> None:
         """If a source_id isn't in the datasets table, it's silently skipped."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("CHILD"))
         store.add_lineage("GHOST_PARENT", "CHILD", "derived_from")
         result = store.dataset("CHILD").upstream().collect()
@@ -281,7 +291,7 @@ class TestUpstream:
 
     def test_relationship_filter(self) -> None:
         """upstream(relationship=...) only follows edges of that type."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         for ds_id in ["BASE", "ADJUSTED", "PUBLISHED"]:
             store.put(_ds(ds_id))
         store.add_lineage("BASE", "ADJUSTED", "adjusted_from")
@@ -306,7 +316,7 @@ class TestUpstream:
         """Diamond: ROOT → A, ROOT → B, MERGED ← A, MERGED ← B.
         upstream(MERGED) returns each ancestor only once.
         """
-        store = sc.Catalog().open()
+        store = open_scratch()
         for ds_id in ["ROOT", "A", "B", "MERGED"]:
             store.put(_ds(ds_id))
         store.add_lineage("ROOT", "A", "derived_from")
@@ -363,7 +373,7 @@ class TestDownstream:
 
     def test_branching_downstream(self) -> None:
         """A source with two children should return both downstream."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         for ds_id in ["ROOT", "BRANCH_A", "BRANCH_B"]:
             store.put(_ds(ds_id))
         store.add_lineage("ROOT", "BRANCH_A", "derived_from")
@@ -376,7 +386,7 @@ class TestDownstream:
 
     def test_relationship_filter(self) -> None:
         """downstream(relationship=...) only follows edges of that type."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         for ds_id in ["BASE", "ADJUSTED", "PUBLISHED"]:
             store.put(_ds(ds_id))
         store.add_lineage("BASE", "ADJUSTED", "adjusted_from")
@@ -398,7 +408,7 @@ class TestDownstream:
 
     def test_target_not_in_catalog_excluded(self) -> None:
         """If a target_id isn't in the datasets table, it's silently skipped."""
-        store = sc.Catalog().open()
+        store = open_scratch()
         store.put(_ds("PARENT"))
         store.add_lineage("PARENT", "GHOST_CHILD", "derived_from")
         result = store.dataset("PARENT").downstream().collect()
@@ -423,7 +433,7 @@ class TestLineageConstants:
             "uses_classification",
             "replaces",
         }
-        assert set(sc.Catalog.LINEAGE_RELATIONSHIPS) == expected
+        assert set(_Store.LINEAGE_RELATIONSHIPS) == expected
 
     def test_confidence_vocabulary(self) -> None:
-        assert set(sc.Catalog.LINEAGE_CONFIDENCE) == {"asserted", "inferred", "extracted"}
+        assert set(_Store.LINEAGE_CONFIDENCE) == {"asserted", "inferred", "extracted"}

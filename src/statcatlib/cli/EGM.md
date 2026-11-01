@@ -5,19 +5,16 @@
 `statcatlib.cli` is the `statcat` command, a Typer app installed by
 `[project.scripts] statcat = "statcatlib.cli:main"` in `pyproject.toml`. It
 holds one module, `__init__.py`. Each command parses options, validates the
-catalog folder, and calls one library function. The work itself lives in
-`statcatlib.Catalog.build_index` (`../store/store.py`).
+catalog directory, and calls one library function. The work itself lives in
+`statcatlib.WorkingCopy.build_index` (`../store/working_copy.py`), which
+delegates to the private `_Store.build_index` (`../store/store.py`).
 
 The CLI needs the `search` extra (`uv add 'statcatlib[search]'`, or
 `pip install 'statcatlib[search]'`), which supplies `typer`, `rich`,
 `lancedb` and `sentence-transformers`. Importing the module without `typer`
 and `rich` fails.
 
-Three docstrings are out of date. The module docstring and `main()`'s
-docstring call the console script `statcatlib`, and the module docstring and
-`_main()`'s docstring say `build-index` is the only command. The script is
-`statcat`. Since Phase 2a S1 removed the `bundle` group, `build-index` is
-again the only command.
+The console script is `statcat`. `build-index` is the only command.
 
 ## Interface
 
@@ -31,12 +28,13 @@ Commands:
 
 | Command | Function | Calls | Exit 1 when |
 | --- | --- | --- | --- |
-| `statcat build-index BUNDLE` | `build_index` | `sc.Catalog(bundle).open().build_index(...)` | `meta.duckdb` is missing, or `sentence_transformers` cannot be imported |
+| `statcat build-index CATALOG PRODUCT` | `build_index` | `sc.Catalog.create(catalog, exist_ok=True).product(product).working_copy(resume=True).build_index(...)` | `catalog.json` is missing, the product has no unsealed edition, or `sentence_transformers` cannot be imported |
 
-`build-index` options and their `Catalog.build_index` keyword:
+`build-index` options and their `WorkingCopy.build_index` keyword:
 
 | Option | Default | Keyword |
 | --- | --- | --- |
+| `--lifecycle` | `revisable` | `working_copy(lifecycle=)` when the working copy is resumed |
 | `--model` | `intfloat/multilingual-e5-base` (`_DEFAULT_MODEL`) | `model_name`, and the encoder that `_load_encoder` loads |
 | `--document-prefix`, `--query-prefix` | from `ASYMMETRIC_MODEL_PREFIXES`, else `""` | `document_prefix`, `query_prefix` |
 | `--batch-size` | 256 | sets env `STATCAT_EMBED_BATCH_SIZE` |
@@ -54,6 +52,12 @@ Private helpers that tests and later commands rely on:
 
 - `_main()` — the empty `@app.callback()`. It keeps Typer in multi-command
   mode so that `build-index` parses as a command name.
+- `_require_catalog(catalog)` — exits 1 unless the directory holds
+  `catalog.json`, naming `Catalog.create`. It creates nothing.
+- `_resume(catalog, product)` — opens the catalog with
+  `Catalog.create(catalog, exist_ok=True)` and returns it with the product's
+  resumed `WorkingCopy`. A product with no unsealed edition closes the
+  catalog and exits 1, naming `working_copy()`.
 - `console` — the shared `rich.console.Console`; `log` — the
   `statcatlib.cli` logger (currently unused).
 - `_parse_codelist_policy(raw)` — accepts only mode `fts_only`
@@ -73,16 +77,25 @@ Private helpers that tests and later commands rely on:
 ## Invariants
 
 - Commands stay thin. Validation and index building belong to
-  `Catalog.build_index`, so the Python API and the CLI behave the same way.
-- `build-index`'s `BUNDLE` argument has `exists=True, file_okay=False`, so
+  `WorkingCopy.build_index`, so the Python API and the CLI behave the same
+  way.
+- `build-index`'s `CATALOG` argument has `exists=True, file_okay=False`, so
   Typer rejects a missing path or a non-directory before the command runs.
-  Beyond that, it checks that the folder holds `meta.duckdb`.
-- Run `build-index` before an edition is sealed. A later write fails the
-  manifest's files check (see the "Edition contract" paragraph of
-  [`CLAUDE.md`](../../../CLAUDE.md)).
-- `build-index` passes `model_name` to `Catalog.build_index` on every call.
-  Without it, `Catalog.build_index` writes no `search/embeddings.json`, the
-  next `open()` restores neither prefix, and `_warn_about_prefixes` warns.
+  Beyond that, `_require_catalog` checks for `catalog.json` before
+  `Catalog.create(exist_ok=True)` runs, so a mistyped path never becomes a
+  new catalog.
+- `build-index` indexes a working copy, the product's unsealed edition, and
+  leaves it unsealed. A sealed edition is never written (see the "Edition
+  contract" paragraph of [`CLAUDE.md`](../../../CLAUDE.md)).
+- `WorkingCopy.seal` rebuilds the index with the arguments of the last
+  `build_index` call on the same `WorkingCopy` object. The CLI's call ends
+  with its process, so a seal from a working copy resumed later rebuilds with
+  the default arguments and the encoder passed to
+  `working_copy(embedding_model=)`.
+- `build-index` resumes with `--lifecycle` (`revisable` by default). A
+  product recorded with another lifecycle exits 1, naming the option.
+- `build-index` passes `model_name` to `WorkingCopy.build_index` on every
+  call, so `search/embeddings.json` records the model and its prefixes.
 - Imports of `sentence_transformers` and `transformers`
   stay inside the functions that use them, so `statcat --help` loads no
   encoder.
@@ -90,9 +103,12 @@ Private helpers that tests and later commands rely on:
 
 ## Side Effects
 
-- `build-index` writes the bundle's `search/` folder: new generation tables,
-  `search/index.json`, and `search/embeddings.json`.
-  It opens the catalog with `Catalog(...).open()` and does not close it.
+- `build-index` writes the working copy's `search/` directory: the
+  edition's tables, `search/index.json`, and `search/embeddings.json`. It
+  opens the catalog with `Catalog.create(catalog, exist_ok=True)`, which
+  writes nothing on an existing catalog, and resumes the working copy, which
+  settles the product's seal journal. After a successful build it closes the
+  working copy (left unsealed) and the catalog.
 - `build-index` sets `os.environ["STATCAT_EMBED_BATCH_SIZE"]` for the
   process, calls `logging.basicConfig(level=INFO)`, and calls
   `_hush_encoder_logs()`. That adds a process-wide `warnings.filterwarnings`
@@ -102,7 +118,7 @@ Private helpers that tests and later commands rely on:
   `OSError` it loads again with network access, which can download the
   model from Hugging Face.
 - All commands print to stdout. A command failure exits 1 (the cases in the
-  table above). Usage errors exit 2 through Click: a `BUNDLE` path that is
+  table above). Usage errors exit 2 through Click: a `CATALOG` path that is
   missing or not a directory, `--batch-size` or `--max-codes-per-codelist`
   below 1 (`min=1`), and a `typer.BadParameter` from the option parsers.
 

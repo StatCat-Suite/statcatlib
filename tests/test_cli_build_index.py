@@ -4,12 +4,13 @@
 The library-level guarantees (policy bypasses the size cap, forces
 ``embedding=None``, etc.) are covered by
 ``test_codelist_policy_and_concepts.py``. This file only verifies the
-CLI parsing layer and that the parsed policies flow through to
-``Catalog.build_index``.
+CLI parsing layer, the catalog and working-copy checks, and that the
+parsed policies flow through to ``WorkingCopy.build_index``.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,7 +18,9 @@ import typer
 from typer.testing import CliRunner
 
 import statcatlib as sc
+from statcatlib import cli as cli_mod
 from statcatlib.cli import _parse_codelist_policy, _parse_reference_metadata_blend, app
+from tests.conftest import FIXTURE_DATASETS
 
 runner = CliRunner()
 
@@ -85,17 +88,45 @@ class TestParseCodelistPolicy:
         assert "fts_only" in str(exc.value)
 
 
-class TestBuildIndexCli:
-    def test_unknown_mode_exits_with_parameter_error(self, tmp_path) -> None:
-        bundle = tmp_path / "bundle"
-        bundle.mkdir()
-        (bundle / "meta.duckdb").write_bytes(b"")
+@pytest.fixture
+def catalog_path(tmp_path: Path) -> Path:
+    """A catalog whose product ``p`` has an unsealed working copy holding the fixture datasets."""
+    path = tmp_path / "catalog"
+    cat = sc.Catalog.create(path)
+    wc = cat.product("p").working_copy()
+    wc.put(FIXTURE_DATASETS)
+    wc.close()
+    cat.close()
+    return path
 
+
+@pytest.fixture
+def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The keyword arguments the CLI passes to ``WorkingCopy.build_index``.
+
+    The encoder loader and ``WorkingCopy.build_index`` are stubbed, so the
+    test runs the CLI's real catalog and working-copy handling without
+    loading a model or building an index.
+    """
+    sink: dict[str, Any] = {}  # a kwargs sink: the values are whatever build_index took
+
+    def _build_index(_self: sc.WorkingCopy, **kwargs: Any) -> int:
+        sink.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_load_encoder", lambda model, device: object())
+    monkeypatch.setattr(sc.WorkingCopy, "build_index", _build_index)
+    return sink
+
+
+class TestBuildIndexCli:
+    def test_unknown_mode_exits_with_parameter_error(self, catalog_path: Path) -> None:
         result = runner.invoke(
             app,
             [
                 "build-index",
-                str(bundle),
+                str(catalog_path),
+                "p",
                 "--codelist-policy",
                 "X=does_not_exist",
             ],
@@ -103,43 +134,49 @@ class TestBuildIndexCli:
         assert result.exit_code != 0
         assert "fts_only" in (result.output + (result.stderr or ""))
 
-    def test_policies_flow_through_to_build_index(self, tmp_path, monkeypatch) -> None:
-        """Parsed policies must reach ``Catalog.build_index``.
+    def test_a_directory_without_catalog_json_exits_naming_catalog_create(self, tmp_path: Path) -> None:
+        folder = tmp_path / "not_a_catalog"
+        folder.mkdir()
+        result = runner.invoke(app, ["build-index", str(folder), "p"])
+        assert result.exit_code == 1
+        assert "Catalog.create" in result.output
+        assert list(folder.iterdir()) == []
 
-        We stub the encoder loader and the store's ``build_index`` to
-        capture kwargs without running the real pipeline.
-        """
-        bundle = tmp_path / "bundle"
-        bundle.mkdir()
-        (bundle / "meta.duckdb").write_bytes(b"")
+    def test_a_product_without_a_working_copy_exits_1(self, catalog_path: Path, captured: dict[str, Any]) -> None:
+        result = runner.invoke(app, ["build-index", str(catalog_path), "q"])
+        assert result.exit_code == 1
+        assert "no unsealed edition" in result.output
+        assert captured == {}
 
-        captured: dict[str, Any] = {}  # a kwargs sink: the values are whatever build_index took
+    def test_a_final_product_needs_the_lifecycle_option(self, tmp_path: Path, captured: dict[str, Any]) -> None:
+        path = tmp_path / "final"
+        with sc.Catalog.create(path) as cat:
+            cat.product("p").working_copy(lifecycle="final").seal()
+            cat.product("p").working_copy(lifecycle="final").close()
+        refused = runner.invoke(app, ["build-index", str(path), "p"])
+        assert refused.exit_code == 1
+        assert "--lifecycle" in refused.output
+        assert captured == {}
+        result = runner.invoke(app, ["build-index", str(path), "p", "--lifecycle", "final"])
+        assert result.exit_code == 0, result.output
+        assert captured
 
-        from statcatlib import cli as cli_mod
+    def test_the_working_copy_stays_unsealed(self, catalog_path: Path, captured: dict[str, Any]) -> None:
+        result = runner.invoke(app, ["build-index", str(catalog_path), "p"])
+        assert result.exit_code == 0, result.output
+        with sc.Catalog.create(catalog_path, exist_ok=True) as cat:
+            wc = cat.product("p").working_copy(resume=True)
+            assert wc.view().query(sc.BaseDataset).execute().total == len(FIXTURE_DATASETS)
+            wc.close()
 
-        monkeypatch.setattr(cli_mod, "_load_encoder", lambda model, device: object())
-
-        class _FakeStore:
-            embedding_metadata: object = None
-
-            def build_index(self, **kwargs):
-                captured.update(kwargs)
-                return 0
-
-        class _FakeCatalog:
-            def __init__(self, _path: str) -> None:
-                pass
-
-            def open(self) -> _FakeStore:
-                return _FakeStore()
-
-        monkeypatch.setattr(cli_mod.sc, "Catalog", _FakeCatalog)
-
+    def test_policies_flow_through_to_build_index(self, catalog_path: Path, captured: dict[str, Any]) -> None:
+        """Parsed policies reach ``WorkingCopy.build_index``."""
         result = runner.invoke(
             app,
             [
                 "build-index",
-                str(bundle),
+                str(catalog_path),
+                "p",
                 "--codelist-policy",
                 "A:CL_X(1.0)=fts_only",
                 "--codelist-policy",
@@ -154,69 +191,20 @@ class TestBuildIndexCli:
         assert policies[1].urns == ("B:CL_Y(1.0)", "C:CL_Z(1.0)")
         assert all(p.mode == "fts_only" for p in policies)
 
-    def test_no_policy_flag_yields_empty_list(self, tmp_path, monkeypatch) -> None:
-        bundle = tmp_path / "bundle"
-        bundle.mkdir()
-        (bundle / "meta.duckdb").write_bytes(b"")
-
-        captured: dict[str, Any] = {}  # a kwargs sink: the values are whatever build_index took
-        from statcatlib import cli as cli_mod
-
-        monkeypatch.setattr(cli_mod, "_load_encoder", lambda model, device: object())
-
-        class _FakeStore:
-            embedding_metadata: object = None
-
-            def build_index(self, **kwargs):
-                captured.update(kwargs)
-                return 0
-
-        class _FakeCatalog:
-            def __init__(self, _path: str) -> None:
-                pass
-
-            def open(self) -> _FakeStore:
-                return _FakeStore()
-
-        monkeypatch.setattr(cli_mod.sc, "Catalog", _FakeCatalog)
-
-        result = runner.invoke(app, ["build-index", str(bundle)])
+    def test_no_policy_flag_yields_empty_list(self, catalog_path: Path, captured: dict[str, Any]) -> None:
+        result = runner.invoke(app, ["build-index", str(catalog_path), "p"])
         assert result.exit_code == 0, result.output
         assert captured.get("codelist_policies") == []
         assert captured.get("reference_metadata_blends") == []
 
-    def test_blends_flow_through_to_build_index(self, tmp_path, monkeypatch) -> None:
-        """Parsed reference-metadata blends must reach ``Catalog.build_index``."""
-        bundle = tmp_path / "bundle"
-        bundle.mkdir()
-        (bundle / "meta.duckdb").write_bytes(b"")
-
-        captured: dict[str, Any] = {}  # a kwargs sink: the values are whatever build_index took
-        from statcatlib import cli as cli_mod
-
-        monkeypatch.setattr(cli_mod, "_load_encoder", lambda model, device: object())
-
-        class _FakeStore:
-            embedding_metadata: object = None
-
-            def build_index(self, **kwargs):
-                captured.update(kwargs)
-                return 0
-
-        class _FakeCatalog:
-            def __init__(self, _path: str) -> None:
-                pass
-
-            def open(self) -> _FakeStore:
-                return _FakeStore()
-
-        monkeypatch.setattr(cli_mod.sc, "Catalog", _FakeCatalog)
-
+    def test_blends_flow_through_to_build_index(self, catalog_path: Path, captured: dict[str, Any]) -> None:
+        """Parsed reference-metadata blends reach ``WorkingCopy.build_index``."""
         result = runner.invoke(
             app,
             [
                 "build-index",
-                str(bundle),
+                str(catalog_path),
+                "p",
                 "--reference-metadata-blend",
                 "FOOTNOTE_TEXT:240",
             ],

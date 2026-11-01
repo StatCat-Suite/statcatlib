@@ -17,13 +17,13 @@ from statcatlib.store.scopes import (
 from statcatlib.store.row import Row
 from statcatlib.store.store import (
     VALID_INCLUDE_RELS,
-    Catalog,
     CodeHit,
     CodelistIndexPolicy,
     CodesScope,
     ConceptHit,
     ConceptsScope,
     DatasetsScope,
+    EditionView,
     EmbeddingMetadata,
     Hit,
     SEARCH_ANNOTATION_TYPES,
@@ -37,4 +37,5 @@ from statcatlib.store.store import (
     ReferenceMetadataScope,
     SearchResult,
 )
+from statcatlib.store.working_copy import WorkingCopy
 from statcatlib.store.xhtml import xhtml_to_markdown

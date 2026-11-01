@@ -33,7 +33,6 @@ import sdmxlib.model.datastructure
 from attrs import Factory, define, field
 from sdmxlib import InternationalString
 from sdmxlib.model.registry import artefact_urn
-from sdmxlib.storage.schema import SCHEMA_VERSION as _SDMX_SCHEMA_VERSION
 
 from statcatlib.model.agents import Agent, ContactPoint
 from statcatlib.model.classification import Standard
@@ -73,7 +72,7 @@ from statcatlib.store.scopes import (
 from statcatlib.store.sentinel import make_unloaded
 from statcatlib.store.xhtml import xhtml_to_markdown
 
-__all__ = ["VALID_INCLUDE_RELS", "Catalog", "QueryBuilder", "Row", "SearchResult"]
+__all__ = ["VALID_INCLUDE_RELS", "EditionView", "QueryBuilder", "Row", "SearchResult"]
 
 # ---------------------------------------------------------------------------
 # Type registry
@@ -156,27 +155,23 @@ ASYMMETRIC_MODEL_PREFIXES: dict[str, tuple[str, str]] = {
 
 
 class IncompatibleIndexError(ValueError):
-    """Raised by `Catalog.check_index_compatible` on mismatch.
+    """Raised by `EditionView.check_index_compatible` on mismatch.
 
     Subclasses ``ValueError`` so existing broad-catch sites still work.
     """
 
 
 class IncompatibleCatalogError(RuntimeError):
-    """Raised on open when the catalog was stored at a version this build does not read.
+    """Raised when a catalog or an edition is in a layout or at a version this build does not read.
 
-    Three cases. The ``statcat`` schema was written by a statcatlib with
-    another `schema.SCHEMA_VERSION` (`_refuse_statcat_schema_mismatch`); the
-    ``sdmx`` schema by an sdmxlib with another store schema
-    (`_refuse_sdmx_schema_rebuild`); or ``search/index.json`` by a statcatlib
-    with a newer manifest version (`_refuse_unreadable_index`).
-
-    sdmxlib treats its store as a cache: on a schema-version mismatch,
-    `LocalRegistry` drops the ``sdmx`` schema and rebuilds it empty. Here
-    that schema is not a cache. It is the structural half of the catalog,
-    which ``statcat.dataset`` links into by URN, so the rebuild would leave
-    every dataset pointing at nothing, and structural queries answering
-    empty rather than failing.
+    The cases: a directory holding a statcatlib 0.11 catalog, a 0.72 bundle or
+    other files (`statcatlib.catalog`); an edition whose ``manifest.json`` is
+    not the one the Inventory recorded; a ``statcat`` schema written by a
+    statcatlib with another `schema.SCHEMA_VERSION`
+    (`_refuse_statcat_schema_mismatch`); a ``search/index.json`` at another
+    manifest version (`_refuse_unreadable_index`); and a filesystem without
+    hard links under `Catalog.create`. An edition on another sdmxlib store
+    schema is refused by sdmxlib itself, with `sdmxlib.StoreSchemaError`.
     """
 
 
@@ -252,55 +247,11 @@ def _refuse_unreadable_index(search_dir: Path) -> None:
     raise IncompatibleCatalogError(msg)
 
 
-def _refuse_sdmx_schema_rebuild(conn: duckdb.DuckDBPyConnection) -> None:
-    """Refuse to open a catalog whose SDMX structure sdmxlib would drop.
-
-    Runs before `LocalRegistry.from_connection`, which is where the drop
-    happens. A missing ``sdmx`` schema, or one at another version that holds
-    no artefacts, has nothing to lose, so sdmxlib is left to create or
-    rebuild it.
-
-    Read-only opens are refused here too. sdmxlib would refuse them itself,
-    but its message says to reopen read-write and rebuild in place, which
-    for a catalog is the data loss this guard exists to prevent.
-
-    Args:
-        conn: The catalog's connection, before sdmxlib has touched it.
-
-    Raises:
-        IncompatibleCatalogError: The stored ``sdmx`` schema is at another
-            version and holds artefacts.
-    """
-    try:
-        rows = conn.execute("""
-            SELECT value FROM sdmx._meta WHERE key = 'schema_version'
-        """).fetchall()
-        row = _catalog_schema.first_row(rows)
-        stored = row[0] if row else None
-        rows = conn.execute("""
-            SELECT count(*) FROM sdmx.artefact
-        """).fetchall()
-        artefacts = _catalog_schema.first_row(rows)
-    except duckdb.CatalogException:
-        return
-    n_artefacts = artefacts[0] if artefacts else 0
-    if stored == _SDMX_SCHEMA_VERSION or n_artefacts == 0:
-        return
-    msg = (
-        f"this catalog's SDMX structure is stored in sdmxlib schema {stored}, and this "
-        f"build of sdmxlib uses schema {_SDMX_SCHEMA_VERSION}. sdmxlib migrates by dropping "
-        f"the sdmx schema, which would delete the {n_artefacts} artefacts this catalog's "
-        f"datasets link to. Rebuild the catalog from its sources with this version, or "
-        f"open it with the statcatlib release that built it."
-    )
-    raise IncompatibleCatalogError(msg)
-
-
 @define(frozen=True)
 class EmbeddingMetadata:
-    """Read-side view of a bundle's ``search/embeddings.json`` sidecar.
+    """Read-side view of an edition's ``search/embeddings.json`` sidecar.
 
-    Returned by `Catalog.embedding_metadata`. Fields that were not
+    Returned by `EditionView.embedding_metadata`. Fields that were not
     present in the on-disk sidecar (e.g. when reading a v2 file with a v3
     reader) come back as ``None`` rather than guesses.
     """
@@ -1241,7 +1192,7 @@ class _SortSpec:
     lang: str | None = None
 
 
-#: What a hit from `Catalog.search` can carry. The cross-kind search fans out
+#: What a hit from `EditionView.search` can carry. The cross-kind search fans out
 #: over four typed accessors, so its result is not one payload type — but it is
 #: not `object` either. Naming the union lets a caller match exhaustively on
 #: `hit.payload` instead of being handed something opaque and told to check
@@ -1331,7 +1282,7 @@ class Hit[T]:
     """A search hit — payload plus per-match ranking metadata.
 
     The discriminator ``kind`` lets a heterogeneous result list (e.g.
-    `Catalog.search` over all entity kinds) be narrowed at runtime
+    `EditionView.search` over all entity kinds) be narrowed at runtime
     by a tagged match; the generic parameter ``T`` lets type-scoped
     accessors (``cat.codes.find`` etc.) narrow statically.
 
@@ -1458,7 +1409,7 @@ class ReferenceMetadataHit:
     the section text itself. The hit carries the identifiers needed to
     navigate back to the structured graph — ``set_urn`` (the document) and
     ``attribute_path`` (the section) — so a caller can fetch the full,
-    typed section via `Catalog.metadata_report` or resolve the
+    typed section via `EditionView.metadata_report` or resolve the
     artefacts the document describes via the set's targets.
     """
 
@@ -1588,7 +1539,7 @@ def _chunk_prose(text: str, *, max_chars: int = _REFMETA_CHUNK_CHARS) -> list[st
 
 @define(frozen=True)
 class CodelistIndexPolicy:
-    """Per-codelist override for `Catalog.build_index`.
+    """Per-codelist override for `WorkingCopy.build_index`.
 
     Lets a caller opt large codelists into the Lance search index even
     when their size would otherwise trip ``max_codes_per_codelist``, and
@@ -1628,7 +1579,7 @@ def _code_index_filter(
     codelist_urns: Sequence[str] | None,
     exclude_annotation_types: Sequence[str],
 ) -> tuple[str, dict[str, object]]:
-    """WHERE clause + parameters selecting the codes `Catalog._collect_code_texts` indexes."""
+    """WHERE clause + parameters selecting the codes `_Store._collect_code_texts` indexes."""
     # Bypass the size cap for codelists that policy explicitly opts in.
     # Without the OR-branch, ``cs.n <= $max_codes`` would still drop a
     # large geography codelist even when the caller asked for it.
@@ -1676,7 +1627,7 @@ class ReferenceMetadataBlend:
 
 #: Annotation type whose localised text statcatlib folds into a code's search
 #: corpus by default (see ``context_annotation_types`` on
-#: `Catalog.build_index`). statcatlib's own namespaced convention —
+#: `WorkingCopy.build_index`). statcatlib's own namespaced convention —
 #: producers attach it to carry disambiguating context for a code (e.g. its
 #: nearest topical-universe label) so same-surface-label codes under
 #: different universes rank correctly. Read per-language from
@@ -1686,7 +1637,7 @@ class ReferenceMetadataBlend:
 SEARCH_CONTEXT_ANNOTATION_TYPE = "statcat:searchContext"
 
 #: Annotation type that keeps a code out of the search corpus by default
-#: (see ``exclude_annotation_types`` on `Catalog.build_index`). statcatlib's own
+#: (see ``exclude_annotation_types`` on `WorkingCopy.build_index`). statcatlib's own
 #: namespaced convention — producers attach it to codes that exist for
 #: structure, not discovery (e.g. the leaves of a geography hierarchy that
 #: carry no observations and are named by a bare identifier), so a large
@@ -1735,7 +1686,10 @@ def annotation_fingerprint(conn: duckdb.DuckDBPyConnection, types: Sequence[str]
     """
     nothing = hashlib.md5(b"", usedforsecurity=False).hexdigest()
     rows = conn.execute(
-        """SELECT count(*) FROM information_schema.tables WHERE table_schema = 'sdmx' AND table_name = 'annotation'"""
+        """
+        SELECT count(*) FROM information_schema.tables
+        WHERE table_catalog = current_database() AND table_schema = 'sdmx' AND table_name = 'annotation'
+        """
     ).fetchall()
     has_sdmx = _catalog_schema.first_row(rows)
     if not types or not has_sdmx or not has_sdmx[0]:
@@ -1882,7 +1836,7 @@ class QueryBuilder[T]:
 
     def __init__(
         self,
-        store: Catalog,
+        store: _Store,
         cls: type[T],
         *,
         filters: dict[str, object] | None = None,
@@ -2329,7 +2283,7 @@ class QueryBuilder[T]:
 
 
 # ---------------------------------------------------------------------------
-# Catalog
+# The private store
 # ---------------------------------------------------------------------------
 
 
@@ -2342,7 +2296,7 @@ class CodesScope:
     pure-SQL ``get(code_urn)`` for cases where the URN is already known.
     """
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def find(
         self,
@@ -2389,7 +2343,7 @@ class CodesScope:
             )
         if mode in ("vector", "hybrid"):
             if store._embedding_model is None:
-                msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
+                msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
             vec_rows = store._lance.search_rows(
@@ -2481,7 +2435,7 @@ class ConceptsScope:
     label.
     """
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def find(
         self,
@@ -2519,7 +2473,7 @@ class ConceptsScope:
             )
         if mode in ("vector", "hybrid"):
             if store._embedding_model is None:
-                msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
+                msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
             vec_rows = store._lance.search_rows(
@@ -2593,19 +2547,19 @@ class ConceptsScope:
 class ReferenceMetadataScope:
     """Search over indexed SDMX reference-metadata sections.
 
-    Entry point: ``cat.reference_metadata``. Where `Catalog.codes`
+    Entry point: ``cat.reference_metadata``. Where `EditionView.codes`
     searches short controlled-vocabulary labels, this searches the prose of
     methodology documents — reference guides, quality reports — indexed one
     chunk per section. Hits carry ``set_urn`` / ``attribute_path`` so a
     caller can pull the full typed section via
-    `Catalog.metadata_report` or resolve the artefacts the document
+    `EditionView.metadata_report` or resolve the artefacts the document
     describes.
 
     ``target_urn`` scopes the search to metadata attached to a given
-    artefact — the semantic-search analogue of `Catalog.metadata_for`.
+    artefact — the semantic-search analogue of `EditionView.metadata_for`.
     """
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def find(
         self,
@@ -2625,7 +2579,7 @@ class ReferenceMetadataScope:
 
         ``target_urn`` restricts results to sections whose MetadataSet
         targets that artefact URN — resolved via
-        `Catalog.metadata_for`, so a semantic hit and its structured
+        `EditionView.metadata_for`, so a semantic hit and its structured
         resolution stay consistent. Other arguments mirror the code/concept
         scopes (``mode``, ``lang``, ``limit``, ``offset``, ``operator``,
         ``fuzzy``, ``rrf_k``, ``oversample``).
@@ -2656,7 +2610,7 @@ class ReferenceMetadataScope:
             )
         if mode in ("vector", "hybrid"):
             if store._embedding_model is None:
-                msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
+                msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
             vec_rows = store._lance.search_rows(
@@ -2709,7 +2663,7 @@ class DatasetsScope:
     ``SearchResult[Hit[BaseDataset]]``.
     """
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def find(  # noqa: C901
         self,
@@ -2743,7 +2697,7 @@ class DatasetsScope:
             )
         if mode in ("vector", "hybrid"):
             if store._embedding_model is None:
-                msg = f"mode={mode!r} requires an embedding_model; pass it to Catalog()"
+                msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
             vec_pairs = store._lance.search(
@@ -2789,388 +2743,176 @@ class DatasetsScope:
         return SearchResult(items=hits, total=total, offset=offset, scores=scores)
 
 
-class Catalog:
-    """DuckDB-backed catalog store.
+class _Store:
+    """The query and write engine over one edition's ``statcat`` and ``sdmx`` schemas.
 
-    **Persistent catalogs** — ``Catalog("my_catalog").open()`` is
-    open-or-create: it creates the catalog folder if it does not exist and
-    opens it otherwise. Construction alone does not touch the disk.
+    Private (Phase 2a, P8). `WorkingCopy` owns a writable one over its build
+    registry, and `EditionView` wraps one read-only; neither exposes it. It
+    keeps every query and write method statcatlib 0.11's ``Catalog`` had.
 
-    On-disk layout under ``<uri>/``:
+    Every statement runs on a per-thread cursor from `_cursor`, which has run
+    ``USE "<catalog_name>".statcat``: unqualified names and two-part names such
+    as ``sdmx.code`` resolve inside this edition's catalog, even with other
+    editions attached to the same DuckDB engine.
 
-    - ``meta.duckdb`` — co-located ``sdmx.*`` (registry) and ``statcat.*``
-      (catalog) schemas (Topology B).
-    - ``lake.ducklake`` — DuckLake catalog sidecar; ATTACHed as ``lake``
-      at open time.
-    - ``parquet/`` — DuckLake-managed observation files (DATA_PATH).
-    - ``search/`` — optional Lance vector index.
-
-    Observation writes go through ``cat.data.write_observations(...)``;
-    no public filesystem-parquet seam.
-
-    **In-memory** (no persistence)::
-
-        store = Catalog()
-
-    **Shared-connection** (sdmxlib ``LocalRegistry`` integration)::
-
-        conn = duckdb.connect("shared.duckdb")
-        store = Catalog(conn)
-        local = sl.LocalRegistry.from_connection(conn)
-
-    ``Catalog(path)`` is open-or-create: it creates the catalog folder if it
-    does not exist and opens it otherwise.
+    It owns no connection. Its cursors come from *cursor_factory*, and the
+    registry's owner closes the registry.
     """
 
-    _uri: str | Path
-    _conn: duckdb.DuckDBPyConnection | None
-    _owns_connection: bool
-    _bundle_dir: Path | None
+    _catalog_name: str
+    _cursor_factory: Callable[[], duckdb.DuckDBPyConnection]
+    _cursor_local: threading.local
+    _cursors: list[duckdb.DuckDBPyConnection]
+    _cursor_lock: threading.Lock
     _search_dir: Path | None
+    _writable: bool
     _embedding_model: EmbeddingModel | None
     _embedding_metadata: EmbeddingMetadata | None
     _document_prefix: str
     _query_prefix: str
-    _registry: sdmxlib.LocalRegistry | None
-    _data: sdmxlib.DuckDBDataStore | None
+    _registry: sdmxlib.EditionRegistry
+    _bulk_depth: int
     # Declared alongside its siblings; without it, `self._lance = None` in
-    # `__init__` infers `Any | None` and `index_layout` then returns Any.
+    # `_over` infers `Any | None` and `index_layout` then returns Any.
     _lance: LanceIndex | None
+    _closed: Callable[[], Exception] | None
 
     def __init__(
         self,
-        uri: str | Path = ":memory:",
+        cursor_factory: Callable[[], duckdb.DuckDBPyConnection],
         *,
+        catalog_name: str,
+        search_dir: Path | None,
+        writable: bool,
+        registry: sdmxlib.EditionRegistry,
         embedding_model: EmbeddingModel | None = None,
         document_prefix: str = "",
         query_prefix: str = "",
-        read_only: bool = False,
     ) -> None:
-        """Reference a catalog at ``uri``.
-
-        Path-style: construction is cheap — only the URI and configuration
-        are stashed. The DuckDB connection opens on `open` (or
-        implicitly when entering a ``with`` block). Use
-        `from_connection` to wrap an existing DuckDB connection
-        (e.g. when sharing one with sdmxlib).
-
-        Args:
-            uri: ``":memory:"`` for an in-memory catalog (default), or a folder path for a persistent
-                catalog. Folder mode lays out ``<uri>/meta.duckdb`` (sentinel), ``<uri>/lake.ducklake``
-                (DuckLake catalog), ``<uri>/parquet/`` (DuckLake DATA_PATH), and an optional
-                ``<uri>/search/`` for the Lance index.
-            embedding_model: A sentence-transformers model (or any object exposing ``encode``) used to
-                embed text for semantic and hybrid search. When ``None`` (default) the catalog is BM25-only
-                and no ``embeddings.json`` sidecar is written.
-            document_prefix: Prepended to every document text before embedding in ``build_index``. Required
-                for asymmetric models like e5 (``"passage: "``); leave empty for symmetric models.
-            query_prefix: Prepended to every query string before embedding in ``semantic_search`` /
-                ``hybrid_search``. For e5 use ``"query: "``; leave empty for symmetric models.
-            read_only: Open the underlying DuckDB connection with ``read_only=True``. Required when a bundle
-                is shared between multiple processes (e.g. ``uvicorn --workers N``) — DuckDB takes an
-                exclusive file lock on read-write opens. Skips all DDL and ``mkdir`` side effects; ATTACHes
-                the DuckLake sidecar with ``READ_ONLY``; write APIs (``put``, ``bulk_load``,
-                ``build_index``, ``write_observations``) raise ``RuntimeError``. Not supported with
-                ``:memory:`` or with ``embedding_model`` (index builds need a writable lake).
-
-        Raises:
-            ValueError: ``read_only=True`` was combined with ``:memory:`` or
-                with an ``embedding_model`` — neither can serve a read-only
-                open, since an index build needs a writable lake.
-        """
-        if read_only:
-            if str(uri) == ":memory:":
-                msg = "read_only=True is not supported with an in-memory catalog (':memory:')"
-                raise ValueError(msg)
-            if embedding_model is not None:
-                msg = "read_only=True is incompatible with embedding_model (build_index needs a writable catalog)"
-                raise ValueError(msg)
-        self._uri = uri
-        self._conn = None
-        # Per-thread cursor holder — DuckDB cursors are not thread-safe (see
-        # the ``_c`` property), so every thread gets its own cursor on the
-        # shared connection.
-        self._cursor_local: threading.local = threading.local()
-        self._owns_connection = True
-        self._bundle_dir = None
-        self._search_dir = None
+        """Hold the store's parts; `_over` builds one and runs the guards."""
+        self._catalog_name = catalog_name
+        self._cursor_factory = cursor_factory
+        self._cursor_local = threading.local()
+        self._cursors = []
+        self._cursor_lock = threading.Lock()
+        self._closed = None
+        self._search_dir = search_dir
+        self._writable = writable
+        self._registry = registry
         self._embedding_model = embedding_model
         self._embedding_metadata = None
         self._document_prefix = document_prefix
         self._query_prefix = query_prefix
-        self._read_only = read_only
         self._bulk_depth = 0
         self._lance = None
-        self._registry = None
-        self._data = None
-
-    @property
-    def uri(self) -> str | Path:
-        """The URI this catalog references. Available before opening."""
-        return self._uri
-
-    def open(self) -> Self:
-        """Open the underlying DuckDB connection and prepare schemas + Lance.
-
-        Idempotent within a single open/close cycle. Returns ``self`` so the
-        call composes with ``with``::
-
-            with Catalog("my_catalog").open() as cat:
-                ...
-
-        Raises `IncompatibleCatalogError` when the catalog's ``statcat``
-        schema is another version than this statcatlib's, its search index
-        records a manifest version this statcatlib does not read, or its SDMX
-        structure was stored by an sdmxlib with another store schema, which
-        this one would drop on open. The connection is closed again first.
-
-        Returns:
-            This catalog, open.
-
-        Raises:
-            ValueError: ``embedding_model`` was given for an in-memory catalog.
-        """
-        if self._conn is not None:
-            return self
-        self._conn, self._bundle_dir = self._open_connection()
-        self._search_dir = self._bundle_dir / "search" if self._bundle_dir is not None else None
-        self._owns_connection = True
-        if self._embedding_model is not None and self._bundle_dir is None:
-            msg = "embedding_model requires a folder-mode catalog (pass a path, not ':memory:')"
-            raise ValueError(msg)
-        self._refuse_schema_mismatch(self._conn)
-        # Schema setup runs once on the shared connection; the returned
-        # cursor is discarded because each thread builds its own via the
-        # ``_c`` property (DDL persists on the connection itself).
-        if self._read_only:
-            _ = _catalog_schema.open_schema_readonly(self._conn)
-        else:
-            _ = _catalog_schema.create_schema(self._conn)
-        # Compose an sdmxlib LocalRegistry on the same connection (Topology B).
-        # The statcatlib
-        # schema and the sdmx schema co-exist in one DuckDB file, so cross-
-        # schema queries (e.g. join statcat.dataset to sdmx.codelist) work
-        # natively without ATTACH plumbing.
-        self._registry = self._open_registry(self._conn)
-        # ATTACH the DuckLake sidecar (folder mode only — in-memory has no
-        # lake). Sidecar layout because DuckDB rejects self-ATTACH; the
-        # ducklake catalog file sits next to meta.duckdb, and its DATA_PATH
-        # is the catalog's own parquet/ directory.
-        if self._bundle_dir is not None:
-            self._data = sdmxlib.DuckDBDataStore.from_registry(
-                self._registry,
-                attach={"lake": self._lake_attach(self._bundle_dir)},
-                extensions=["ducklake"],
-            )
-        else:
-            # In-memory catalogs have no lake; write_observations is unavailable.
-            self._data = sdmxlib.DuckDBDataStore.from_registry(self._registry)
-        if self._bundle_dir is not None:
-            self._init_lance()
-            self._warn_if_index_annotations_changed()
-            # Restore embedding metadata written by a previous build_index()
-            # so the caller doesn't have to remember which model + prefixes
-            # match this index. Missing/malformed metadata leaves the store
-            # in its empty default state — callers can still set things
-            # explicitly. v2 sidecars are still accepted; absent fields
-            # surface as ``None`` on `EmbeddingMetadata`.
-            raw = _read_embeddings_meta(self._bundle_dir / "search")
-            if raw is not None:
-                meta = _parse_embeddings_meta(raw)
-                if meta is not None:
-                    self._embedding_metadata = meta
-                    if not self._document_prefix:
-                        self._document_prefix = meta.document_prefix
-                    if not self._query_prefix:
-                        self._query_prefix = meta.query_prefix
-        return self
-
-    def _refuse_schema_mismatch(self, conn: duckdb.DuckDBPyConnection) -> None:
-        """Run `_refuse_statcat_schema_mismatch` and `_refuse_unreadable_index` before `open` runs DDL.
-
-        Args:
-            conn: The connection `open` just made, which this catalog owns.
-
-        Raises:
-            IncompatibleCatalogError: The ``statcat`` schema is another
-                version, or the search index one this build does not read.
-                *conn* is closed first, as `_open_registry` does.
-        """
-        try:
-            _refuse_statcat_schema_mismatch(conn)
-            if self._bundle_dir is not None:
-                _refuse_unreadable_index(self._bundle_dir / "search")
-        except IncompatibleCatalogError:
-            conn.close()
-            self._conn = None
-            raise
-
-    def _open_registry(self, conn: duckdb.DuckDBPyConnection) -> sdmxlib.LocalRegistry:
-        """Compose the sdmxlib `LocalRegistry` on *conn*, once the guard allows it.
-
-        Args:
-            conn: The connection `open` just made, which this catalog owns.
-
-        Returns:
-            The registry sharing *conn*.
-
-        Raises:
-            IncompatibleCatalogError: sdmxlib would drop this catalog's SDMX
-                structure. *conn* is closed first, releasing the file so the
-                release that built it can reopen it from this process.
-        """
-        try:
-            _refuse_sdmx_schema_rebuild(conn)
-        except IncompatibleCatalogError:
-            conn.close()
-            self._conn = None
-            raise
-        return sdmxlib.LocalRegistry.from_connection(conn)
-
-    def _open_connection(self) -> tuple[duckdb.DuckDBPyConnection, Path | None]:
-        """Open the DuckDB connection and (for folder mode) prepare the bundle dir.
-
-        Returns ``(connection, bundle_dir)`` where ``bundle_dir`` is
-        ``None`` for in-memory catalogs. DuckLake creates ``parquet/`` on its
-        first write.
-        """
-        if str(self._uri) == ":memory:":
-            return duckdb.connect(":memory:"), None
-        # Absolute, so the stamp DuckLake records on first open is too: a
-        # relative one is resolved against whatever the working directory is
-        # when the lake is read (GH-23). `absolute()`, not `resolve()`, which
-        # follows symlinks and would respell a catalog created by absolute path.
-        path = Path(self._uri).absolute()
-        if self._read_only:
-            meta_path = path / "meta.duckdb"
-            if not meta_path.exists():
-                msg = f"read_only=True requires an existing catalog bundle; {meta_path} not found"
-                raise FileNotFoundError(msg)
-            return duckdb.connect(str(meta_path), read_only=True), path
-        # Only the catalog directory is created. DuckLake makes its own
-        # DATA_PATH directory on first write.
-        path.mkdir(parents=True, exist_ok=True)
-        return duckdb.connect(str(path / "meta.duckdb")), path
-
-    def _lake_attach(self, bundle_dir: Path) -> tuple[str, str]:
-        """The DuckLake ATTACH URL and options for *bundle_dir*'s lake.
-
-        DATA_PATH is ``<bundle_dir>/parquet/``, the absolute path `_open_connection`
-        spells, so it matches the path DuckLake recorded when it created the lake.
-        A read-only catalog attaches the lake ``READ_ONLY``.
-        """
-        options = [f"DATA_PATH '{bundle_dir / 'parquet'}/'"]
-        if self._read_only:
-            options.append("READ_ONLY")
-        return f"'ducklake:{bundle_dir / 'lake.ducklake'}'", f"({', '.join(options)})"
 
     @classmethod
-    def from_connection(
+    def _over(
         cls,
-        conn: duckdb.DuckDBPyConnection,
+        cursor_factory: Callable[[], duckdb.DuckDBPyConnection],
         *,
+        catalog_name: str,
+        search_dir: Path | None,
+        writable: bool,
+        registry: sdmxlib.EditionRegistry,
         embedding_model: EmbeddingModel | None = None,
         document_prefix: str = "",
         query_prefix: str = "",
-        read_only: bool = False,
-        search_dir: Path | None = None,
     ) -> Self:
-        """Wrap an existing DuckDB connection.
+        """A store over one edition's catalog.
 
-        The Catalog does NOT take ownership of the connection — closing the
-        Catalog leaves the connection open. Use this when the connection is
-        shared with another component (e.g. an sdmxlib `Registry`
-        co-located in the same DuckDB).
-
-        ``embedding_model`` is rejected here because shared-connection mode
-        has no on-disk ``data/`` directory to host the Lance index.
-
-        As `open` does, this raises `IncompatibleCatalogError` when the
-        connection's ``statcat`` schema is another version, or its SDMX
-        structure was stored by an sdmxlib with another store schema, which
-        this one would drop. *conn* is left open then: the caller owns it.
+        Runs the ``statcat`` schema guard and the search index guard before
+        anything else, and then opens the search index.
 
         Args:
-            conn: The connection to wrap. Left open by `close`.
-            embedding_model: Must be ``None``; see above.
-            document_prefix: Prefix for documents embedded into the index.
-            query_prefix: Prefix for queries embedded against the index.
-            read_only: Open the catalog schema without creating it.
-            search_dir: Private. The ``search/`` directory of the edition
-                whose builder owns *conn*, so `build_index` and
-                `statcatlib.bundle.catalog_section` work on this catalog.
+            cursor_factory: Makes a new DuckDB cursor on the engine that holds
+                the edition; `_cursor` runs ``USE`` on each.
+            catalog_name: The attached catalog holding the edition's
+                ``statcat`` and ``sdmx`` schemas (the registry's
+                ``catalog_name``).
+            search_dir: The edition's ``search/`` directory, or ``None`` for
+                none.
+            writable: Whether the write methods run. A store over a sealed
+                edition is not.
+            registry: The sdmxlib registry over the same edition.
+            embedding_model: The encoder for vector search, and for
+                `build_index` on a writable store.
+            document_prefix: Prepended to every document before embedding.
+            query_prefix: Prepended to every query before embedding.
 
         Returns:
-            A catalog over *conn*, already open.
+            The store.
 
         Raises:
-            ValueError: ``embedding_model`` was given.
+            RuntimeError: The edition has no ``statcat`` schema.
         """
-        if embedding_model is not None:
-            msg = "from_connection() does not support embedding_model — Lance needs a folder-mode catalog"
-            raise ValueError(msg)
-        instance = cls.__new__(cls)
-        instance._uri = ":connection:"
-        instance._conn = conn
-        instance._owns_connection = False
-        instance._bundle_dir = None
-        instance._search_dir = search_dir
-        instance._embedding_model = None
-        instance._embedding_metadata = None
-        instance._document_prefix = document_prefix
-        instance._query_prefix = query_prefix
-        instance._read_only = read_only
-        instance._bulk_depth = 0
-        instance._lance = None
-        instance._cursor_local = threading.local()
-        _refuse_statcat_schema_mismatch(conn)
-        if read_only:
-            _ = _catalog_schema.open_schema_readonly(conn)
-        else:
-            _ = _catalog_schema.create_schema(conn)
-        _refuse_sdmx_schema_rebuild(conn)
-        instance._registry = sdmxlib.LocalRegistry.from_connection(conn)
-        # Shared-connection mode: the caller owns any ATTACH plumbing. The
-        # DataStore wraps the same connection without applying its own
-        # extensions/ATTACH; lake reads/writes only work if the caller has
-        # already ATTACHed a ducklake.
-        instance._data = sdmxlib.DuckDBDataStore.from_registry(instance._registry)
+        store = cls(
+            cursor_factory,
+            catalog_name=catalog_name,
+            search_dir=search_dir,
+            writable=writable,
+            registry=registry,
+            embedding_model=embedding_model,
+            document_prefix=document_prefix,
+            query_prefix=query_prefix,
+        )
+        try:
+            cursor = store._cursor()
+        except duckdb.CatalogException as exc:
+            msg = f"{catalog_name} has no statcat schema; it was not written by statcatlib"
+            raise RuntimeError(msg) from exc
+        # Raises IncompatibleCatalogError for another statcat schema version.
+        _refuse_statcat_schema_mismatch(cursor)
         if search_dir is not None:
-            instance._init_lance()
-        return instance
+            # Raises IncompatibleCatalogError for an index manifest of another version.
+            _refuse_unreadable_index(search_dir)
+            store._init_lance()
+            store._warn_if_index_annotations_changed()
+            # Restore the embedding metadata the last build_index() recorded, so
+            # a caller need not remember which model and prefixes match this
+            # index. Missing or malformed metadata leaves the defaults.
+            raw = _read_embeddings_meta(search_dir)
+            if raw is not None:
+                meta = _parse_embeddings_meta(raw)
+                if meta is not None:
+                    store._embedding_metadata = meta
+                    if not store._document_prefix:
+                        store._document_prefix = meta.document_prefix
+                    if not store._query_prefix:
+                        store._query_prefix = meta.query_prefix
+        return store
 
     def _init_lance(self) -> None:
-        """Set up the LanceDB index (called for all folder-mode catalogs).
+        """Open the LanceDB index in the edition's ``search/`` directory.
 
-        Silently skips if lancedb is not installed — search methods will
-        raise ``RuntimeError`` when invoked without the index.
+        A sealed edition with no ``search/`` has no index, and nothing is
+        created for it. Without lancedb installed (the ``statcatlib[search]``
+        extra) there is no index either, and the search methods raise when
+        called.
         """
         search_dir = self._search_dir
         if search_dir is None:
             return
-        if self._read_only and not search_dir.exists():
-            # Read-only catalogs must not create the search dir. Leaving
-            # _lance unset means search APIs raise the usual "no index"
-            # error rather than blowing up on a read-only mount.
+        if not self._writable and not search_dir.exists():
             return
         try:
             from statcatlib.store.lance import LanceIndex  # noqa: PLC0415
 
-            self._lance = LanceIndex(search_dir)
+            self._lance = LanceIndex(search_dir, edition_id=search_dir.parent.name if self._writable else None)
         except ImportError:
             return
 
     def _warn_if_index_annotations_changed(self) -> None:
         """Warn if the store's search annotations are not the ones the index was built from.
 
-        A warning, never an error and never a rebuild: opening a bundle in a
+        A warning, never an error and never a rebuild: opening an edition in a
         serving pod must not fail or write because an overlay was folded in.
         It fires on every open until ``build_index()`` is run (GH-3).
         """
         recorded = self._lance.annotations if self._lance is not None else None
-        if recorded is None or self._conn is None:
+        if recorded is None:
             return
-        if annotation_fingerprint(self._conn, recorded["types"]) == recorded["fingerprint"]:
+        if annotation_fingerprint(self._cursor(), recorded["types"]) == recorded["fingerprint"]:
             return
         warnings.warn(
             f"search index is out of date: annotations of type {', '.join(recorded['types'])} have changed "
@@ -3190,39 +2932,14 @@ class Catalog:
         return self._lance.annotations if self._lance is not None else None
 
     @property
-    def connection(self) -> duckdb.DuckDBPyConnection:
-        """The underlying DuckDB connection (for sharing with sdmxlib LocalRegistry).
+    def registry(self) -> sdmxlib.EditionRegistry:
+        """The sdmxlib registry over the same edition.
 
-        Raises:
-            RuntimeError: If the catalog hasn't been opened.
+        A sealed edition's `sdmxlib.EditionRegistry`, or the writable
+        `sdmxlib.LocalRegistry` of a working copy. Its ``sdmx`` schema is the
+        one this store's SQL joins.
         """
-        if self._conn is None:
-            msg = (
-                f"Catalog({self._uri!r}) is not open. Use it as a context manager "
-                "(``with Catalog(uri) as cat: ...``) or call ``.open()`` first."
-            )
-            raise RuntimeError(msg)
-        return self._conn
-
-    @property
-    def registry(self) -> sdmxlib.LocalRegistry:
-        """The co-located `sdmxlib.LocalRegistry` (Topology B composition).
-
-        Both the ``statcat.*`` schema and the ``sdmx.*`` schema live in the
-        same DuckDB file on the same connection, so cross-schema queries
-        and ``SqlRelation`` composition work without ATTACH plumbing.
-        Mutations through the registry (``cat.registry.add(codelist)``)
-        are visible immediately to statcatlib queries that join across schemas.
-
-        Raises:
-            RuntimeError: If the catalog hasn't been opened.
-        """
-        if self._registry is None:
-            msg = (
-                f"Catalog({self._uri!r}) is not open. Use it as a context manager "
-                "(``with Catalog(uri) as cat: ...``) or call ``.open()`` first."
-            )
-            raise RuntimeError(msg)
+        self._require_open()
         return self._registry
 
     @property
@@ -3232,7 +2949,7 @@ class Catalog:
         Populated explicitly via `build_index` or by reading
         ``<catalog>/search/embeddings.json`` on `open`. The fields
         that were not persisted by the writing version surface as ``None``
-        — e.g. a bundle built with v2 has no ``embedding_dim``.
+        — e.g. an index built with v2 has no ``embedding_dim``.
 
         Use `check_index_compatible` for an opinionated
         compatibility check; reach for this property when you need a
@@ -3283,7 +3000,7 @@ class Catalog:
         Raises `IncompatibleIndexError` when the persisted sidecar
         disagrees with the caller's expectations.
 
-        No-op when the bundle has no embeddings sidecar yet — there is
+        No-op when the edition has no embeddings sidecar yet — there is
         nothing to be incompatible with. No-op when neither *model_name*
         nor *embedding_dim* is supplied. ``None`` arguments are ignored
         (only fields the caller cares about get checked).
@@ -3312,13 +3029,13 @@ class Catalog:
             raise IncompatibleIndexError(msg)
 
     def attach_embedding_model(self, model: EmbeddingModel) -> None:
-        """Attach an encoder to a folder-mode store opened from disk.
+        """Attach an encoder to a store over an edition with a vector index.
 
-        Required for `hybrid_search` and `semantic_search` on stores opened
-        from a folder.  The constructor restores the *name* of the encoder
-        used at
-        ``build_index`` time (from ``<catalog>/search/embeddings.json``)
-        but cannot re-instantiate the encoder itself — statcatlib core has no
+        Required for hybrid and semantic search on a view opened without
+        ``embedding_model=``. The store restores the *name* of the encoder
+        used at ``build_index`` time (from the edition's
+        ``search/embeddings.json``) but cannot re-instantiate the encoder
+        itself — statcatlib core has no
         dependency on ``sentence-transformers`` or any specific encoder
         library.
 
@@ -3331,7 +3048,7 @@ class Catalog:
             model: The encoder, the one `embedding_model_name` names.
 
         Example:
-            store = Catalog("data/catalog").open()
+            store = Catalog.open("data/catalog").product("p").view()
             if store.embedding_model_name:
                 from sentence_transformers import SentenceTransformer
 
@@ -3348,19 +3065,6 @@ class Catalog:
     def query_prefix(self) -> str:
         """Prefix prepended to queries at search time (e.g. ``"query: "``)."""
         return self._query_prefix
-
-    @property
-    def cursor(self) -> duckdb.DuckDBPyConnection:
-        """A fresh DuckDB cursor with ``search_path='statcat'``.
-
-        Returns a new cursor each call so ad-hoc reads never leave an
-        implicit transaction that blocks ``store.transaction()``::
-
-            store.cursor.execute("SELECT identifier FROM dataset WHERE kind = 'open'")
-        """
-        cur = self.connection.cursor()
-        cur.execute("SET search_path = 'statcat'")
-        return cur
 
     @property
     def themes(self) -> ThemesScope:
@@ -3625,82 +3329,53 @@ class Catalog:
             related=tuple(related),
         )
 
-    def __enter__(self) -> Self:
-        if self._conn is None:
-            self.open()
-        return self
+    def _close(self, closed: Callable[[], Exception]) -> None:
+        """Close every cursor this store made; later calls raise what *closed* returns.
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
-
-    def close(self) -> None:
-        """Close the database connection (only if this catalog owns it).
-
-        After ``close()``, the catalog can be re-opened with `open`.
+        Args:
+            closed: Makes the exception every later call raises, such as
+                `WorkingCopyClosedError` once a working copy is sealed.
         """
-        if self._conn is not None and self._owns_connection:
-            self._conn.close()
-        self._conn = None
-        # Drop all per-thread cursors — they're invalidated with the connection.
+        with self._cursor_lock:
+            cursors = list(self._cursors)
+            self._cursors.clear()
+            self._closed = closed
+        for cursor in cursors:
+            with contextlib.suppress(Exception):
+                cursor.close()
         self._cursor_local = threading.local()
-        self._registry = None
 
-    @property
-    def _c(self) -> duckdb.DuckDBPyConnection:
-        """Return this thread's DuckDB cursor, creating it on first access.
+    def _require_open(self) -> None:
+        """Raise the error `_close` recorded, once the store is closed."""
+        closed = self._closed
+        if closed is not None:
+            raise closed()
 
-        DuckDB cursors are not thread-safe: concurrent ``execute()`` calls on
-        the same cursor corrupt its pending-result state and surface as
-        ``InvalidInputException``. Each thread therefore gets its own cursor
-        on the shared connection, lazily created and cached in
-        ``self._cursor_local`` (a `threading.local`). The cursor's
-        ``search_path`` is pinned to ``statcat`` to match the connection-level
-        schema setup done in `open`.
+    def _cursor(self) -> duckdb.DuckDBPyConnection:
+        """Return this thread's cursor on the edition, creating it on first use.
+
+        The cursor has run ``USE "<catalog_name>".statcat``
+        (`schema.use_statcat`), so every name resolves inside this edition's
+        catalog. DuckDB cursors are not thread-safe: concurrent ``execute()``
+        calls on one cursor corrupt its pending-result state. Each thread
+        therefore gets its own, cached in a `threading.local`.
+
+        Returns:
+            The cursor.
         """
-        conn = self._conn
-        if conn is None:
-            msg = (
-                f"Catalog({self._uri!r}) is not open. Use it as a context manager "
-                "(``with Catalog(uri) as cat: ...``) or call ``.open()`` first."
-            )
-            raise RuntimeError(msg)
-        cursor = getattr(self._cursor_local, "cursor", None)
+        self._require_open()
+        cursor: duckdb.DuckDBPyConnection | None = getattr(self._cursor_local, "cursor", None)
         if cursor is None:
-            cursor = conn.cursor()
-            cursor.execute("SET search_path = 'statcat'")
+            cursor = _catalog_schema.use_statcat(self._cursor_factory(), self._catalog_name)
+            with self._cursor_lock:
+                self._cursors.append(cursor)
             self._cursor_local.cursor = cursor
         return cursor
 
     @property
-    def bundle_dir(self) -> Path | None:
-        """The bundle directory in folder mode, else ``None`` for in-memory.
-
-        Holds ``meta.duckdb``, ``lake.ducklake``, ``parquet/``, and
-        optional ``search/``.
-        """
-        return self._bundle_dir
-
-    @property
-    def data(self) -> sdmxlib.DuckDBDataStore:
-        """The bundle's data plane.
-
-        A `sdmxlib.DuckDBDataStore` sharing the catalog's DuckDB
-        connection, with the DuckLake sidecar ATTACHed as ``lake``
-        (folder mode) or unattached (in-memory / shared-connection mode).
-        Producers write observations through
-        ``cat.data.write_observations(schema, table, source)``; that
-        routes through the lake when one is attached.
-
-        Raises:
-            RuntimeError: If the catalog hasn't been opened.
-        """
-        if self._data is None:
-            msg = (
-                f"Catalog({self._uri!r}) is not open. Use it as a context manager "
-                "(``with Catalog(uri) as cat: ...``) or call ``.open()`` first."
-            )
-            raise RuntimeError(msg)
-        return self._data
+    def _c(self) -> duckdb.DuckDBPyConnection:
+        """This thread's cursor on the edition: `_cursor`."""
+        return self._cursor()
 
     def _exec(self, sql: str, params: Sequence[object] | None = None) -> None:
         """Execute a DDL or DML statement on the catalog cursor."""
@@ -3753,7 +3428,7 @@ class Catalog:
             self._bulk_depth -= 1
             if self._bulk_depth == 0:
                 self._c.execute("SET wal_autocheckpoint = '16MB'")
-                self.connection.execute("CHECKPOINT")
+                self._c.execute("CHECKPOINT")
 
     @contextlib.contextmanager
     def transaction(self) -> Generator[Self]:
@@ -3768,6 +3443,7 @@ class Catalog:
                         for ds in batch:
                             store.put(ds)
         """
+        self._require_writable("transaction()")
         self._c.begin()
         try:
             yield self
@@ -3781,9 +3457,18 @@ class Catalog:
     # ------------------------------------------------------------------
 
     def _require_writable(self, op: str) -> None:
-        """Raise if the catalog was opened ``read_only=True``."""
-        if self._read_only:
-            msg = f"Catalog opened read_only=True; {op} is not available."
+        """Raise unless this store belongs to a working copy.
+
+        Args:
+            op: The write asked for, for the message.
+
+        Raises:
+            RuntimeError: The store is over a sealed edition, which is never
+                written.
+        """
+        self._require_open()
+        if not self._writable:
+            msg = f"{op} writes, and a sealed edition is never written; write through a WorkingCopy"
             raise RuntimeError(msg)
 
     def put(self, obj: Dataset | ConceptScheme | Sequence[Dataset | ConceptScheme]) -> None:
@@ -3998,7 +3683,10 @@ class Catalog:
         """
         # Guard: sdmx schema may not exist if no SDMX data has been ingested
         has_sdmx = self._c.execute(
-            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'sdmx'"
+            """
+            SELECT COUNT(*) FROM information_schema.schemata
+            WHERE catalog_name = current_database() AND schema_name = 'sdmx'
+            """
         ).fetchone()
         if not has_sdmx or has_sdmx[0] == 0:
             return []
@@ -4153,7 +3841,7 @@ class Catalog:
 
         One row per ``(concept_urn, lang)``. ``id`` is the concept URN so
         FTS hits dedupe by concept identity; ``entity_type='concept'``
-        keeps these rows out of `Catalog.search` (which filters to
+        keeps these rows out of `EditionView.search` (which filters to
         dataset kinds).
 
         Args:
@@ -4165,7 +3853,10 @@ class Catalog:
             One row dict per (concept, language), ready for the Lance writer.
         """
         has_sdmx = self._c.execute(
-            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'sdmx'"
+            """
+            SELECT COUNT(*) FROM information_schema.schemata
+            WHERE catalog_name = current_database() AND schema_name = 'sdmx'
+            """
         ).fetchone()
         if not has_sdmx or has_sdmx[0] == 0:
             return []
@@ -4258,7 +3949,10 @@ class Catalog:
             Lance writer.
         """
         has_sdmx = self._c.execute(
-            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'sdmx'"
+            """
+            SELECT COUNT(*) FROM information_schema.schemata
+            WHERE catalog_name = current_database() AND schema_name = 'sdmx'
+            """
         ).fetchone()
         if not has_sdmx or has_sdmx[0] == 0:
             return []
@@ -4574,7 +4268,7 @@ class Catalog:
             """
             SELECT COUNT(*)
             FROM information_schema.tables
-            WHERE table_schema = 'sdmx'
+            WHERE table_catalog = current_database() AND table_schema = 'sdmx'
               AND table_name IN ('metadata_target', 'metadata_value')
             """
         ).fetchone()
@@ -4653,13 +4347,13 @@ class Catalog:
                 f"{doc!r} and queries with {qry!r}, but document_prefix is empty. "
                 "The two sides will not share an embedding space and vector "
                 "recall will be quietly worse. Pass document_prefix / "
-                "query_prefix to build_index() or to Catalog().",
+                "query_prefix to build_index() or to working_copy().",
                 stacklevel=3,
             )
         if model_name is None and (self._document_prefix or self._query_prefix):
             warnings.warn(
                 "document_prefix / query_prefix are set but model_name is not, "
-                "so no embeddings.json is written and the next open() restores "
+                "so no embeddings.json is written and a later view restores "
                 "neither. Queries would then run unprefixed against prefixed "
                 "vectors. Pass model_name to build_index() to pin them.",
                 stacklevel=3,
@@ -4983,11 +4677,10 @@ class Catalog:
     ) -> None:
         """Update `embedding_metadata` and write the sidecar.
 
-        Becomes a partial no-op for in-memory catalogs (in-memory has no
-        bundle dir to write to) but the in-memory ``EmbeddingMetadata``
-        is still updated so query-side helpers work within the session.
-        Without a *model_name* the sidecar is not written — there is
-        nothing meaningful for a later `open` to recover.
+        Without a ``search/`` directory nothing is written, but the
+        ``EmbeddingMetadata`` is still updated so query-side helpers work
+        within the session. Without a *model_name* the sidecar is not
+        written: there is nothing meaningful for a later view to recover.
         """
         # Resolve the carried-forward model name: explicit argument wins,
         # otherwise reuse whatever a previous build (or open()) recorded.
@@ -6789,8 +6482,8 @@ class Catalog:
                     col_expr = f"d.{spec.field}"
                 clause = f"{col_expr} {'DESC' if spec.desc else 'ASC'}"
                 if spec.nulls is not None:
-                    if spec.nulls not in Catalog._NULLS_OPTIONS:
-                        msg = f"Invalid nulls option: {spec.nulls!r}. Allowed: {sorted(Catalog._NULLS_OPTIONS)}"
+                    if spec.nulls not in _Store._NULLS_OPTIONS:
+                        msg = f"Invalid nulls option: {spec.nulls!r}. Allowed: {sorted(_Store._NULLS_OPTIONS)}"
                         raise ValueError(msg)
                     clause += f" NULLS {spec.nulls.upper()}"
                 parts.append(clause)
@@ -7085,7 +6778,7 @@ class Catalog:
     def _resolve_codelist_urn(self, dataflow_urn: str, dimension_id: str) -> str | None:
         """Resolve the codelist URN for a specific dimension of a dataflow."""
         try:
-            rows = self.connection.execute(
+            rows = self._c.execute(
                 """
                 SELECT dc.codelist_urn
                 FROM sdmx.dataflow df
@@ -7111,7 +6804,7 @@ class Catalog:
         """
         lang = sdmxlib.normalize_tag(lang)
         try:
-            rows = self.connection.execute(
+            rows = self._c.execute(
                 """
                 SELECT dc.component_id, c.code_id, c.name[?]
                 FROM statcat.dataset d
@@ -7138,7 +6831,7 @@ class Catalog:
         dataset has no SDMX link or the dimension has no enumerated codelist.
         """
         try:
-            rows = self.connection.execute(
+            rows = self._c.execute(
                 """
                 SELECT dc.codelist_urn
                 FROM statcat.dataset d
@@ -7170,7 +6863,7 @@ class Catalog:
         if ds.sdmx_dataflow_urn is None:
             return None
         try:
-            rows = self.connection.execute(
+            rows = self._c.execute(
                 "SELECT dsd_urn FROM sdmx.dataflow WHERE urn = ? LIMIT 1",
                 [ds.sdmx_dataflow_urn],
             ).fetchall()
@@ -7216,6 +6909,7 @@ class Catalog:
         notes: str | None = None,
     ) -> None:
         """Record a PROV-O-aligned lineage edge between two datasets."""
+        self._require_writable("add_lineage()")
         row_id = hashlib.md5(  # noqa: S324
             f"{source_id}:{target_id}:{relationship}".encode()
         ).hexdigest()
@@ -7263,12 +6957,17 @@ class Catalog:
             pairs: Each primary tag mapped to its alternate tags.
             source: Where the pairs come from, such as the portal's base URL.
 
+        Each tag is stored as `sdmxlib.normalize_tag` spells it, lowercase, as
+        every other tag in the catalog is.
+
         Raises:
             TypeError: The alternates of a primary tag are a single string
                 rather than a sequence of tags.
             ValueError: A tag is empty, an alternate equals its primary, an
                 alternate is already recorded under another primary, or a tag
                 would be both a primary and an alternate. Nothing is written.
+                A tag that is not well-formed raises `sdmxlib.InvalidTagError`,
+                a `ValueError`.
         """
         self._require_writable("add_language_alternates()")
         existing: dict[str, str] = {
@@ -7276,14 +6975,16 @@ class Catalog:
             for alt, primary in self._c.execute("SELECT alternate_tag, primary_tag FROM language_alternate").fetchall()
         }
         new: dict[str, str] = {}
-        for primary, alternates in pairs.items():
+        for given_primary, alternates in pairs.items():
             if isinstance(alternates, str):
-                msg = f"alternates of {primary!r} must be a sequence of tags, got the string {alternates!r}"
+                msg = f"alternates of {given_primary!r} must be a sequence of tags, got the string {alternates!r}"
                 raise TypeError(msg)
-            for alt in alternates:
-                if not primary.strip() or not alt.strip():
-                    msg = f"language tags must be non-empty, got {primary!r} -> {alt!r}"
+            for given in alternates:
+                if not given_primary.strip() or not given.strip():
+                    msg = f"language tags must be non-empty, got {given_primary!r} -> {given!r}"
                     raise ValueError(msg)
+                primary = sdmxlib.normalize_tag(given_primary)
+                alt = sdmxlib.normalize_tag(given)
                 if alt == primary:
                     msg = f"{alt!r} cannot be an alternate of itself"
                     raise ValueError(msg)
@@ -7315,3 +7016,387 @@ class Catalog:
             ORDER BY primary_tag, alternate_tag"""
         ).fetchall()
         return [Row(primary_tag=p, alternate_tag=a, source=s) for p, a, s in rows]
+
+
+class EditionView:
+    """A read-only view of one edition: its datasets, codes, concepts, search and facets.
+
+    `Product.view` returns one over the product's live edition, and
+    `WorkingCopy.view` one over the working copy, which sees the working
+    copy's writes as they are made. It has the query methods, scopes and
+    projections, and no write method.
+
+    A view stays on its edition. A process that follows the live edition calls
+    ``product.view()`` again after `Catalog.refresh`.
+    """
+
+    _store: _Store
+
+    def __init__(self, *args: object, _store: _Store | None = None, **kwargs: object) -> None:
+        """Refuse construction from outside, with a TypeError: `Product.view` and `WorkingCopy.view` return views."""
+        if _store is None or args or kwargs:
+            msg = "open a view with Catalog.open(path).product(id).view(), or wc.view() on a WorkingCopy"
+            raise TypeError(msg)
+        self._store = _store
+
+    @classmethod
+    def _over(cls, store: _Store) -> Self:
+        """A view over *store*, which its owner closes."""
+        return cls(_store=store)
+
+    def _s(self) -> _Store:
+        """The store, once it is checked open."""
+        self._store._require_open()
+        return self._store
+
+    def _cursor(self) -> duckdb.DuckDBPyConnection:
+        """This thread's cursor on the edition, with ``USE "<catalog>".statcat`` run.
+
+        Private: for statcatlib's tests, which run raw SQL against an edition.
+        """
+        return self._s()._cursor()
+
+    @property
+    def registry(self) -> sdmxlib.EditionRegistry:
+        """The sdmxlib read surface over the same edition: ``get``, ``query``, ``obs``.
+
+        A sealed edition's `sdmxlib.EditionRegistry`; for a working copy's
+        view, its build registry.
+        """
+        return self._s().registry
+
+    # -- search index ----------------------------------------------------
+
+    @property
+    def index_annotations(self) -> IndexAnnotations | None:
+        """The annotation types the search index was built from, and their fingerprint."""
+        return self._s().index_annotations
+
+    @property
+    def index_layout(self) -> dict[str, LanguageLayout]:
+        """What each language's search table was built with: rows and stemmer."""
+        return self._s().index_layout
+
+    @property
+    def embedding_metadata(self) -> EmbeddingMetadata | None:
+        """The embedding model and settings the search index was built with, or ``None``."""
+        return self._s().embedding_metadata
+
+    @property
+    def embedding_model_name(self) -> str | None:
+        """The model id that produced the vector index, if known."""
+        return self._s().embedding_model_name
+
+    @property
+    def document_prefix(self) -> str:
+        """Prefix prepended to documents at index time (e.g. ``"passage: "``)."""
+        return self._s().document_prefix
+
+    @property
+    def query_prefix(self) -> str:
+        """Prefix prepended to queries at search time (e.g. ``"query: "``)."""
+        return self._s().query_prefix
+
+    def check_index_compatible(self, *, model_name: str | None = None, embedding_dim: int | None = None) -> None:
+        """Raise `IncompatibleIndexError` when the index was built with another model or width.
+
+        Args:
+            model_name: The encoder id the caller loaded.
+            embedding_dim: The width of the caller's vectors.
+        """
+        self._s().check_index_compatible(model_name=model_name, embedding_dim=embedding_dim)
+
+    def attach_embedding_model(self, model: EmbeddingModel) -> None:
+        """Attach the encoder `embedding_model_name` names, for vector and hybrid search.
+
+        Args:
+            model: The encoder.
+        """
+        self._s().attach_embedding_model(model)
+
+    # -- scopes ----------------------------------------------------------
+
+    @property
+    def themes(self) -> ThemesScope:
+        """Lazy scope over theme classification schemes: ``view.themes["subjects"]``."""
+        return self._s().themes
+
+    @property
+    def concept_schemes(self) -> ConceptSchemesScope:
+        """Lazy scope over SKOS concept schemes: ``view.concept_schemes["uri"]``."""
+        return self._s().concept_schemes
+
+    @property
+    def codes(self) -> CodesScope:
+        """Typed search and lookup over SDMX codes: ``view.codes.find("Toronto")``."""
+        return self._s().codes
+
+    @property
+    def concepts(self) -> ConceptsScope:
+        """Typed search and lookup over SDMX concepts: ``view.concepts.find("Gini")``."""
+        return self._s().concepts
+
+    @property
+    def datasets(self) -> DatasetsScope:
+        """Typed dataset search: ``view.datasets.find(q, mode="hybrid")``."""
+        return self._s().datasets
+
+    @property
+    def reference_metadata(self) -> ReferenceMetadataScope:
+        """Typed search over indexed SDMX reference-metadata sections."""
+        return self._s().reference_metadata
+
+    @property
+    def codelists(self) -> CodelistsScope:
+        """Every codelist the edition holds."""
+        return self._s().codelists
+
+    def dataset(self, identifier: str) -> DatasetScope:
+        """Scope for one dataset: its codelists, themes and lineage.
+
+        Args:
+            identifier: The dataset's identifier.
+
+        Returns:
+            The scope.
+        """
+        return self._s().dataset(identifier)
+
+    def codelist(self, urn: str) -> CodelistScope:
+        """Scope for one codelist, by URN.
+
+        Args:
+            urn: The codelist's URN.
+
+        Returns:
+            The scope.
+        """
+        return self._s().codelist(urn)
+
+    def dimensions(self, ds: AggregateDataset) -> DimensionsScope:
+        """Scope over a dataset's dimensions.
+
+        Args:
+            ds: The dataset.
+
+        Returns:
+            The scope.
+        """
+        return self._s().dimensions(ds)
+
+    # -- queries ---------------------------------------------------------
+
+    def get[T: BaseDataset](self, cls: type[T], identifier: str) -> T | None:
+        """The dataset *identifier* of type *cls*, with every relationship loaded, or ``None``.
+
+        Args:
+            cls: The dataset class to narrow to.
+            identifier: The dataset's identifier.
+
+        Returns:
+            The dataset, or ``None``.
+        """
+        return self._s().get(cls, identifier)
+
+    def query[T](self, cls: type[T], **filters: object) -> QueryBuilder[T]:
+        """A structured query over datasets of *cls*, filtered by keyword.
+
+        Args:
+            cls: The dataset class to narrow to.
+            **filters: Field filters, as `QueryBuilder.filter` takes them.
+
+        Returns:
+            The query builder, for chaining.
+        """
+        return self._s().query(cls, **filters)
+
+    def search(
+        self,
+        text: str,
+        *,
+        kinds: Sequence[str] = ("dataset", "concept", "code"),
+        lang: str = "en",
+        limit: int = 50,
+        offset: int = 0,
+        operator: str = "or",
+        fuzzy: int = 0,
+        rrf_k: int = 60,
+        per_kind_oversample: int = 100,
+    ) -> SearchResult[AnyHit]:
+        """Search every indexed entity kind, RRF-merged.
+
+        Args:
+            text: The query text.
+            kinds: The entity kinds to search.
+            lang: The language whose table each kind is searched in.
+            limit: Hits to return.
+            offset: Hits to skip.
+            operator: ``"or"`` or ``"and"`` between query terms.
+            fuzzy: Edit distance for fuzzy term matching.
+            rrf_k: The reciprocal-rank-fusion constant.
+            per_kind_oversample: Hits fetched per kind before the merge.
+
+        Returns:
+            The merged hits, best first.
+        """
+        return self._s().search(
+            text,
+            kinds=kinds,
+            lang=lang,
+            limit=limit,
+            offset=offset,
+            operator=operator,
+            fuzzy=fuzzy,
+            rrf_k=rrf_k,
+            per_kind_oversample=per_kind_oversample,
+        )
+
+    def facets(self, *fields: str) -> dict[str, dict[str, int]]:
+        """Counts per value of each field, across every dataset.
+
+        Args:
+            *fields: The facet fields.
+
+        Returns:
+            ``{field: {value: count}}``.
+        """
+        return self._s().facets(*fields)
+
+    def agent_labels(self, lang: str = "en") -> dict[str, str]:
+        """Each agent's name in *lang*, by agent id.
+
+        Args:
+            lang: The language tag.
+
+        Returns:
+            The labels, by agent id.
+        """
+        return self._s().agent_labels(lang)
+
+    def concept_labels(self, lang: str = "en", *, scheme_uri: str | None = None) -> dict[str, str]:
+        """Each concept's label in *lang*, by concept URI.
+
+        Args:
+            lang: The language tag.
+            scheme_uri: Restrict to one concept scheme.
+
+        Returns:
+            The labels, by concept URI.
+        """
+        return self._s().concept_labels(lang, scheme_uri=scheme_uri)
+
+    def spatial_labels(self, lang: str = "en") -> dict[str, str]:
+        """Each spatial facet key's label in *lang*.
+
+        Args:
+            lang: The language tag.
+
+        Returns:
+            The labels, by facet key.
+        """
+        return self._s().spatial_labels(lang)
+
+    def get_concept_scheme(self, uri: str) -> ConceptScheme | None:
+        """A concept scheme with its concepts, or ``None``.
+
+        Args:
+            uri: The scheme's URI.
+
+        Returns:
+            The scheme, or ``None``.
+        """
+        return self._s().get_concept_scheme(uri)
+
+    def get_concept(self, uri: str) -> Concept | None:
+        """One concept, or ``None``.
+
+        Args:
+            uri: The concept's URI.
+
+        Returns:
+            The concept, or ``None``.
+        """
+        return self._s().get_concept(uri)
+
+    def code_map(self, dataset_id: str, lang: str = "en") -> dict[str, dict[str, str]]:
+        """``{dimension_id: {code_id: label}}`` for a dataset.
+
+        Args:
+            dataset_id: The dataset's identifier.
+            lang: The language of the labels.
+
+        Returns:
+            The labels, by dimension and code.
+        """
+        return self._s().code_map(dataset_id, lang)
+
+    def codelist_for(self, dataset_id: str, dimension: str) -> sdmxlib.model.codelist.Codelist | None:
+        """The codelist of one dimension of a dataset, or ``None``.
+
+        Args:
+            dataset_id: The dataset's identifier.
+            dimension: The dimension's id.
+
+        Returns:
+            The codelist, or ``None``.
+        """
+        return self._s().codelist_for(dataset_id, dimension)
+
+    def get_structure(self, ds: AggregateDataset) -> sdmxlib.model.datastructure.DataStructure | None:
+        """The data structure of an `AggregateDataset`, or ``None``.
+
+        Args:
+            ds: The dataset.
+
+        Returns:
+            The data structure, or ``None``.
+        """
+        return self._s().get_structure(ds)
+
+    def metadata_for(
+        self,
+        target_urn: str | sdmxlib.SdmxUrn[object],
+        *,
+        structure_urn: str | sdmxlib.SdmxUrn[object] | None = None,
+    ) -> list[sdmxlib.MetadataSet]:
+        """Every reference-metadata set attached to *target_urn*.
+
+        Args:
+            target_urn: The artefact URN.
+            structure_urn: Restrict to sets of this MSD or metadataflow.
+
+        Returns:
+            The sets, in insertion order.
+        """
+        return self._s().metadata_for(target_urn, structure_urn=structure_urn)
+
+    def metadata_report(self, set_urn: str | sdmxlib.SdmxUrn[object]) -> list[sdmxlib.MetadataSection]:
+        """The sections of a reference-metadata set, typed by its MSD.
+
+        Args:
+            set_urn: The set's URN.
+
+        Returns:
+            One section per reported value.
+        """
+        return self._s().metadata_report(set_urn)
+
+    def metadata_targets(self, set_urn: str | sdmxlib.SdmxUrn[object]) -> list[str]:
+        """The artefact URNs a reference-metadata set describes.
+
+        Args:
+            set_urn: The set's URN.
+
+        Returns:
+            The URNs, in order.
+        """
+        return self._s().metadata_targets(set_urn)
+
+    def language_alternates(self) -> list[Row]:
+        """The language tags recorded as alternates of a primary tag."""
+        return self._s().language_alternates()
+
+
+#: The public attributes of `EditionView`, which `Catalog` names in its guided
+#: errors (`Catalog.__getattr__`).
+VIEW_ATTRIBUTES: frozenset[str] = frozenset(name for name in dir(EditionView) if not name.startswith("_"))

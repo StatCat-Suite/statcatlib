@@ -11,6 +11,7 @@ from sdmxlib.model.codelist import Code, Codelist
 
 import statcatlib as sc
 import statcatlib.query as q
+from tests.conftest import ScratchStore, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -18,8 +19,8 @@ _GEO = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
 
 
 @pytest.fixture
-def store() -> sc.Catalog:
-    cat = sc.Catalog().open()
+def store() -> ScratchStore:
+    cat = open_scratch()
     cat.put(
         sc.OpenDataset(
             identifier="d1",
@@ -40,17 +41,17 @@ def store() -> sc.Catalog:
     return cat
 
 
-def test_a_mixed_case_region_tag_finds_the_lowercase_label(store: sc.Catalog) -> None:
+def test_a_mixed_case_region_tag_finds_the_lowercase_label(store: ScratchStore) -> None:
     rows = store.query(sc.OpenDataset).select("title", lang="fr-CA").rows()
     assert [row.title for row in rows] == ["Population du Québec"]
 
 
-def test_an_uppercase_tag_finds_the_lowercase_label(store: sc.Catalog) -> None:
+def test_an_uppercase_tag_finds_the_lowercase_label(store: ScratchStore) -> None:
     assert store.query(sc.OpenDataset).filter(q.title_contains("totale", lang="FR")).count() == 1
     assert store.query(sc.OpenDataset).scalars("title", lang="FR").values() == ["Population totale"]
 
 
-def test_a_malformed_tag_raises(store: sc.Catalog) -> None:
+def test_a_malformed_tag_raises(store: ScratchStore) -> None:
     with pytest.raises(sdmxlib.InvalidTagError):
         store.query(sc.OpenDataset).select("title", lang="fr_CA!")
     with pytest.raises(sdmxlib.InvalidTagError):
@@ -59,7 +60,7 @@ def test_a_malformed_tag_raises(store: sc.Catalog) -> None:
         store.codelist(_GEO).lang("fr_CA!")
 
 
-def test_the_lang_setter_normalises_as_the_parameter_does(store: sc.Catalog) -> None:
+def test_the_lang_setter_normalises_as_the_parameter_does(store: ScratchStore) -> None:
     by_setter = store.codelist(_GEO).lang("EN").batch_labels(["CA"])
     by_parameter = store.codelist(_GEO).batch_labels(["CA"], lang="en")
     assert by_setter == by_parameter == {"CA": "Canada"}

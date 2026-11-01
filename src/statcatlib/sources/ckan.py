@@ -38,9 +38,10 @@ from statcatlib.model.licence import LicenceDocument
 from statcatlib.model.skos import Concept, ConceptRef, ConceptScheme, concept_uri
 from statcatlib.model.spatial import SpatialCoverage
 from statcatlib.model.temporal import Frequency, TemporalCoverage
+from statcatlib.sources.sdmx import require_working_copy
 
 if TYPE_CHECKING:
-    from statcatlib.store.store import Catalog
+    from statcatlib.store.working_copy import WorkingCopy
 
 __all__ = ["CkanClient", "choice_scheme_uri", "ingest_ckan"]
 
@@ -342,6 +343,22 @@ def _seq(v: object) -> list[object]:
     return list(v) if isinstance(v, list) else []
 
 
+def _tag(tag: str, what: str) -> str | None:
+    """*tag* normalised, or ``None`` when it is malformed.
+
+    The tag is stripped, ``_`` becomes ``-``, and `sdmxlib.normalize_tag`
+    lowercases and checks it. A malformed tag is logged at WARNING, naming
+    *what* is dropped, and counted for `ingest_ckan`.
+    """
+    try:
+        return normalize_tag(tag.strip().replace("_", "-"))
+    except InvalidTagError:
+        log.warning("dropped %s with the malformed language tag %r", what, tag)
+        if (dropped := _dropped_tags.get()) is not None:
+            dropped[tag] += 1
+        return None
+
+
 def _lang_map(raw: Mapping[object, object]) -> dict[str, str]:
     """The non-empty string values of *raw*, keyed by normalised language tag.
 
@@ -354,13 +371,8 @@ def _lang_map(raw: Mapping[object, object]) -> dict[str, str]:
     for tag, text in raw.items():
         if not (isinstance(tag, str) and isinstance(text, str) and text.strip()):
             continue
-        repaired = tag.strip().replace("_", "-")
-        try:
-            normalised = normalize_tag(repaired)
-        except InvalidTagError:
-            log.warning("dropped a text with the malformed language tag %r", tag)
-            if (dropped := _dropped_tags.get()) is not None:
-                dropped[tag] += 1
+        normalised = _tag(tag, "a text")
+        if normalised is None:
             continue
         if normalised in texts:
             log.warning("the language tag %r normalises to %r, already held: kept the first text", tag, normalised)
@@ -605,7 +617,11 @@ def _ckan_package_to_dataset(raw: dict[str, object], *, regions: ConceptScheme |
             lang_raw = json.loads(lang_raw)
         except json.JSONDecodeError, ValueError:
             lang_raw = [lang_raw]
-    language: list[str] = [str(lang) for lang in _seq(lang_raw) if lang]
+    # Normalised as text keys are, so `language` holds the same spelling of a
+    # tag as every multilingual field (GH-102).
+    language = list(
+        dict.fromkeys(tag for lang in _seq(lang_raw) if lang and (tag := _tag(str(lang), "a language")) is not None)
+    )
 
     return OpenDataset(
         identifier=pkg_id,
@@ -632,7 +648,7 @@ def _ckan_package_to_dataset(raw: dict[str, object], *, regions: ConceptScheme |
 
 
 def ingest_ckan(
-    store: Catalog,
+    store: WorkingCopy,
     base_url: str,
     *,
     organization: str | None = None,
@@ -653,7 +669,7 @@ def ingest_ckan(
     portal sends.
 
     Args:
-        store: Target Catalog.
+        store: The working copy to write into.
         base_url: CKAN portal base URL, e.g. ``"https://open.canada.ca/data"``.
         organization: Optional CKAN organization name slug filter,
             e.g. ``"statcan-statcan"``.
@@ -661,8 +677,10 @@ def ingest_ckan(
         limit: Maximum number of datasets to ingest.
 
     Returns:
-        List of OpenDataset objects ingested.
+        List of OpenDataset objects ingested. A *store* that is not a
+        `WorkingCopy`, such as an `EditionView`, raises `TypeError`.
     """
+    store = require_working_copy(store, "ingest_ckan")
     with CkanClient(base_url) as client:
         raw_packages = client.package_search(
             organization=organization,

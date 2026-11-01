@@ -3,6 +3,7 @@
 import pytest
 
 import statcatlib as sc
+from tests.conftest import open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -13,11 +14,11 @@ class TestChaining:
         assert all(ds.publisher is not None and ds.publisher.name.as_dict().get("en") == "ECB" for ds in result.items)
         assert all(ds.status == "current" for ds in result.items)
 
-    def test_filter_and_search(self, indexed_store: sc.Catalog):
+    def test_filter_and_search(self, indexed_store: sc.EditionView):
         """Filter and BM25 search compose.
 
         Uses the indexed fixture: `QueryBuilder.search` needs a built index,
-        which the in-memory `store` cannot have. Unlike `Catalog.search`,
+        which the `store` fixture does not build. Unlike `EditionView.search`,
         this yields the entities themselves, not `Hit` wrappers.
         """
         result = indexed_store.query(sc.BaseDataset).filter(publisher="ECB").search("exchange").execute()
@@ -253,7 +254,7 @@ class TestExists:
         assert store.query(sc.AggregateDataset).exists() is True
 
     def test_exists_empty_store(self):
-        s = sc.Catalog().open()
+        s = open_scratch()
         assert s.query(sc.BaseDataset).exists() is False
 
 

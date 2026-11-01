@@ -6,20 +6,24 @@ rankings with Reciprocal Rank Fusion. This page explains each technique, how
 the index is built, and how search combines with structured filters. The calls
 themselves are documented in [Catalog API](api/store.md#search).
 
-Search needs the `statcatlib[search]` extra and a folder-mode catalog. Until
-`build_index()` has run, every search returns an empty result.
+Search runs on an `EditionView` and needs the `statcatlib[search]` extra. Each
+edition has its own search index. `wc.seal()` builds it from the edition's
+rows, so every sealed edition can be searched. A working copy's view,
+`wc.view()`, searches the index its last `wc.build_index()` built, or before
+that the index it carried from the previous edition; a product's first working
+copy returns empty results until `wc.build_index()` runs.
 
 ## What is indexed
 
-`build_index()` writes one search row per entity per language, into a LanceDB
-directory beside the catalog (`search/`):
+`build_index()` writes one search row per entity per language, into the
+edition's search index, a LanceDB directory:
 
 | Entity kind | Row text | Searched by |
 | --- | --- | --- |
-| Dataset | Title, description, keywords, theme labels and dimension names | `cat.datasets.find`, `cat.search`, `query(...).search()` |
-| Concept | The concept's name and its definition text | `cat.concepts.find`, `cat.search` |
-| Code | `"{dataset title} \| {dimension}: {code label}"`, with SKOS `altLabel` synonyms and `statcat:searchContext` text | `cat.codes.find`, `cat.search` |
-| Reference metadata | Sections of methodology and quality text, in chunks | `cat.reference_metadata.find`, `cat.search` with `kinds=("reference_metadata",)` |
+| Dataset | Title, description, keywords, theme labels and dimension names | `view.datasets.find`, `view.search`, `query(...).search()` |
+| Concept | The concept's name and its definition text | `view.concepts.find`, `view.search` |
+| Code | `"{dataset title} \| {dimension}: {code label}"`, with SKOS `altLabel` synonyms and `statcat:searchContext` text | `view.codes.find`, `view.search` |
+| Reference metadata | Sections of methodology and quality text, in chunks | `view.reference_metadata.find`, `view.search` with `kinds=("reference_metadata",)` |
 
 Theme labels and dimension names make a dataset findable by what it is about
 and how it is broken down, which its title often leaves out.
@@ -47,10 +51,10 @@ Each language has its own table, with its own full-text index:
 - **The table is the language filter.** A query reads only the table for its
   `lang`, which defaults to `"en"`. A French query needs `lang="fr"`.
 
-`Catalog.index_layout` reports each language's table, row count and stemmer:
+`EditionView.index_layout` reports each language's table, row count and stemmer:
 
 ```python
-print(cat.index_layout)
+print(view.index_layout)
 # {"en": {"table": "search_en__000001", "rows": 946, "stemmer": "English", ...},
 #  "fr": {"table": "search_fr__000001", "rows": 1173, "stemmer": "French", ...}}
 ```
@@ -85,7 +89,8 @@ get nearby vectors whatever their wording. Vector search embeds the query and
 returns the rows whose vectors are nearest to it.
 
 statcatlib has no built-in model. Pass any model with an `encode` method, such
-as a `sentence-transformers` model, to `build_index()` and to `Catalog`:
+as a `sentence-transformers` model, to `wc.build_index()`, and to
+`product.view()` to search a sealed edition:
 
 ```python
 from sentence_transformers import SentenceTransformer
@@ -93,21 +98,29 @@ from sentence_transformers import SentenceTransformer
 import statcatlib as sc
 
 model = SentenceTransformer("intfloat/multilingual-e5-small")
-with sc.Catalog("my-catalog", embedding_model=model) as cat:
-    cat.build_index(model)
-    hits = cat.datasets.find("people moving between provinces", mode="vector")
+with sc.Catalog.create("my-catalog", exist_ok=True) as cat:
+    with cat.product("14100287").working_copy() as wc:
+        ...  # ingest into wc
+        wc.build_index(model)
+        hits = wc.view().datasets.find("people moving between provinces", mode="vector")
+        wc.seal()  # rebuilds the index with the same model
+
+with sc.Catalog.open("my-catalog") as cat:
+    view = cat.product("14100287").view(embedding_model=model)
+    hits = view.datasets.find("people moving between provinces", mode="vector")
 ```
 
 `build_index()` records the model's name and its query and document prefixes
-in `search/embeddings.json`, and a later open restores the prefixes. Models
-such as the e5 family expect one (`"query: "`, `"passage: "`) on each text.
+in the index's `embeddings.json`, and `product.view()` restores the prefixes.
+Models such as the e5 family expect one (`"query: "`, `"passage: "`) on each
+text.
 
 A language's table gets an approximate nearest-neighbour index (`IVF_FLAT`)
 once it holds 256 rows with vectors. A smaller table is scanned in full, which
 at that size is faster and exact. `IVF_FLAT` keeps each vector whole, so
 approximate search returns the same neighbours as an exact scan. Indexes built
 before pinaxlib 5.24.0 (pinaxlib is statcatlib's former name) used a quantised
-index that misses many of them, and `Catalog.open()` warns when it finds one.
+index that misses many of them, and `product.view()` warns when it finds one.
 
 Vector search is best at synonyms, paraphrases and vague queries. It misses
 exact codes and rare names, which carry little meaning to a model.
@@ -135,11 +148,11 @@ rankings outscores one that leads a single ranking. Each hit's `source` says
 which evidence found it: `"bm25"`, `"vector"`, or `"hybrid"` for both.
 
 ```python
-for hit in cat.datasets.find("labour market monthly data", mode="hybrid", limit=20).items:
+for hit in view.datasets.find("labour market monthly data", mode="hybrid", limit=20).items:
     print(hit.score, hit.source, hit.payload.identifier)
 ```
 
-`cat.search()` uses the same fusion a second way: it runs BM25 over every
+`view.search()` uses the same fusion a second way: it runs BM25 over every
 entity kind it is given and merges their rankings into one list.
 
 ## Search with filters
@@ -151,7 +164,7 @@ relational and structural filters of a `QueryBuilder`:
 import statcatlib.query as q
 
 results = (
-    cat.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(q.has_code("GEO", "ON"), status="current")
     .hybrid_search("unemployment by region")
     .limit(20)
@@ -176,21 +189,27 @@ Both methods take `lang`, which names the table to search and defaults to
 `"en"`. A French query with filters needs `lang="fr"`:
 
 ```python
-cat.query(sc.AggregateDataset).filter(q.has_code("GEO", "QC")).search("chômage", lang="fr")
+view.query(sc.AggregateDataset).filter(q.has_code("GEO", "QC")).search("chômage", lang="fr")
 ```
 
 ## Keeping the index current
 
-The index is a snapshot of the catalog when `build_index()` ran. A dataset
-added afterwards is not searchable until the next build, and a rebuild writes a
-complete new set of tables, then switches to them in one step, so a failed
-rebuild leaves the previous index serving.
+A working copy's index is a snapshot of its rows when `wc.build_index()` ran.
+A dataset added afterwards is not searchable on `wc.view()` until the next
+build. A rebuild writes a complete new set of tables, then switches to them in
+one step, so a failed rebuild leaves the previous index serving.
+
+`wc.seal()` rebuilds the index from the edition's rows, with the arguments of
+the last `wc.build_index()` call, or the defaults when there was none, so a
+sealed edition's index holds exactly the sealed rows. `statcat build-index
+CATALOG PRODUCT` builds the index of a product's working copy from the command
+line and leaves the working copy unsealed.
 
 `build_index()` also records the annotations it read (`statcat:searchExclude`,
-`statcat:searchContext`, `skos:altLabel`). When an overlay changes them in the
-store afterwards, `Catalog.open()` warns that the index is out of date until
-the next build. Opening a catalog never rebuilds its index, because a published
-bundle must not change.
+`statcat:searchContext`, `skos:altLabel`). When an overlay changes them in a
+working copy afterwards, resuming the working copy warns that the index is out
+of date until the next build. Opening an edition never rebuilds its index,
+because a sealed edition does not change.
 
 The format of the index directory is specified in the
-[Bundle Format](bundle-format.md#4-the-search-index).
+[Catalog Format](catalog-format.md#4-the-search-index).

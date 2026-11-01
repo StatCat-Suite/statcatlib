@@ -1,15 +1,17 @@
 """LanceDB vector + full-text index for statcatlib search.
 
-Isolated from the core store so that lancedb is never imported unless an
-``embedding_model`` is passed to ``Catalog``, or ``search()`` is called
-on a folder-mode catalog.  Core statcatlib has no dependency on lancedb.
+Isolated from the core store so that lancedb is imported only when an
+edition's search index is opened, built or searched. Core statcatlib has no
+dependency on lancedb.
 
 Each language gets its own table, holding one row per entity in that
 language, with a text column (for BM25 full-text search via Tantivy) and
 an optional embedding column (for semantic nearest-neighbour search).
-Tables are generation-suffixed (``search_fr__000003``) and reached
-through a manifest, so a rebuild can write a whole new generation before
-committing to any of it.
+Tables are named by the edition that wrote them
+(``search_fr__019a2b...``, the edition id without hyphens) and reached
+through a manifest. An edition carries its previous edition's index
+(``LocalRegistry.build(previous=)``), and its seal writes the new tables
+before it commits to any of them, then drops the carried ones.
 
 The split is what lets each language carry its own tokenizer: Tantivy
 takes one stemmer and one stopword list per index, so a shared table
@@ -37,6 +39,8 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
+from sdmxlib import InvalidTagError, tag_alias
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -47,33 +51,26 @@ if TYPE_CHECKING:
 
 __all__: list[str] = ["LanceIndex", "make_schema"]
 
-#: Legacy single-table name. Catalogs built before per-language tables
-#: (pinaxlib 5.23.0) have exactly this one table, holding every language under a
-#: single English-stemmed FTS index. Read-only fallback; ``build_index``
-#: replaces it with the per-language layout.
-_TABLE = "search"
-
 #: Prefix for per-language tables. The full name carries the language and
-#: the generation that wrote it — ``search_fr__000003`` — so a rebuild's
-#: tables can sit alongside the ones still serving queries.
+#: the edition that wrote it, ``search_fr__<edition id without hyphens>``, so
+#: a seal's tables sit beside the carried ones until its manifest commits.
 _TABLE_PREFIX = "search_"
 
 #: Manifest naming the live table for each language. It is the single
 #: source of truth for what a query reads, which is what makes a rebuild
 #: atomic without ``rename_table`` — LanceDB OSS raises
-#: ``NotImplementedError`` for that. A rebuild writes new
-#: generation-suffixed tables, then replaces this file in a single atomic
-#: move; until that lands, every query still reads the previous
-#: generation. A crash therefore leaves the old index whole and serving,
-#: with the half-built tables merely orphaned.
+#: ``NotImplementedError`` for that. A rebuild writes new tables, then
+#: replaces this file in a single atomic move; until that lands, every query
+#: still reads the previous tables.
 _MANIFEST_FILE = "index.json"
-#: The newest manifest version this build reads; it reads every version from
-#: 1 up to this one. Bump it only when an existing field changes meaning or
-#: shape, as version 2 did to each ``languages`` entry. A new field does not
-#: bump it, because older readers ignore fields they do not know. A reader
-#: meeting a higher version refuses the catalog (GH-40), so a bump means
-#: every reader must upgrade before it serves an index built at it.
-_MANIFEST_VERSION = 2
+#: The manifest version this build writes and reads. Bump it only when an
+#: existing field changes meaning or shape. Version 2 changed each
+#: ``languages`` entry; version 3 names tables by edition id in place of a
+#: generation number (Phase 2a). A new field does not bump it, because older
+#: readers ignore fields they do not know. A reader refuses any other version
+#: (GH-40): an index of version 2 or lower exists only in a layout statcatlib
+#: 0.12 refuses, and a higher one needs a newer statcatlib.
+_MANIFEST_VERSION = 3
 
 #: Rows *carrying a vector* that a language's table needs before an ANN
 #: index is worth building. IVF-PQ needs this many to train at all, and
@@ -208,15 +205,22 @@ def _statcatlib_version() -> str:
         return "unknown"
 
 
-def _language_slug(lang: str) -> str:
-    """Return the table-name suffix for *lang* (``"fr-CA"`` → ``"fr_ca"``).
+def _table_name(lang: str, edition_id: str) -> str:
+    """The table holding *lang*'s rows in the index edition *edition_id* wrote.
 
-    Region subtags are preserved: ``fr-CA`` and ``fr-FR`` are different
-    corpora with different vocabularies, even though they stem alike, and
-    collapsing them would re-pool the document frequencies that separate
-    tables exist to keep apart.
+    The language part is `sdmxlib.tag_alias` (``"fr-CA"`` → ``"fr_ca"``); an
+    alias given here is kept as it is. Region subtags are kept: ``fr-CA`` and
+    ``fr-FR`` are different corpora with different vocabularies, even though
+    they stem alike, and collapsing them would re-pool the document
+    frequencies that separate tables keep apart.
     """
-    return lang.strip().lower().replace("-", "_")
+    alias = lang.strip().lower().replace("-", "_")
+    return f"{_TABLE_PREFIX}{alias}{_edition_suffix(edition_id)}"
+
+
+def _edition_suffix(edition_id: str) -> str:
+    """The suffix every table *edition_id* writes ends with."""
+    return f"__{edition_id.replace('-', '')}"
 
 
 def _stemmer_for(lang: str) -> str | None:
@@ -229,7 +233,7 @@ def _stemmer_for(lang: str) -> str | None:
     exist so French text is never stemmed with English rules, and a third
     language gets the same guarantee.
     """
-    return _SNOWBALL_LANGUAGE.get(_language_slug(lang).split("_")[0])
+    return _SNOWBALL_LANGUAGE.get(lang.strip().lower().replace("-", "_").split("_")[0])
 
 
 _EMBEDDING_COLUMN = "embedding"
@@ -268,7 +272,7 @@ _EXTENSION_COLUMNS: tuple[tuple[str, str], ...] = (
 
 
 class LanguageLayout(TypedDict):
-    """What one language's table was built with, as `Catalog.index_layout` reports it.
+    """What one language's table was built with, as `EditionView.index_layout` reports it.
 
     Public: this is the shape callers get back, and it is the thing to check
     after a build — "was French actually stemmed as French?" is answerable from
@@ -290,7 +294,7 @@ class LanguageLayout(TypedDict):
 
 
 class IndexAnnotations(TypedDict):
-    """The annotations an index was built from, as `Catalog.index_annotations` reports it.
+    """The annotations an index was built from, as `EditionView.index_annotations` reports it.
 
     `types` are the annotation types `build_index` read (what to exclude, what
     context and synonyms to fold in); `fingerprint` is a digest of every
@@ -315,7 +319,7 @@ class _Manifest(TypedDict):
 
     version: int
     written_by: str
-    generation: int
+    edition_id: str
     languages: dict[str, LanguageLayout]
     annotations: NotRequired[IndexAnnotations]
 
@@ -578,7 +582,7 @@ def _stopwords_for(lang: str | None) -> frozenset[str]:
     """Return the stopword set for *lang*, falling back to the union."""
     if lang is None:
         return _STOPWORDS
-    return _STOPWORDS_BY_LANG.get(_language_slug(lang).split("_")[0], _STOPWORDS)
+    return _STOPWORDS_BY_LANG.get(lang.strip().lower().replace("-", "_").split("_")[0], _STOPWORDS)
 
 
 def _strip_stopwords(text: str, lang: str | None = None) -> str:
@@ -755,16 +759,13 @@ class _LanguageIndex:
     French corpus.
 
     Because a table holds exactly one language, none of the search methods
-    filter on ``lang`` — membership is the filter. The exception is a
-    legacy single-table catalog (``filter_lang=True``), where this wraps
-    the shared table and must still narrow by language.
+    filter on ``lang``: membership is the filter.
     """
 
-    def __init__(self, db: lancedb.DBConnection, lang: str, name: str, *, filter_lang: bool = False) -> None:
+    def __init__(self, db: lancedb.DBConnection, lang: str, name: str) -> None:
         self._db = db
         self._lang = lang
         self._name = name
-        self._filter_lang = filter_lang
         self._tbl: lancedb.table.Table | None = None
         self._has_fts = False
         self._ann_index_type: str | None = None
@@ -778,7 +779,7 @@ class _LanguageIndex:
         Without this, the first BM25 query in each process rebuilt the
         index with ``replace=True``: every serving worker re-indexed on
         startup, and a read-only open wrote new index files into a
-        published bundle, breaking the checksums in its manifest.
+        sealed edition, breaking the digests in its manifest.
         Rows added after the index was built leave it partial, and then
         a rebuild is still due.
         """
@@ -937,10 +938,7 @@ class _LanguageIndex:
     # -- reads ---------------------------------------------------------
 
     def _where(self, *extra: str) -> str:
-        parts = [p for p in extra if p]
-        if self._filter_lang:
-            parts.insert(0, f"lang = '{self._lang}'")
-        return " AND ".join(parts)
+        return " AND ".join(p for p in extra if p)
 
     def bm25(
         self,
@@ -1024,14 +1022,20 @@ class LanceIndex:
     self-describing if one is ever inspected on its own.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, edition_id: str | None = None) -> None:
+        """Open the index in *path*.
+
+        Args:
+            path: The edition's ``search/`` directory.
+            edition_id: The edition whose tables a rebuild writes. ``None`` for
+                a sealed edition's index, which is only read.
+        """
         import lancedb  # noqa: PLC0415
 
         self._path = Path(path)
         self._db: lancedb.DBConnection = lancedb.connect(str(path))
         self._langs: dict[str, _LanguageIndex] = {}
-        self._legacy: lancedb.table.Table | None = None
-        self._generation = 0
+        self._edition_id = edition_id
         self._version: int | None = None
         self._annotations: IndexAnnotations | None = None
 
@@ -1039,66 +1043,29 @@ class LanceIndex:
         manifest = self._read_manifest()
         if manifest is not None:
             self._version = _as_int(manifest.get("version")) or None
-            self._generation = _as_int(manifest.get("generation"))
             self._annotations = _as_annotations(manifest.get("annotations"))
             languages = manifest.get("languages")
             entries = languages.items() if isinstance(languages, Mapping) else ()
             for lang, entry in entries:
                 layout = _as_layout(entry)
-                # v1 wrote the table name directly; v2 wraps it in a mapping.
-                table = layout["table"] if layout is not None else _as_opt_str(entry)
-                if table is not None and table in names:
-                    self._langs[str(lang)] = _LanguageIndex(self._db, str(lang), table)
-        if not self._langs and _TABLE in names:
-            # Catalog built before pinaxlib 5.23.0: one table, every language, one English
-            # stemmer. Served read-only so an existing bundle keeps
-            # working; build_index() replaces it with per-language tables.
-            self._legacy = self._db.open_table(_TABLE)
+                if layout is not None and layout["table"] in names:
+                    self._langs[str(lang)] = _LanguageIndex(self._db, str(lang), layout["table"])
         self._warn_if_stale()
 
     def _warn_if_stale(self) -> None:
-        """Warn once if this index is out of date, for any reason.
+        """Warn once if a language's vector index is quantised.
 
-        One warning rather than one per defect, because there is one
-        remedy: ``build_index()`` fixes every item below in a single
-        rebuild, and a caller who reads two warnings still does the same
-        thing. It also keeps the two from being triaged separately when
-        they are usually the same neglected bundle.
-
-        The two conditions co-occur. An index built before pinaxlib 5.23.0
-        also predates 5.24.0, so its single legacy table is stemmed as English
-        *and* carries an IVF_PQ vector index; warning about the stemming
-        alone would send someone to rebuild while leaving them unaware
-        their vector search was also degraded.
+        An index built before pinaxlib 5.24.0 carries an IVF_PQ vector index,
+        which returns roughly four fifths of the correct nearest neighbours.
+        ``build_index()`` replaces it.
         """
-        reasons: list[str] = []
-
-        if self._legacy is not None:
-            reasons.append(
-                "it predates per-language tables, so every language is stemmed "
-                "as English and non-English queries match fewer documents than "
-                "they should"
-            )
-
-        # Both the legacy table and the per-language ones can carry a vector
-        # index from before pinaxlib 5.24.0, and exactly one of the two is
-        # populated.
         stale_ann = sorted(lang for lang, index in self._langs.items() if index.ann_is_quantised())
-        if _ann_is_quantised(self._legacy):
-            stale_ann = ["the legacy table"]
-        if stale_ann:
-            reasons.append(
-                f"its vector index for {', '.join(stale_ann)} is quantised, so "
-                "vector and hybrid search return roughly four fifths of the "
-                "correct nearest neighbours, though the stored vectors "
-                "themselves are correct"
-            )
-
-        if not reasons:
+        if not stale_ann:
             return
-        detail = reasons[0] if len(reasons) == 1 else "; ".join(f"({i}) {r}" for i, r in enumerate(reasons, 1))
         warnings.warn(
-            f"search index is out of date: {detail}. Rebuild with build_index() to fix.",
+            f"search index is out of date: its vector index for {', '.join(stale_ann)} is quantised, so "
+            "vector and hybrid search return roughly four fifths of the correct nearest neighbours, though "
+            "the stored vectors themselves are correct. Rebuild with build_index() to fix.",
             stacklevel=3,
         )
 
@@ -1115,15 +1082,15 @@ class LanceIndex:
             path: The ``search/`` directory.
 
         Returns:
-            ``None`` when the manifest records a version from 1 to
-            `_MANIFEST_VERSION`, or there is no readable manifest; otherwise
-            the version it records and the statcatlib that wrote it.
+            ``None`` when the manifest records `_MANIFEST_VERSION`, or there is
+            no readable manifest; otherwise the version it records and the
+            statcatlib that wrote it.
         """
         manifest = _load_manifest(Path(path))
         if manifest is None:
             return None
         version = manifest.get("version")
-        if isinstance(version, int) and not isinstance(version, bool) and 1 <= version <= _MANIFEST_VERSION:
+        if isinstance(version, int) and not isinstance(version, bool) and version == _MANIFEST_VERSION:
             return None
         recorded = f"version {version}" if version is not None else "no version"
         written_by = manifest.get("written_by")
@@ -1143,7 +1110,7 @@ class LanceIndex:
         """
         return _load_manifest(self._path)
 
-    def _write_manifest(self, indexes: dict[str, _LanguageIndex], generation: int) -> None:
+    def _write_manifest(self, indexes: dict[str, _LanguageIndex]) -> None:
         """Atomically point the index at *indexes*.
 
         Written to a temporary file and moved into place, which is atomic
@@ -1157,15 +1124,11 @@ class LanceIndex:
         ``embeddings.json`` at all.
         """
         payload: _Manifest = {
-            # A reader meeting a manifest version above its own refuses the
-            # catalog (`unreadable_version`, GH-40). A statcatlib older than
-            # the manifest itself cannot: it looks for a table named
-            # "search", finds none, and returns no hits silently. Deploying
-            # the library ahead of any bundle built with it is therefore a
-            # hard ordering constraint.
+            # A reader meeting another manifest version refuses the catalog
+            # (`unreadable_version`, GH-40).
             "version": _MANIFEST_VERSION,
             "written_by": _statcatlib_version(),
-            "generation": generation,
+            "edition_id": self._writer(),
             "languages": {
                 lang: {
                     "table": index.name,
@@ -1195,12 +1158,24 @@ class LanceIndex:
 
     def _for(self, lang: str) -> _LanguageIndex | None:
         """Return the index serving *lang*, or ``None`` if nothing does."""
-        slug = _language_slug(lang)
-        if slug in self._langs:
-            return self._langs[slug]
-        if self._legacy is not None:
-            return _LanguageIndex(self._db, slug, _TABLE, filter_lang=True)
-        return None
+        try:
+            return self._langs.get(tag_alias(lang))
+        except InvalidTagError:
+            return None
+
+    def _writer(self) -> str:
+        """The edition this index writes tables for.
+
+        Returns:
+            The edition id.
+
+        Raises:
+            RuntimeError: The index was opened read-only, over a sealed edition.
+        """
+        if self._edition_id is None:
+            msg = f"the search index in {self._path} belongs to a sealed edition and is only read"
+            raise RuntimeError(msg)
+        return self._edition_id
 
     @property
     def annotations(self) -> IndexAnnotations | None:
@@ -1247,8 +1222,6 @@ class LanceIndex:
 
     def count_rows(self) -> int:
         """Total rows across every language."""
-        if self._legacy is not None and not self._langs:
-            return self._legacy.count_rows()
         return sum(li.count_rows() for li in self._langs.values())
 
     # -- writes --------------------------------------------------------
@@ -1257,7 +1230,7 @@ class LanceIndex:
     def _by_language(rows: list[SearchRow]) -> dict[str, list[SearchRow]]:
         grouped: dict[str, list[SearchRow]] = {}
         for row in rows:
-            grouped.setdefault(_language_slug(row.get("lang", "") or ""), []).append(row)
+            grouped.setdefault(tag_alias(row.get("lang", "") or ""), []).append(row)
         return grouped
 
     def add(self, rows: list[SearchRow], *, embedding_dim: int | None = None) -> None:
@@ -1277,12 +1250,12 @@ class LanceIndex:
                 # manifest entry — an unreferenced table is invisible on
                 # the next open, so writing one without the other would
                 # silently lose these rows.
-                index = _LanguageIndex(self._db, lang, f"{_TABLE_PREFIX}{lang}__{self._generation:06d}")
+                index = _LanguageIndex(self._db, lang, _table_name(lang, self._writer()))
                 self._langs[lang] = index
                 added_language = True
             index.upsert(lang_rows, embedding_dim)
         if added_language:
-            self._write_manifest(self._langs, self._generation)
+            self._write_manifest(self._langs)
 
     def add_bulk(
         self,
@@ -1312,34 +1285,41 @@ class LanceIndex:
                 silently never build. ``None`` falls back to scanning the
                 rows, which is correct whenever at least one is embedded.
             annotations: The annotations *rows* were built from. Recorded in
-                the same manifest write that commits the new generation, so
+                the same manifest write that commits the new tables, so
                 the two cannot disagree after a crash.
 
         Raises:
             Exception: Whatever the underlying build raised. Every table
                 created so far in this rebuild is dropped before the
                 exception propagates, so a failed rebuild leaves the previous
-                generation whole rather than a half-written one.
+                tables whole rather than a half-written set.
         """
         if not rows:
             return
-        # Reclaim what an earlier rebuild left behind (GH-41), so a bundle
-        # published after this build ships only the tables the manifest names.
+        edition_id = self._writer()
+        # Reclaim what an earlier rebuild left behind (GH-41), so the sealed
+        # edition holds only the tables the manifest names.
         self.discard_orphans()
         grouped = self._by_language(rows)
-        previous = {lang: index.name for lang, index in self._langs.items()}
-        generation = self._generation + 1
+        names = {_table_name(lang, edition_id) for lang in grouped}
+        # A rebuild in the same edition reuses its table names: the tables it
+        # replaces are dropped first, so the new ones can take the names. An
+        # unsealed edition is read by no one else, so it needs no old index
+        # to serve while it rebuilds.
+        previous = dict(self._langs.items())
+        for lang, index in previous.items():
+            if index.name in names:
+                index.drop()
+                del self._langs[lang]
 
-        # Build the whole new generation before committing to any of it.
-        # Until the manifest is replaced, every query still reads the old
-        # tables, so a failure here leaves the previous index whole rather
-        # than half-rebuilt. LanceDB OSS has no rename_table, so the
-        # generation suffix is what lets new tables coexist with the ones
-        # still serving.
+        # Build every table before committing to any of them. Until the
+        # manifest is replaced, every query still reads the carried tables, so
+        # a failure here leaves them whole. LanceDB OSS has no rename_table, so
+        # the edition suffix is what lets new tables sit beside them.
         built: dict[str, _LanguageIndex] = {}
         try:
             for lang, lang_rows in grouped.items():
-                index = _LanguageIndex(self._db, lang, f"{_TABLE_PREFIX}{lang}__{generation:06d}")
+                index = _LanguageIndex(self._db, lang, _table_name(lang, edition_id))
                 index.create(lang_rows, embedding_dim)
                 built[lang] = index
         except Exception:
@@ -1348,29 +1328,49 @@ class LanceIndex:
             raise
 
         self._annotations = annotations
-        self._write_manifest(built, generation)
+        self._write_manifest(built)
 
         # Past this point the rebuild has committed; everything below is
         # reclaiming space and must not be able to undo it.
+        superseded = [index.name for index in self._langs.values() if index.name not in names]
         self._langs = built
-        self._generation = generation
-        for name in previous.values():
+        for name in superseded:
             with contextlib.suppress(Exception):
                 self._db.drop_table(name)
-        # A rebuild supersedes any pre-pinaxlib-5.23.0 table; drop it so the two
-        # layouts can never both answer queries.
-        if self._legacy is not None:
+
+    def drop_carried(self) -> bool:
+        """Drop every table another edition wrote, so the index holds this edition's tables only.
+
+        A seal calls it after `add_bulk`. An edition with no rows to index
+        never reaches `add_bulk`'s commit, so the tables it carried from the
+        previous edition would otherwise be sealed as its own. When the
+        manifest names such a table, the manifest is rewritten without it.
+
+        Returns:
+            Whether any table was dropped.
+        """
+        suffix = _edition_suffix(self._writer())
+        foreign = sorted(
+            n for n in self._db.list_tables().tables if n.startswith(_TABLE_PREFIX) and not n.endswith(suffix)
+        )
+        if not foreign:
+            return False
+        named = any(index.name in foreign for index in self._langs.values())
+        self._langs = {lang: index for lang, index in self._langs.items() if index.name not in foreign}
+        if named:
+            self._write_manifest(self._langs)
+        for name in foreign:
             with contextlib.suppress(Exception):
-                self._db.drop_table(_TABLE)
-            self._legacy = None
+                self._db.drop_table(name)
+        return True
 
     def orphan_tables(self) -> list[str]:
         """Language tables on disk that the manifest does not name, sorted.
 
-        A process killed between building a generation and committing it
+        A process killed between building an edition's tables and committing them
         leaves them, and so does a superseded table whose drop failed. They
         are inert, since no query reads a table the manifest does not name,
-        but a published bundle lists and ships them like any other file.
+        but a sealed edition lists and ships them like any other file.
         """
         live = {index.name for index in self._langs.values()}
         return sorted(n for n in self._db.list_tables().tables if n.startswith(_TABLE_PREFIX) and n not in live)
@@ -1466,7 +1466,7 @@ class LanceIndex:
 
         Like `bm25_search` but yields the requested *columns*
         alongside the score (``_score`` is always included).  Used by
-        ``Catalog.search_codes`` to return structured code-row data
+        ``CodesScope.find`` to return structured code-row data
         without a second SQL round-trip.
 
         Args:
@@ -1620,4 +1620,4 @@ class LanceIndex:
         """
         for index in self._langs.values():
             index.build_index()
-        self._write_manifest(self._langs, self._generation)
+        self._write_manifest(self._langs)

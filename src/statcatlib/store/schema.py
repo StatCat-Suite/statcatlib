@@ -1,8 +1,9 @@
-"""DuckDB star schema for the Catalog — ``statcat`` namespace.
+"""DuckDB star schema for the catalog — ``statcat`` namespace.
 
-Single entry point: ``create_schema(conn)`` creates all catalog tables and
-returns a cursor with ``search_path = 'statcat'``.  Safe to call on an
-existing database — every DDL statement uses ``IF NOT EXISTS``.
+``create_schema(conn, catalog_name)`` creates all catalog tables in an
+edition's store and returns a cursor pointed at them (`use_statcat`). Safe
+to call on an existing database — every DDL statement uses
+``IF NOT EXISTS``.
 
 Multilingual columns
 --------------------
@@ -45,8 +46,8 @@ if TYPE_CHECKING:
     import duckdb
 
 #: The ``statcat`` schema this build writes and reads, recorded in ``statcat._meta``.
-#: `Catalog.open` refuses a catalog stamped with another (GH-39), so bumping it means
-#: rebuilding every catalog.
+#: `Product.view` and `Product.working_copy` refuse an edition stamped with another
+#: (GH-39), so bumping it means rebuilding every catalog.
 SCHEMA_VERSION = "2.2"
 
 # ── DDL ────────────────────────────────────────────────────────────────
@@ -360,23 +361,56 @@ CREATE TABLE IF NOT EXISTS language_alternate (
 """
 
 
-def create_schema(conn: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+def use_statcat(cursor: duckdb.DuckDBPyConnection, catalog_name: str | None) -> duckdb.DuckDBPyConnection:
+    """Point *cursor* at the ``statcat`` schema of *catalog_name*, and return it.
+
+    Runs ``USE "<catalog_name>".statcat``, so unqualified names and two-part
+    names such as ``sdmx.code`` resolve inside that catalog, which is how one
+    engine serves several editions (Phase 2a). With *catalog_name* ``None`` it
+    sets ``search_path = 'statcat'`` on the connection's own catalog.
+
+    Args:
+        cursor: The cursor to point.
+        catalog_name: The attached catalog holding the ``statcat`` schema.
+
+    Returns:
+        *cursor*.
+    """
+    if catalog_name is None:
+        cursor.execute("SET search_path = 'statcat'")
+    else:
+        quoted = '"' + catalog_name.replace('"', '""') + '"'
+        cursor.execute(f"USE {quoted}.statcat")
+    return cursor
+
+
+def create_schema(conn: duckdb.DuckDBPyConnection, catalog_name: str | None = None) -> duckdb.DuckDBPyConnection:
     """Create the ``statcat`` schema and all tables in *conn*.
 
     Safe to call on an existing database — every ``CREATE TABLE`` uses
     ``IF NOT EXISTS``.
 
-    Returns a **cursor** with ``search_path = 'statcat'`` so that
-    subsequent SQL can use unqualified table names.
+    Args:
+        conn: The connection to create the schema on.
+        catalog_name: The catalog to create it in, selected with ``USE``;
+            ``None`` for the connection's default catalog.
+
+    Returns:
+        A **cursor** pointed at the ``statcat`` schema (`use_statcat`), so
+        subsequent SQL can use unqualified table names.
     """
     cursor = conn.cursor()
-    cursor.execute("CREATE SCHEMA IF NOT EXISTS statcat")
-    cursor.execute("SET search_path = 'statcat'")
+    if catalog_name is None:
+        cursor.execute("CREATE SCHEMA IF NOT EXISTS statcat")
+    else:
+        quoted = '"' + catalog_name.replace('"', '""') + '"'
+        cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {quoted}.statcat")
+    use_statcat(cursor, catalog_name)
 
     for raw_stmt in _SCHEMA_DDL.split(";"):
         if clean := raw_stmt.strip():
             cursor.execute(clean)
-    # Stamped once, when the schema is created; a later open never restamps it.
+    # Stamped once, when the schema is created; a later edition carries the stamp as it is.
     cursor.execute(
         "INSERT OR IGNORE INTO _meta VALUES ('schema_version', $version)",
         {"version": SCHEMA_VERSION},
@@ -385,18 +419,26 @@ def create_schema(conn: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     return cursor
 
 
-def open_schema_readonly(conn: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+def open_schema_readonly(conn: duckdb.DuckDBPyConnection, catalog_name: str | None = None) -> duckdb.DuckDBPyConnection:
     """Open the ``statcat`` schema on a read-only connection.
 
-    No DDL is issued — the schema must already exist (built by a prior
-    read-write open). Returns a cursor with ``search_path = 'statcat'``.
-    Raises ``RuntimeError`` if the schema is missing.
+    No DDL is issued: the schema must already exist.
+
+    Args:
+        conn: The read-only connection.
+        catalog_name: The catalog holding the schema, selected with ``USE``;
+            ``None`` for the connection's default catalog.
+
+    Returns:
+        A cursor pointed at the ``statcat`` schema (`use_statcat`).
+
+    Raises:
+        RuntimeError: The catalog has no ``statcat`` schema.
     """
-    if not schema_exists(conn):
-        msg = "read_only=True requires an existing statcat schema; none found in this DuckDB."
+    cursor = use_statcat(conn.cursor(), catalog_name)
+    if not schema_exists(cursor):
+        msg = "this edition has no statcat schema; it was not sealed by statcatlib"
         raise RuntimeError(msg)
-    cursor = conn.cursor()
-    cursor.execute("SET search_path = 'statcat'")
     return cursor
 
 
@@ -420,10 +462,17 @@ def first_row[T](rows: list[T]) -> T | None:
 
 
 def schema_exists(conn: duckdb.DuckDBPyConnection) -> bool:
-    """Return True if the statcat schema exists and has the _meta table."""
+    """Return True if the statcat schema of *conn*'s current catalog exists and has the _meta table.
+
+    The current catalog is the one ``USE`` selected (`use_statcat`); another
+    edition attached to the same engine is never consulted.
+    """
     try:
         rows = conn.execute(
-            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'statcat' AND table_name = '_meta'"
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_catalog = current_database() AND table_schema = 'statcat' AND table_name = '_meta'
+            """
         ).fetchall()
         row = first_row(rows)
     except Exception:  # noqa: BLE001
@@ -433,7 +482,7 @@ def schema_exists(conn: duckdb.DuckDBPyConnection) -> bool:
 
 
 def get_schema_version(conn: duckdb.DuckDBPyConnection) -> str | None:
-    """Return the schema version from ``statcat._meta``, or None."""
+    """Return the schema version from the current catalog's ``statcat._meta``, or None."""
     try:
         rows = conn.execute("SELECT value FROM statcat._meta WHERE key = 'schema_version'").fetchall()
         row = first_row(rows)

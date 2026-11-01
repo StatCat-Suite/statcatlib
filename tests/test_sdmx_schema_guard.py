@@ -1,16 +1,18 @@
-"""The open-time guard against sdmxlib dropping a catalog's SDMX structure.
+"""The guard against an edition stored under another sdmxlib store schema.
 
-sdmxlib migrates its store by dropping the ``sdmx`` schema and rebuilding it
-empty. For a catalog that is data loss: ``statcat.dataset`` would survive,
-linking by URN into tables that hold nothing, and structural queries would
-answer empty instead of failing. A catalog built by statcatlib 0.8.0 (sdmxlib
-schema 2.19) opened read-write under sdmxlib 0.70 (schema 2.48) did exactly
-that, silently.
+sdmxlib migrates a cache by dropping its ``sdmx`` schema and rebuilding it
+empty. For an edition that would be data loss: ``statcat.dataset`` would link
+by URN into tables that hold nothing. sdmxlib refuses instead, with
+`sdmxlib.StoreSchemaError`: `LocalRegistry.edition` checks the manifest's
+``schema_version`` before it opens the store, which is `Product.view`'s path,
+and `LocalRegistry.build` checks the copied store, which is
+`Product.working_copy`'s. statcatlib adds no guard of its own on either path.
 
-A stale version is simulated by rewriting ``sdmx._meta``, which is the only
-thing sdmxlib reads to decide.
+Another store schema is simulated by patching the version the running sdmxlib
+reads, which leaves the edition's files as they were written.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import duckdb
@@ -26,7 +28,7 @@ from tests.conftest import concept_of
 
 pytestmark = pytest.mark.unit
 
-_STALE = "2.19"
+_NEWER = "9.99"
 
 
 def _registry() -> InMemoryRegistry:
@@ -49,89 +51,60 @@ def _registry() -> InMemoryRegistry:
     return registry
 
 
-def _set_sdmx_version(meta: Path, version: str) -> None:
-    with duckdb.connect(str(meta)) as conn:
-        conn.execute(
-            """
-            UPDATE sdmx._meta SET value = $version WHERE key = 'schema_version'
-            """,
-            {"version": version},
-        )
-
-
 def _artefact_count(meta: Path) -> int:
     with duckdb.connect(str(meta), read_only=True) as conn:
-        row = conn.execute("""
-            SELECT count(*) FROM sdmx.artefact
-        """).fetchone()
+        row = conn.execute("SELECT count(*) FROM sdmx.artefact").fetchone()
     assert row is not None
     return int(row[0])
 
 
 @pytest.fixture
-def stale_catalog(tmp_path: Path) -> Path:
-    """A folder catalog holding SDMX structure under another sdmxlib schema."""
-    path = tmp_path / "cat"
-    with sc.Catalog(path) as cat:
-        sc.ingest_sdmx(cat, _registry())
-    _set_sdmx_version(path / "meta.duckdb", _STALE)
-    return path
+def meta(tmp_path: Path) -> Path:
+    """The ``metadata.duckdb`` of a sealed edition holding SDMX structure."""
+    with sc.Catalog.create(tmp_path / "cat") as cat:
+        wc = cat.product("p").working_copy()
+        sc.ingest_sdmx(wc, _registry())
+        edition = wc.seal()
+    return tmp_path / "cat" / "products" / "p" / edition.edition_id / "metadata.duckdb"
 
 
-class TestStaleSchemaRefused:
-    def test_read_write_open_raises(self, stale_catalog: Path) -> None:
-        with pytest.raises(sc.IncompatibleCatalogError, match=rf"schema {_STALE}.*schema {SCHEMA_VERSION}"):
-            sc.Catalog(stale_catalog).open()
+@pytest.fixture
+def catalog(tmp_path: Path, meta: Path) -> Iterator[sc.Catalog]:
+    del meta
+    with sc.Catalog.create(tmp_path / "cat", exist_ok=True) as cat:
+        yield cat
 
-    def test_structure_survives_the_refusal(self, stale_catalog: Path) -> None:
-        before = _artefact_count(stale_catalog / "meta.duckdb")
+
+@pytest.fixture
+def newer_sdmxlib(monkeypatch: pytest.MonkeyPatch, meta: Path) -> None:
+    """The running sdmxlib reads another store schema than *meta*'s edition was sealed at."""
+    del meta
+    monkeypatch.setattr("sdmxlib.local.registry.SCHEMA_VERSION", _NEWER)
+
+
+@pytest.mark.usefixtures("newer_sdmxlib")
+class TestAnotherSchemaRefused:
+    def test_a_view_raises_sdmxlibs_error(self, catalog: sc.Catalog) -> None:
+        with pytest.raises(sl.StoreSchemaError, match=rf"store schema {SCHEMA_VERSION}.*schema {_NEWER}"):
+            catalog.product("p").view()
+
+    def test_the_structure_survives_a_refused_view(self, meta: Path, catalog: sc.Catalog) -> None:
+        before = _artefact_count(meta)
         assert before > 0
-        with pytest.raises(sc.IncompatibleCatalogError):
-            sc.Catalog(stale_catalog).open()
-        assert _artefact_count(stale_catalog / "meta.duckdb") == before
+        with pytest.raises(sl.StoreSchemaError):
+            catalog.product("p").view()
+        assert _artefact_count(meta) == before
 
-    def test_refusal_releases_the_connection(self, stale_catalog: Path) -> None:
-        cat = sc.Catalog(stale_catalog)
-        with pytest.raises(sc.IncompatibleCatalogError):
-            cat.open()
-        # Unopened again, not half-open: querying says so rather than
-        # running against a connection nothing will close.
-        with pytest.raises(RuntimeError):
-            cat.query(sc.StatisticalDataset).collect()
-
-    def test_read_only_open_raises_ours_not_sdmxlibs(self, stale_catalog: Path) -> None:
-        """sdmxlib's own refusal advises reopening read-write, which is the loss."""
-        with pytest.raises(sc.IncompatibleCatalogError):
-            sc.Catalog(stale_catalog, read_only=True).open()
-
-    def test_from_connection_raises_and_leaves_the_connection_open(self, stale_catalog: Path) -> None:
-        with duckdb.connect(str(stale_catalog / "meta.duckdb")) as conn:
-            with pytest.raises(sc.IncompatibleCatalogError):
-                sc.Catalog.from_connection(conn)
-            row = conn.execute("""
-                SELECT count(*) FROM sdmx.artefact
-            """).fetchone()
-            assert row is not None
-            assert row[0] > 0
+    def test_a_working_copy_raises_and_leaves_no_edition(self, tmp_path: Path, meta: Path, catalog: sc.Catalog) -> None:
+        product = tmp_path / "cat" / "products" / "p"
+        before = sorted(p.name for p in product.iterdir())
+        with pytest.raises(sl.StoreSchemaError):
+            catalog.product("p").working_copy()
+        assert sorted(p.name for p in product.iterdir()) == before
+        assert _artefact_count(meta) > 0
 
 
-class TestNothingToLose:
-    def test_stale_but_empty_sdmx_schema_is_rebuilt(self, tmp_path: Path) -> None:
-        """A catalog with no SDMX structure loses nothing to the rebuild."""
-        path = tmp_path / "cat"
-        with sc.Catalog(path):
-            pass
-        _set_sdmx_version(path / "meta.duckdb", _STALE)
-        with sc.Catalog(path) as cat:
-            row = cat.connection.execute("""
-                SELECT value FROM sdmx._meta WHERE key = 'schema_version'
-            """).fetchone()
-        assert row == (SCHEMA_VERSION,)
-
-    def test_current_schema_opens_and_answers(self, tmp_path: Path) -> None:
-        path = tmp_path / "cat"
-        with sc.Catalog(path) as cat:
-            sc.ingest_sdmx(cat, _registry())
-        with sc.Catalog(path) as cat:
-            result = cat.query(sc.StatisticalDataset).filter(q.has_code("FREQ", "A")).execute()
+class TestCurrentSchema:
+    def test_a_sealed_edition_answers_structural_queries(self, catalog: sc.Catalog) -> None:
+        result = catalog.product("p").view().query(sc.StatisticalDataset).filter(q.has_code("FREQ", "A")).execute()
         assert result.total == 1

@@ -3,10 +3,12 @@
 sdmxlib owns ``manifest.json`` (`sdmxlib.edition`): the edition id, a digest
 per file, and the checker. A statcat edition is an sdmxlib edition plus the
 ``statcat`` schema and ``search/``, so statcatlib adds what only it can
-describe: a ``statcat`` section in the manifest, written by `catalog_section`,
-and `check_catalog`, which checks that the catalog and its search index are
-what that section says (GH-3). Run `check_catalog` as an extension of
-`sdmxlib.edition.check_edition`.
+describe: a ``statcat`` section in the manifest, written by `catalog_section`
+when `WorkingCopy.seal` seals, and `check_catalog`, which checks that the
+catalog and its search index are what that section says (GH-3). Run
+`check_catalog` as an extension of `sdmxlib.edition.check_edition`.
+
+The module keeps its name from the 0.11 bundle format; it describes editions.
 """
 
 from __future__ import annotations
@@ -26,10 +28,11 @@ if TYPE_CHECKING:
     from sdmxlib import EditionRegistry
     from sdmxlib.edition import Profile
 
-    from statcatlib.store import Catalog
     from statcatlib.store.lance import LanceIndex, LanguageLayout
+    from statcatlib.store.store import _Store
 
 __all__ = [
+    "PRODUCT_KINDS",
     "STATCAT_SECTION",
     "STATCAT_SECTION_FORMAT",
     "catalog_section",
@@ -42,72 +45,80 @@ STATCAT_SECTION = "statcat"
 
 #: Version of the ``statcat`` section. Bumped when its fields change meaning.
 #: 2 added ``search.annotations``, the annotations the index was built from.
-STATCAT_SECTION_FORMAT = 2
+#: 3 added ``kind``, the product's kind (Phase 2a).
+STATCAT_SECTION_FORMAT = 3
+
+#: The product kinds format 3 names. Phase 2a seals ``data`` products only;
+#: ``structure`` is reserved for structure products (Phase 3), whose editions
+#: hold no observations, so `check_catalog` refuses a binding in one.
+PRODUCT_KINDS: tuple[str, ...] = ("data", "structure")
 
 _SEARCH_DIRNAME = "search"
 _INDEX_MANIFEST = "index.json"
 
 
 def _has_index(search_dir: Path) -> bool:
-    """Whether ``search/`` holds anything. Opening a folder catalog creates it empty."""
+    """Whether ``search/`` holds anything."""
     return search_dir.is_dir() and any(search_dir.iterdir())
 
 
-def _search_section(cat: Catalog, search_dir: Path) -> dict[str, object] | None:
+def _search_section(store: _Store, search_dir: Path) -> dict[str, object] | None:
     """The ``search`` part of the section.
 
     Args:
-        cat: The catalog, open.
+        store: The working copy's store, open.
         search_dir: Its ``search/`` directory.
 
     Returns:
         The index format version, embedding model and per-language layout,
-        or ``None`` when no index is built.
+        or ``None`` when no index is built. An index over an edition with no
+        rows has no languages.
 
     Raises:
-        ValueError: ``search/`` holds an index from before per-language
-            tables, which has no layout to record.
+        ValueError: ``search/`` holds files and no ``index.json``.
     """
     if not _has_index(search_dir):
         return None
-    layout = cat.index_layout
-    if not layout:
+    if not (search_dir / _INDEX_MANIFEST).is_file():
         msg = f"{search_dir} holds a search index with no {_INDEX_MANIFEST}: rebuild it with build_index() first"
         raise ValueError(msg)
+    layout = store.index_layout
     index_manifest = json.loads((search_dir / _INDEX_MANIFEST).read_text())
     return {
         "index_version": index_manifest.get("version"),
-        "embedding_model": cat.embedding_model_name,
+        "embedding_model": store.embedding_model_name,
         "languages": {lang: {"rows": entry["rows"], "stemmer": entry["stemmer"]} for lang, entry in layout.items()},
-        "annotations": cat.index_annotations,
+        "annotations": store.index_annotations,
     }
 
 
-def catalog_section(cat: Catalog) -> dict[str, object]:
-    """Describe an open catalog, as its edition manifest's ``statcat`` section.
+def catalog_section(store: _Store) -> dict[str, object]:
+    """Describe a working copy's edition, as its manifest's ``statcat`` section (format 3).
 
-    The section records the number of catalog datasets and, when a search
-    index is built, its index format version, embedding model, and each
-    language's row count and stemmer. Call it after `Catalog.build_index`,
-    then close the catalog and its registry and pass the section to
-    `sdmxlib.edition.seal` as ``extensions={"statcat": section}``.
+    The section records the product's kind (``data``; Phase 2a seals no other),
+    the number of catalog datasets and, when a search index is built, its
+    index format version, embedding model, each language's row count and
+    stemmer, and the annotations it was built from. `WorkingCopy.seal`
+    computes it after rebuilding the index and before closing the store, and
+    passes it to `sdmxlib.edition.seal` as ``extensions={"statcat": section}``.
 
     Args:
-        cat: The catalog, open.
+        store: The working copy's store, open.
 
     Returns:
         The section, ready for ``seal(extensions=...)``.
     """
     from statcatlib.store.schema import first_row  # noqa: PLC0415
 
-    rows = cat.connection.execute("SELECT count(*) FROM statcat.dataset").fetchall()
+    rows = store._cursor().execute("SELECT count(*) FROM statcat.dataset").fetchall()
     row = first_row(rows)
-    search_dir = cat._search_dir
+    search_dir = store._search_dir
     return {
         "format": STATCAT_SECTION_FORMAT,
+        "kind": "data",
         "statcatlib_version": metadata.version("statcatlib"),
         "datasets": row[0] if row else 0,
-        "search": _search_section(cat, search_dir) if search_dir is not None else None,
+        "search": _search_section(store, search_dir) if search_dir is not None else None,
     }
 
 
@@ -216,6 +227,8 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
     - the ``statcat`` schema is in the edition's store at the version this build
       reads, and the manifest has a ``statcat`` section in a format this
       build reads;
+    - the section's ``kind`` is one of `PRODUCT_KINDS`, and a ``structure``
+      edition binds no dataflow to observations;
     - the catalog holds the datasets the section counts, and every dataset
       linked to a dataflow names one the registry holds;
     - ``search/`` is present exactly when the section declares an index;
@@ -242,7 +255,10 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
     del profile
     conn = reg.connection
     rows = conn.execute(
-        """SELECT count(*) FROM information_schema.tables WHERE table_schema = 'statcat' AND table_name = 'dataset'"""
+        """
+        SELECT count(*) FROM information_schema.tables
+        WHERE table_catalog = current_database() AND table_schema = 'statcat' AND table_name = 'dataset'
+        """
     ).fetchall()
     has_schema = first_row(rows)
     if not has_schema or not has_schema[0]:
@@ -257,7 +273,17 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
     if section.get("format") != STATCAT_SECTION_FORMAT:
         detail = f"statcat section format {section.get('format')!r}, this build reads {STATCAT_SECTION_FORMAT}"
         return [Finding(STATCAT_SECTION, MANIFEST_NAME, detail)]
-    findings = [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
+    kind = section.get("kind")
+    if kind not in PRODUCT_KINDS:
+        detail = f"statcat section kind {kind!r}, not one of {', '.join(PRODUCT_KINDS)}"
+        return [Finding(STATCAT_SECTION, MANIFEST_NAME, detail)]
+    findings: list[Finding] = []
+    if kind == "structure":
+        findings += [
+            Finding(STATCAT_SECTION, binding.dataflow, "a structure product's edition binds a dataflow to observations")
+            for binding in manifest.bindings
+        ]
+    findings += [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
     search = section.get("search")
     if isinstance(search, Mapping):
         findings += _check_index_annotations(conn, search.get("annotations"), annotation_fingerprint)

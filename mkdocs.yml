@@ -98,7 +98,7 @@ nav:
   - Overview: index.md
   - Tutorial: tutorial.md
   - How Search Works: search.md
-  - Bundle Format: bundle-format.md
+  - Catalog Format: catalog-format.md
   - Upgrading: upgrading.md
   - API Reference:
     - Catalog: api/store.md
@@ -112,6 +112,7 @@ nav:
     - Query: reference/query.md
     - Sources: reference/sources.md
     - Bundles: reference/bundle.md
+    - Checks: reference/checks.md
     - URNs: reference/urn.md
     - Testing: reference/testing.md
   - Design:

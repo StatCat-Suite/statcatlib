@@ -39,7 +39,8 @@ from statcatlib.sources import (
     ingest_sdmx_registry,
     prepare_sdmx,
 )
-from statcatlib import query, urn
+from statcatlib import checks, query, urn
+from statcatlib.catalog import Catalog, Edition, NoLiveEditionError, Product
 from statcatlib.expr import (
     AliasedExpr,
     CountExpr,
@@ -50,7 +51,6 @@ from statcatlib.expr import (
 )
 from statcatlib.store import (
     VALID_INCLUDE_RELS,
-    Catalog,
     CodeHit,
     CodelistIndexPolicy,
     CodeScope,
@@ -67,6 +67,7 @@ from statcatlib.store import (
     DimensionInfo,
     DimensionScope,
     DimensionsScope,
+    EditionView,
     EmbeddingMetadata,
     Hit,
     SEARCH_ANNOTATION_TYPES,
@@ -82,9 +83,22 @@ from statcatlib.store import (
     SchemeScope,
     SearchResult,
     ThemesScope,
+    WorkingCopy,
     xhtml_to_markdown,
 )
+from statcatlib.store.inventory import (
+    InventoryConflictError,
+    InventoryContentionError,
+    InventoryRuleError,
+    NonFastForwardError,
+)
 from statcatlib.store.sentinel import NotLoadedError, is_unloaded
+from statcatlib.store.working_copy import (
+    JournalError,
+    SealCheckError,
+    WorkingCopyClosedError,
+    WorkingCopyExistsError,
+)
 
 __all__ = [
     "SEARCH_ANNOTATION_TYPES",
@@ -124,6 +138,8 @@ __all__ = [
     "DimensionScope",
     "DimensionsScope",
     "Distribution",
+    "Edition",
+    "EditionView",
     "EmbeddingMetadata",
     "ExistsExpr",
     "Expr",
@@ -133,10 +149,17 @@ __all__ = [
     "IncompatibleCatalogError",
     "IncompatibleIndexError",
     "InternationalString",
+    "InventoryConflictError",
+    "InventoryContentionError",
+    "InventoryRuleError",
+    "JournalError",
     "LicenceDocument",
     "MicrodataDataset",
+    "NoLiveEditionError",
+    "NonFastForwardError",
     "NotLoadedError",
     "OpenDataset",
+    "Product",
     "ProvenanceStatement",
     "PublicationDataset",
     "QualityAnnotation",
@@ -146,6 +169,7 @@ __all__ = [
     "ReferenceMetadataScope",
     "Row",
     "SchemeScope",
+    "SealCheckError",
     "SearchResult",
     "SpatialCoverage",
     "Standard",
@@ -154,6 +178,10 @@ __all__ = [
     "ThemesScope",
     "TraversalExpr",
     "Variable",
+    "WorkingCopy",
+    "WorkingCopyClosedError",
+    "WorkingCopyExistsError",
+    "checks",
     "dataset_from_dataflow",
     "each",
     "ingest_ckan",

@@ -8,6 +8,7 @@ import pytest
 from sdmxlib import InternationalString
 
 import statcatlib as sc
+from tests.conftest import open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -90,7 +91,7 @@ def _publication() -> sc.PublicationDataset:
 
 class TestOpenDataset:
     def test_put_and_get(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_open())
         ds = s.get(sc.OpenDataset, "OPEN-001")
         assert ds is not None
@@ -98,19 +99,19 @@ class TestOpenDataset:
         assert ds.identifier == "OPEN-001"
 
     def test_get_as_base(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_open())
         ds = s.get(sc.BaseDataset, "OPEN-001")
         assert ds is not None
         assert isinstance(ds, sc.OpenDataset)
 
     def test_get_as_wrong_type_returns_none(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_open())
         assert s.get(sc.AggregateDataset, "OPEN-001") is None
 
     def test_roundtrip_fields(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         orig = _open()
         s.put(orig)
         ds = s.get(sc.OpenDataset, "OPEN-001")
@@ -122,7 +123,7 @@ class TestOpenDataset:
         assert ds.status == "current"
 
     def test_overwrite(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_open())
         updated = sc.OpenDataset(
             identifier="OPEN-001",
@@ -144,14 +145,14 @@ class TestOpenDataset:
 
 class TestAggregateDataset:
     def test_put_and_get(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_aggregate())
         ds = s.get(sc.AggregateDataset, "AGG-001")
         assert ds is not None
         assert isinstance(ds, sc.AggregateDataset)
 
     def test_roundtrip_stat_fields(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_aggregate())
         ds = s.get(sc.AggregateDataset, "AGG-001")
         assert ds is not None
@@ -162,7 +163,7 @@ class TestAggregateDataset:
         assert ds.frequency.id == "QUARTERLY"
 
     def test_get_as_base(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_aggregate())
         ds = s.get(sc.BaseDataset, "AGG-001")
         assert ds is not None
@@ -170,7 +171,7 @@ class TestAggregateDataset:
 
     def test_statistical_dataset_alias(self) -> None:
         """StatisticalDataset is a backward-compat alias for AggregateDataset."""
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_aggregate())
         ds = s.get(sc.StatisticalDataset, "AGG-001")
         assert ds is not None
@@ -184,14 +185,14 @@ class TestAggregateDataset:
 
 class TestMicrodataDataset:
     def test_put_and_get(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_microdata())
         ds = s.get(sc.MicrodataDataset, "MICRO-001")
         assert ds is not None
         assert isinstance(ds, sc.MicrodataDataset)
 
     def test_roundtrip_variables(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_microdata())
         ds = s.get(sc.MicrodataDataset, "MICRO-001")
         assert ds is not None
@@ -201,7 +202,7 @@ class TestMicrodataDataset:
         assert "INCOME" in var_ids
 
     def test_roundtrip_microdata_fields(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_microdata())
         ds = s.get(sc.MicrodataDataset, "MICRO-001")
         assert ds is not None
@@ -209,7 +210,7 @@ class TestMicrodataDataset:
         assert ds.universe == "Canadians aged 15+"
 
     def test_get_as_wrong_type_returns_none(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_microdata())
         assert s.get(sc.OpenDataset, "MICRO-001") is None
 
@@ -221,14 +222,14 @@ class TestMicrodataDataset:
 
 class TestGeospatialDataset:
     def test_put_and_get(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_geospatial())
         ds = s.get(sc.GeospatialDataset, "GEO-001")
         assert ds is not None
         assert isinstance(ds, sc.GeospatialDataset)
 
     def test_roundtrip_geo_fields(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_geospatial())
         ds = s.get(sc.GeospatialDataset, "GEO-001")
         assert ds is not None
@@ -237,7 +238,7 @@ class TestGeospatialDataset:
         assert "polygon" in ds.feature_types
 
     def test_get_as_wrong_type_returns_none(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_geospatial())
         assert s.get(sc.AggregateDataset, "GEO-001") is None
 
@@ -249,14 +250,14 @@ class TestGeospatialDataset:
 
 class TestPublicationDataset:
     def test_put_and_get(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_publication())
         ds = s.get(sc.PublicationDataset, "PUB-001")
         assert ds is not None
         assert isinstance(ds, sc.PublicationDataset)
 
     def test_roundtrip_publication_fields(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_publication())
         ds = s.get(sc.PublicationDataset, "PUB-001")
         assert ds is not None
@@ -264,7 +265,7 @@ class TestPublicationDataset:
         assert "Smith, J." in ds.authors
 
     def test_get_as_wrong_type_returns_none(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_publication())
         assert s.get(sc.MicrodataDataset, "PUB-001") is None
 
@@ -276,7 +277,7 @@ class TestPublicationDataset:
 
 class TestPutList:
     def test_put_list_mixed_variants(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         datasets: list[sc.Dataset] = [_open(), _aggregate(), _microdata(), _geospatial(), _publication()]
         s.put(datasets)
         assert s.get(sc.OpenDataset, "OPEN-001") is not None
@@ -286,13 +287,13 @@ class TestPutList:
         assert s.get(sc.PublicationDataset, "PUB-001") is not None
 
     def test_put_list_count(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put([_open(), _aggregate(), _microdata()])
         result = s.query(sc.BaseDataset).execute()
         assert result.total == 3
 
     def test_put_list_idempotent(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         datasets: list[sc.Dataset] = [_open(), _aggregate()]
         s.put(datasets)
         s.put(datasets)
@@ -300,7 +301,7 @@ class TestPutList:
         assert result.total == 2
 
     def test_put_list_returns_none_for_missing(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put([_open()])
         assert s.get(sc.BaseDataset, "DOES-NOT-EXIST") is None
 
@@ -312,17 +313,17 @@ class TestPutList:
 
 class TestGetBase:
     def test_get_base_returns_open(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_open())
         ds = s.get(sc.BaseDataset, "OPEN-001")
         assert isinstance(ds, sc.OpenDataset)
 
     def test_get_base_returns_aggregate(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         s.put(_aggregate())
         ds = s.get(sc.BaseDataset, "AGG-001")
         assert isinstance(ds, sc.AggregateDataset)
 
     def test_get_missing_returns_none(self) -> None:
-        s = sc.Catalog().open()
+        s = open_scratch()
         assert s.get(sc.BaseDataset, "MISSING") is None

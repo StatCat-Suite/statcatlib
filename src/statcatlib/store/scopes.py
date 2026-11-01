@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
     from statcatlib.expr import AliasedExpr, Expr
     from statcatlib.model.dataset import BaseDataset
-    from statcatlib.store.store import Catalog, QueryBuilder
+    from statcatlib.store.store import QueryBuilder, _Store
 
 import attrs
 import duckdb
@@ -448,7 +448,7 @@ class ThemesScope:
     Entry point: ``store.themes``.
     """
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def __getitem__(self, scheme_uri: str) -> SchemeScope:
         return SchemeScope(scheme=scheme_uri, store=self._store)
@@ -460,14 +460,14 @@ class ThemesScope:
         ``scheme`` URI and has no ``id``, so it never satisfied what an
         item list is for. Use ``store.themes[uri]`` to address one.
         """
-        rows = self._store.connection.execute("SELECT uri FROM statcat.concept_scheme ORDER BY uri").fetchall()
+        rows = self._store._cursor().execute("SELECT uri FROM statcat.concept_scheme ORDER BY uri").fetchall()
         return [SchemeScope(scheme=r[0], store=self._store) for r in rows]
 
     def __iter__(self) -> Iterator[SchemeScope]:
         return iter(self.collect())
 
     def __len__(self) -> int:
-        rows = self._store.connection.execute("SELECT COUNT(*) FROM statcat.concept_scheme").fetchall()
+        rows = self._store._cursor().execute("SELECT COUNT(*) FROM statcat.concept_scheme").fetchall()
         row = first_row(rows)
         return row[0] if row else 0
 
@@ -481,7 +481,7 @@ class SchemeScope:
     """
 
     scheme: str
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
     _exprs: tuple[AliasedExpr, ...] = field(default=(), repr=False)
     _filters: tuple[Expr, ...] = field(default=(), repr=False)
     _sort: tuple[tuple[Expr, bool], ...] = field(default=(), repr=False)
@@ -505,7 +505,7 @@ class SchemeScope:
         if self._exprs:
             msg = ".collect() cannot be used when .enrich() is active — use .rows() instead"
             raise ValueError(msg)
-        conn = self._store.connection
+        conn = self._store._cursor()
         rows = conn.execute(
             "SELECT uri, notation, label FROM statcat.concept WHERE in_scheme = ? ORDER BY notation",
             [self.scheme],
@@ -532,7 +532,7 @@ class SchemeScope:
             entity_select_cols=["t.uri", "t.notation", "t.label"],
             scope_filter={},
             exprs=self._exprs,
-            conn=self._store.connection,
+            conn=self._store._cursor(),
             where_sql="t.in_scheme = ?",
             where_params=[self.scheme],
         )
@@ -543,20 +543,28 @@ class SchemeScope:
 
     def count(self) -> int:
         """Terminal: number of concepts in this scheme."""
-        rows = self._store.connection.execute(
-            "SELECT COUNT(*) FROM statcat.concept WHERE in_scheme = ?",
-            [self.scheme],
-        ).fetchall()
+        rows = (
+            self._store._cursor()
+            .execute(
+                "SELECT COUNT(*) FROM statcat.concept WHERE in_scheme = ?",
+                [self.scheme],
+            )
+            .fetchall()
+        )
         row = first_row(rows)
         return row[0] if row else 0
 
     def labels(self, lang: str = "en") -> dict[str, str]:
         """Return ``{notation: display_label}`` for concepts in this scheme."""
         lang = sdmxlib.normalize_tag(lang)
-        rows = self._store.connection.execute(
-            "SELECT notation, label[?] FROM statcat.concept WHERE in_scheme = ? AND label[?] IS NOT NULL",
-            [lang, self.scheme, lang],
-        ).fetchall()
+        rows = (
+            self._store._cursor()
+            .execute(
+                "SELECT notation, label[?] FROM statcat.concept WHERE in_scheme = ? AND label[?] IS NOT NULL",
+                [lang, self.scheme, lang],
+            )
+            .fetchall()
+        )
         return {r[0]: r[1] for r in rows}
 
     @property
@@ -568,10 +576,14 @@ class SchemeScope:
         """
         # Collect all concept URIs in this scheme, then filter datasets
         # that have any of them as themes.
-        rows = self._store.connection.execute(
-            "SELECT uri FROM statcat.concept WHERE in_scheme = ?",
-            [self.scheme],
-        ).fetchall()
+        rows = (
+            self._store._cursor()
+            .execute(
+                "SELECT uri FROM statcat.concept WHERE in_scheme = ?",
+                [self.scheme],
+            )
+            .fetchall()
+        )
         concept_uris = [r[0] for r in rows]
 
         from statcatlib.model.dataset import BaseDataset  # noqa: PLC0415
@@ -608,18 +620,22 @@ class ConceptScope:
 
     scheme: str
     notation: str
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def collect(self) -> Concept:
         """Terminal: materialize this concept."""
-        rows = self._store.connection.execute(
-            """
+        rows = (
+            self._store._cursor()
+            .execute(
+                """
             SELECT notation, label, alt_label, definition
             FROM statcat.concept
             WHERE in_scheme = ? AND notation = ?
             """,
-            [self.scheme, self.notation],
-        ).fetchall()
+                [self.scheme, self.notation],
+            )
+            .fetchall()
+        )
         row = first_row(rows)
         if row is None:
             msg = f"Concept not found: notation={self.notation!r} in scheme {self.scheme!r}"
@@ -635,10 +651,14 @@ class ConceptScope:
     def datasets(self) -> QueryBuilder[BaseDataset]:
         """Navigate to datasets tagged with this concept (lazy)."""
         # Resolve notation → URI first
-        rows = self._store.connection.execute(
-            "SELECT uri FROM statcat.concept WHERE in_scheme = ? AND notation = ?",
-            [self.scheme, self.notation],
-        ).fetchall()
+        rows = (
+            self._store._cursor()
+            .execute(
+                "SELECT uri FROM statcat.concept WHERE in_scheme = ? AND notation = ?",
+                [self.scheme, self.notation],
+            )
+            .fetchall()
+        )
         row = first_row(rows)
         from statcatlib.model.dataset import BaseDataset  # noqa: PLC0415
 
@@ -660,7 +680,7 @@ class CodelistsScope:
     Entry point: ``store.codelists``.
     """
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
     _exprs: tuple[AliasedExpr, ...] = field(default=(), repr=False)
     _lang: str = field(default="en", repr=False)
     _filter_text: str | None = field(default=None, repr=False)
@@ -686,9 +706,11 @@ class CodelistsScope:
             msg = ".collect() cannot be used when .enrich() is active — use .rows() instead"
             raise ValueError(msg)
         try:
-            rows = self._store.connection.execute(
-                "SELECT DISTINCT urn FROM sdmx.artefact WHERE artefact_type = 'Codelist' ORDER BY urn"
-            ).fetchall()
+            rows = (
+                self._store._cursor()
+                .execute("SELECT DISTINCT urn FROM sdmx.artefact WHERE artefact_type = 'Codelist' ORDER BY urn")
+                .fetchall()
+            )
         except duckdb.CatalogException:
             return []
         return [CodelistScope(urn=r[0], store=self._store) for r in rows]
@@ -724,7 +746,7 @@ class CodelistsScope:
             entity_select_cols=entity_select_cols,
             scope_filter={},
             exprs=self._exprs,
-            conn=self._store.connection,
+            conn=self._store._cursor(),
             entity_params=entity_params,
             where_sql=" AND ".join(where_parts),
             where_params=where_params,
@@ -760,15 +782,19 @@ class CodelistsScope:
         for urn, cid in pairs:
             flat_params.extend([urn, cid])
         try:
-            rows = self._store.connection.execute(
-                f"""
+            rows = (
+                self._store._cursor()
+                .execute(
+                    f"""
                 SELECT c.codelist_urn, c.code_id, COALESCE(c.name[?], c.code_id) AS label
                 FROM sdmx.code c
                 JOIN (VALUES {values_rows}) AS v(cl_urn, cd_id)
                   ON c.codelist_urn = v.cl_urn AND c.code_id = v.cd_id
                 """,
-                flat_params,
-            ).fetchall()
+                    flat_params,
+                )
+                .fetchall()
+            )
         except duckdb.CatalogException:
             return {pair: pair[1] for pair in pairs}
         result: dict[tuple[str, str], str] = {(r[0], r[1]): r[2] for r in rows}
@@ -787,9 +813,11 @@ class CodelistsScope:
 
     def __len__(self) -> int:
         try:
-            rows = self._store.connection.execute(
-                "SELECT COUNT(DISTINCT urn) FROM sdmx.artefact WHERE artefact_type = 'Codelist'"
-            ).fetchall()
+            rows = (
+                self._store._cursor()
+                .execute("SELECT COUNT(DISTINCT urn) FROM sdmx.artefact WHERE artefact_type = 'Codelist'")
+                .fetchall()
+            )
             row = first_row(rows)
         except duckdb.CatalogException:
             return 0
@@ -805,7 +833,7 @@ class CodelistScope:
     """
 
     urn: str
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
     _exprs: tuple[AliasedExpr, ...] = field(default=(), repr=False)
     _lang: str = field(default="en", repr=False)
 
@@ -842,7 +870,7 @@ class CodelistScope:
             ],
             scope_filter={"codelist_urn": self.urn},
             exprs=self._exprs,
-            conn=self._store.connection,
+            conn=self._store._cursor(),
             entity_params=[self._lang],
             where_sql="t.codelist_urn = ?",
             where_params=[self.urn],
@@ -860,14 +888,18 @@ class CodelistScope:
         """
         lang = sdmxlib.normalize_tag(lang)
         try:
-            rows = self._store.connection.execute(
-                """
+            rows = (
+                self._store._cursor()
+                .execute(
+                    """
                 SELECT lt.text FROM sdmx.localized_text lt
                 WHERE lt.owner_urn = ? AND lt.field = 'name' AND lt.lang = ?
                 LIMIT 1
                 """,
-                [self.urn, lang],
-            ).fetchall()
+                    [self.urn, lang],
+                )
+                .fetchall()
+            )
             row = first_row(rows)
         except duckdb.CatalogException:
             return None
@@ -894,15 +926,19 @@ class CodelistScope:
         resolved_lang = lang if lang is not None else self._lang
         placeholders = ", ".join("?" * len(code_ids))
         try:
-            rows = self._store.connection.execute(
-                f"""
+            rows = (
+                self._store._cursor()
+                .execute(
+                    f"""
                 SELECT code_id, COALESCE(name[?], code_id) AS label
                 FROM sdmx.code
                 WHERE codelist_urn = ?
                   AND code_id IN ({placeholders})
                 """,
-                [resolved_lang, self.urn, *code_ids],
-            ).fetchall()
+                    [resolved_lang, self.urn, *code_ids],
+                )
+                .fetchall()
+            )
         except duckdb.CatalogException:
             return {cid: cid for cid in code_ids}
         result = {r[0]: r[1] for r in rows}
@@ -934,7 +970,7 @@ class CodeScope:
 
     codelist_urn: str
     code_id: str
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def collect(self) -> Code:
         """Terminal: resolve this code."""
@@ -943,16 +979,20 @@ class CodeScope:
     def dataset_count(self) -> int:
         """Terminal: number of datasets whose DSD uses the codelist containing this code."""
         try:
-            rows = self._store.connection.execute(
-                """
+            rows = (
+                self._store._cursor()
+                .execute(
+                    """
                 SELECT COUNT(DISTINCT d.identifier)
                 FROM statcat.dataset d
                 JOIN sdmx.dataflow df ON df.urn = d.sdmx_dataflow_urn
                 JOIN sdmx.dsd_component dc ON dc.dsd_urn = df.dsd_urn
                 WHERE dc.codelist_urn = ?
                 """,
-                [self.codelist_urn],
-            ).fetchall()
+                    [self.codelist_urn],
+                )
+                .fetchall()
+            )
             row = first_row(rows)
         except duckdb.Error:
             return 0
@@ -980,7 +1020,7 @@ class DimensionsScope:
     """
 
     dataflow_urn: str
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     def __getitem__(self, dim_id: str) -> DimensionScope:
         return DimensionScope(
@@ -994,8 +1034,10 @@ class DimensionsScope:
         if not self.dataflow_urn:
             return ItemList([])
         try:
-            rows = self._store.connection.execute(
-                """
+            rows = (
+                self._store._cursor()
+                .execute(
+                    """
                 SELECT dc.component_id,
                        con.name,
                        dc.position
@@ -1006,8 +1048,10 @@ class DimensionsScope:
                   AND dc.component_type = 'Dimension'
                 ORDER BY dc.position
                 """,
-                [self.dataflow_urn],
-            ).fetchall()
+                    [self.dataflow_urn],
+                )
+                .fetchall()
+            )
         except duckdb.CatalogException:
             return ItemList([])
         return ItemList(
@@ -1035,7 +1079,7 @@ class DimensionScope:
 
     dataflow_urn: str
     dimension_id: str
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     @property
     def codelist(self) -> CodelistScope | None:
@@ -1048,8 +1092,10 @@ class DimensionScope:
 
     def collect(self) -> DimensionInfo:
         """Terminal: materialize this dimension."""
-        rows = self._store.connection.execute(
-            """
+        rows = (
+            self._store._cursor()
+            .execute(
+                """
             SELECT dc.component_id,
                    con.name,
                    dc.position
@@ -1061,8 +1107,10 @@ class DimensionScope:
               AND dc.component_type = 'Dimension'
             LIMIT 1
             """,
-            [self.dataflow_urn, self.dimension_id],
-        ).fetchall()
+                [self.dataflow_urn, self.dimension_id],
+            )
+            .fetchall()
+        )
         row = first_row(rows)
         if row is None:
             msg = f"Dimension not found: {self.dimension_id}"
@@ -1112,7 +1160,7 @@ class DatasetScope:
     """
 
     identifier: str
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
 
     @property
     def codelists(self) -> _FilteredCodelistsScope:
@@ -1120,7 +1168,7 @@ class DatasetScope:
 
         Resolves via the dataset's SDMX dataflow → DSD → codelist URNs.
         """
-        conn = self._store.connection
+        conn = self._store._cursor()
         try:
             rows = conn.execute(
                 """
@@ -1141,7 +1189,7 @@ class DatasetScope:
     @property
     def themes(self) -> _FilteredThemesScope:
         """Navigate to themes (concepts) assigned to this dataset (lazy)."""
-        conn = self._store.connection
+        conn = self._store._cursor()
         rows = conn.execute(
             "SELECT concept_uri FROM statcat.dataset_theme WHERE dataset_id = ?",
             [self.identifier],
@@ -1177,7 +1225,7 @@ class DatasetScope:
         if sql is None:
             msg = f"Unknown edge type: {edge!r}. Supported: {list(_RELATED_SQL)}"
             raise ValueError(msg)
-        conn = self._store.connection
+        conn = self._store._cursor()
         try:
             rows = conn.execute(sql, [self.identifier, self.identifier]).fetchall()
         except duckdb.CatalogException:
@@ -1215,8 +1263,10 @@ class DatasetScope:
         base_params: list[object] = [self.identifier, *([relationship] if relationship else [])]
         rec_params: list[object] = [depth, *([relationship] if relationship else [])]
 
-        rows = self._store.connection.execute(
-            f"""
+        rows = (
+            self._store._cursor()
+            .execute(
+                f"""
             WITH RECURSIVE ancestors(identifier, depth) AS (
                 SELECT source_id, 1
                 FROM statcat.lineage
@@ -1231,8 +1281,10 @@ class DatasetScope:
             )
             SELECT DISTINCT identifier FROM ancestors
             """,
-            base_params + rec_params,
-        ).fetchall()
+                base_params + rec_params,
+            )
+            .fetchall()
+        )
         identifiers = [r[0] for r in rows]
         return self._store.query(BaseDataset).from_ids(identifiers)
 
@@ -1265,8 +1317,10 @@ class DatasetScope:
         base_params: list[object] = [self.identifier, *([relationship] if relationship else [])]
         rec_params: list[object] = [depth, *([relationship] if relationship else [])]
 
-        rows = self._store.connection.execute(
-            f"""
+        rows = (
+            self._store._cursor()
+            .execute(
+                f"""
             WITH RECURSIVE descendants(identifier, depth) AS (
                 SELECT target_id, 1
                 FROM statcat.lineage
@@ -1281,8 +1335,10 @@ class DatasetScope:
             )
             SELECT DISTINCT identifier FROM descendants
             """,
-            base_params + rec_params,
-        ).fetchall()
+                base_params + rec_params,
+            )
+            .fetchall()
+        )
         identifiers = [r[0] for r in rows]
         return self._store.query(BaseDataset).from_ids(identifiers)
 
@@ -1315,15 +1371,19 @@ class DatasetScope:
             params.append(confidence)
 
         where_clause = "WHERE " + " AND ".join(wheres)
-        rows = self._store.connection.execute(
-            f"""
+        rows = (
+            self._store._cursor()
+            .execute(
+                f"""
             SELECT id, source_id, target_id, relationship, activity_label,
                    activity_type, agent_id, timestamp, confidence, notes
             FROM statcat.lineage {where_clause}
             ORDER BY timestamp NULLS LAST
             """,
-            params,
-        ).fetchall()
+                params,
+            )
+            .fetchall()
+        )
         cols = [
             "id",
             "source_id",
@@ -1348,7 +1408,7 @@ class DatasetScope:
 class _FilteredCodelistsScope:
     """CodelistsScope filtered to specific codelist URNs."""
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
     codelist_urns: list[str] = field(factory=list)
     _exprs: tuple[AliasedExpr, ...] = field(default=(), repr=False)
     _lang: str = field(default="en", repr=False)
@@ -1396,7 +1456,7 @@ class _FilteredCodelistsScope:
             entity_select_cols=entity_select_cols,
             scope_filter={},
             exprs=self._exprs,
-            conn=self._store.connection,
+            conn=self._store._cursor(),
             entity_params=entity_params,
             where_sql=f"t.artefact_type = 'Codelist' AND t.urn IN ({placeholders})",
             where_params=self.codelist_urns,
@@ -1418,7 +1478,7 @@ class _FilteredCodelistsScope:
 class _FilteredThemesScope:
     """ThemesScope filtered to specific concept URIs."""
 
-    _store: Catalog = field(alias="store", repr=False)
+    _store: _Store = field(alias="store", repr=False)
     concept_uris: list[str] = field(factory=list)
 
     def collect(self) -> list[ConceptRef]:
@@ -1426,15 +1486,19 @@ class _FilteredThemesScope:
         if not self.concept_uris:
             return []
         placeholders = ", ".join("?" * len(self.concept_uris))
-        rows = self._store.connection.execute(
-            f"""
+        rows = (
+            self._store._cursor()
+            .execute(
+                f"""
             SELECT c.uri, c.notation, c.in_scheme, c.label
             FROM statcat.concept c
             WHERE c.uri IN ({placeholders})
             ORDER BY c.notation
             """,
-            self.concept_uris,
-        ).fetchall()
+                self.concept_uris,
+            )
+            .fetchall()
+        )
         # Return refs for materialized concepts; fall back to bare URI for unknowns
         found_uris = {r[0] for r in rows}
         result: list[ConceptRef] = [

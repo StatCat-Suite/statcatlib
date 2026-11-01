@@ -1,6 +1,7 @@
 """SDMX source connector for statcatlib.
 
-This is the only statcatlib module that imports sdmxlib beyond InternationalString.
+It builds catalog records from SDMX model types and writes them, with the
+structures and observations, into a working copy.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from sdmxlib.model.datastructure import DataStructure
 
 from statcatlib.model.agents import Agent
 from statcatlib.model.dataset import AggregateDataset
+from statcatlib.store.schema import first_row
+from statcatlib.store.working_copy import WorkingCopy
 
 if TYPE_CHECKING:
     from sdmxlib import ObsQuery
@@ -22,7 +25,6 @@ if TYPE_CHECKING:
     from sdmxlib.model.urn import SdmxUrn
 
     from statcatlib.model.skos import ConceptRef
-    from statcatlib.store.store import Catalog
 
 __all__ = [
     "ObservationSource",
@@ -50,7 +52,30 @@ class ObservationSource(Protocol):
         ...
 
 
-def _resolve_latest(store: Catalog, identifier: str) -> str:
+def require_working_copy(store: object, call: str) -> WorkingCopy:
+    """*store*, checked to be a `WorkingCopy`, the only thing ingest writes into.
+
+    Args:
+        store: What the caller passed.
+        call: The ingest function, for the message.
+
+    Returns:
+        *store*.
+
+    Raises:
+        TypeError: *store* is anything else, such as an `EditionView`, naming
+            ``working_copy()``.
+    """
+    if not isinstance(store, WorkingCopy):
+        msg = (
+            f"{call} writes, so it takes a WorkingCopy, not {type(store).__name__}: start one with "
+            "Catalog.create(path, exist_ok=True).product(id).working_copy()"
+        )
+        raise TypeError(msg)
+    return store
+
+
+def _resolve_latest(store: WorkingCopy, identifier: str) -> str:
     """Resolve ``(latest)`` to the highest stored version for that agency:id."""
     if not identifier.endswith("(latest)"):
         return identifier
@@ -58,15 +83,21 @@ def _resolve_latest(store: Catalog, identifier: str) -> str:
     if m is None:
         return identifier
     agency, flow_id = m.group(1), m.group(2)
-    row = store._c.execute(
-        """
-        SELECT identifier FROM dataset
-        WHERE identifier LIKE ?
-        ORDER BY identifier DESC
-        LIMIT 1
-        """,
-        [f"{agency}:{flow_id}(%"],
-    ).fetchone()
+    rows = (
+        store.view()
+        ._cursor()
+        .execute(
+            """
+            SELECT identifier FROM dataset
+            WHERE identifier LIKE ?
+            ORDER BY identifier DESC
+            LIMIT 1
+            """,
+            [f"{agency}:{flow_id}(%"],
+        )
+        .fetchall()
+    )
+    row = first_row(rows)
     return row[0] if row else identifier
 
 
@@ -168,7 +199,7 @@ def prepare_sdmx(
     structural tables once ``local.ingest(registry)`` has been called.
 
     *registry* can also be a `LocalRegistry` whose store already holds the
-    structures, such as a bundle's: each flow's DSD is read from the store.
+    structures, such as an edition's: each flow's DSD is read from the store.
     """
     results: list[AggregateDataset] = []
     for flow in registry.get_all(Dataflow):
@@ -183,18 +214,25 @@ def prepare_sdmx(
     return results
 
 
-def ingest_sdmx(store: Catalog, registry: InMemoryRegistry) -> list[AggregateDataset]:
-    """Ingest all SDMX artefacts from a registry into the catalog.
+def ingest_sdmx(store: WorkingCopy, registry: InMemoryRegistry) -> list[AggregateDataset]:
+    """Ingest all SDMX artefacts from a registry into a working copy.
 
     Step 1: Write all structural artefacts (codelists, DSDs, dataflows) into
-    the shared DuckDB connection via sdmxlib's LocalRegistry.
+    the edition's store through the working copy's sdmxlib registry.
 
     Step 2: For each Dataflow in the registry, create an AggregateDataset via
     ``dataset_from_dataflow()`` and store it.  Code and codelist queries use
     the SDMX structural tables via ``sdmx_dataflow_urn``.
 
-    Returns the list of AggregateDataset objects created.
+    Args:
+        store: The working copy to write into.
+        registry: The SDMX artefacts.
+
+    Returns:
+        The AggregateDataset objects created. A *store* that is not a
+        `WorkingCopy`, such as an `EditionView`, raises `TypeError`.
     """
+    store = require_working_copy(store, "ingest_sdmx")
     local = store.registry
     local.ingest(registry)
 
@@ -205,17 +243,28 @@ def ingest_sdmx(store: Catalog, registry: InMemoryRegistry) -> list[AggregateDat
 
 
 def ingest_sdmx_registry(
-    store: Catalog,
+    store: WorkingCopy,
     registry: InMemoryRegistry,
     *,
     publisher: Agent | None = None,
     themes: list[ConceptRef] | None = None,
 ) -> list[AggregateDataset]:
-    """Bulk ingest all dataflows from an sdmxlib LocalRegistry.
+    """Bulk ingest all dataflows from an sdmxlib registry into a working copy.
 
     Like ``ingest_sdmx()`` but exposes ``publisher`` and ``themes`` overrides
     that apply to every ingested dataset.
+
+    Args:
+        store: The working copy to write into.
+        registry: The SDMX artefacts.
+        publisher: The publisher every dataset records.
+        themes: The themes every dataset records.
+
+    Returns:
+        The AggregateDataset objects created. A *store* that is not a
+        `WorkingCopy`, such as an `EditionView`, raises `TypeError`.
     """
+    store = require_working_copy(store, "ingest_sdmx_registry")
     local = store.registry
     local.ingest(registry)
 
@@ -226,33 +275,30 @@ def ingest_sdmx_registry(
 
 
 def ingest_data(
-    store: Catalog,
+    store: WorkingCopy,
     reg: ObservationSource,
     identifier: str,
     *,
     measure_dim: str | None = None,
 ) -> str:
-    """Materialise observation data for one dataflow into the bundle's lake.
+    """Materialise observation data for one dataflow into the working copy's lake.
 
     Fetches the observations from *reg* in the long layout, one row per
     observation with a column per dimension and measure, and writes them into
-    ``lake.<agency>.df_<id>_<version>`` through the bundle's DuckLake-backed
-    data store. A re-run replaces the table. It then registers a
-    `sdmxlib.DataflowBinding` for that table, so the dataflow reads back
-    through the co-located registry::
+    ``<agency>.df_<id>_<version>`` in the edition's lake through
+    ``wc.registry.write_observations``. A re-run replaces the table. It then
+    registers a `sdmxlib.DataflowBinding` for that table, so the dataflow
+    reads back through the edition's registry::
 
-        obs = cat.registry.obs(flow_urn)
+        obs = view.registry.obs(flow_urn)
         obs.filter(obs.col("GEO") == "CA").frame()
         obs.pivot(on=ds.measure_dim)
 
     Requires that ``ingest_sdmx`` has already been called for this
-    identifier, so the catalog record and the DSD are stored, and that
-    ``store`` is a folder-mode `Catalog` (a DuckLake is ATTACHed on
-    ``open()``).
+    identifier, so the catalog record and the DSD are stored.
 
     Args:
-        store: The catalog holding the `AggregateDataset` for *identifier*.
-            Must be folder-mode — a DuckLake is ATTACHed on ``open()``.
+        store: The working copy holding the `AggregateDataset` for *identifier*.
         reg: Where to fetch observations from, usually a
             `sdmxlib.RestRegistry`.
         identifier: Catalog identifier in ``AGENCY:ID(VERSION)`` form.
@@ -265,6 +311,9 @@ def ingest_data(
     Returns:
         The fully-qualified table location (``<schema>.<table>``).
 
+    A *store* that is not a `WorkingCopy`, such as an `EditionView`, raises
+    `TypeError`.
+
     Raises:
         KeyError: No `AggregateDataset` is stored under *identifier* — run
             ``ingest_sdmx`` first.
@@ -276,9 +325,10 @@ def ingest_data(
     """
     import sdmxlib as sl  # noqa: PLC0415
 
+    store = require_working_copy(store, "ingest_data")
     identifier = _resolve_latest(store, identifier)
 
-    ds = store.get(AggregateDataset, identifier)
+    ds = store.view().get(AggregateDataset, identifier)
     if ds is None:
         msg = f"No AggregateDataset found for {identifier!r} — run ingest_sdmx first"
         raise KeyError(msg)
@@ -295,7 +345,7 @@ def ingest_data(
     flow_urn = Dataflow.parse_urn(ds.sdmx_dataflow_urn)
     dsd = store.registry.dsd(flow_urn)
     if dsd is None:
-        msg = f"The DSD of {ds.sdmx_dataflow_urn} is not stored — run ingest_sdmx with resolve=True first"
+        msg = f"The DSD of {ds.sdmx_dataflow_urn} is not stored — ingest it with ingest_sdmx first"
         raise ValueError(msg)
     dimensions = [d.id for d in dsd.dimensions]
     if measure_dim is not None and measure_dim not in dimensions:
@@ -308,7 +358,7 @@ def ingest_data(
     # Store the long layout. The binding below maps each DSD component to a
     # column of the same name, which is the long layout; a pivoted table has a
     # column per code instead and cannot be read through it (GH-29).
-    store.data.write_observations(schema=schema, table=table, source=reg.obs(flow_urn).frame())
+    store.registry.write_observations(schema=schema, table=table, source=reg.obs(flow_urn).frame())
     store.registry.add(
         sl.DataflowBinding.from_dsd(
             dsd,
