@@ -8,6 +8,8 @@
   standard reviewers plus two personas: a lakehouse implementer building a
   CODR-scale platform on FMR and ADLS Gen2, and a .Stat Suite operator
   migrating an NSI installation. This brief is authoritative for the names.
+* **Design:** [Phase 2a: catalogs of products and editions](phase-2a-catalog-editions.md)
+  (GH-96) supersedes this RFC for implementation detail.
 
 ## Overview
 

@@ -7,5 +7,6 @@ implements part of live in sdmxlib, for example
 
 | Design | Date | Author | Status | Components | Description |
 |---|---|---|---|---|---|
+| [Phase 2a: catalogs of products and editions](phase-2a-catalog-editions.md) | 2026-10-31 | Gabriel Gellner | Reviewed | store, catalog, admin, cli, sdmxlib | The design GH-70 implements: the sdmxlib 0.80 upgrade, the Inventory writer, `Catalog`, `WorkingCopy`, `EditionView` and `CatalogAdmin`, in four slices. Supersedes the RFC for implementation detail. |
 | [Products, editions and the Inventory](products-editions-inventory.md) | 2026-10-28 | Gabriel Gellner | RFC | store, bundle, cli, sdmxlib, sdmxlib-rest | The Catalog as the `dcat:Catalog` of Products and Editions, the WorkingCopy, and an Inventory that decides each product's live edition. GH-70 waits on it. |
 | [Language tags and label lookup](language-tags.md) | 2026-10-28 | Gabriel Gellner | RFC | store, sources, query, sdmxlib | BCP 47 tags as MAP keys, no default language, exact matching, labels returned with their tag, and explicit language pairs for search. Ships in four slices starting with GH-84 and GH-83. |
