@@ -446,8 +446,11 @@ The order of work comes from the readiness reviewer.
 
 Then:
 - **sdmxlib-rest:** an adoption issue that pins the new release and reads
-  manifest 3.0. It lands before statcatlib's Phase 2a merges.
-- **statcatlib:** Phase 2a stays on a branch until then.
+  manifest 3.0.
+- **statcatlib:** Phase 2a merges and releases once that issue exists (spec
+  §18.1). Until sdmxlib-rest ships the adoption, the deployed sdmxlib-rest
+  cannot read catalogs that a released statcatlib writes. The Phase 2a design
+  records this as decision P2.
 
 ### 12. Migrating a .Stat Suite installation
 
