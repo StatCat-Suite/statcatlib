@@ -50,3 +50,11 @@ def test_an_added_file_fails_the_publish_profile(edition_dir: Path) -> None:
     report = check_edition(edition_dir, at="publish")
     assert not report.ok
     assert any("extra.txt" in str(f) for f in report.findings)
+
+
+def test_an_edition_with_no_rows_passes_the_publish_profile(catalog: sc.Catalog, tmp_path: Path) -> None:
+    """Its index has no languages and records no annotation fingerprint, and nothing in it can go stale."""
+    edition = catalog.product("empty").working_copy().seal()
+    edition_dir = tmp_path / "catalog" / "products" / "empty" / edition.edition_id
+    report = check_edition(edition_dir, at="publish", extensions={STATCAT_SECTION: check_catalog})
+    assert report.ok, [str(f) for f in report.findings]

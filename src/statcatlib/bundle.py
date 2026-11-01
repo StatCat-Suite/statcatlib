@@ -238,6 +238,7 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
       ``index.json`` does not name;
     - the store's annotations of the types the index read are the ones it was
       built from, so an overlay folded in since shows up as a stale index.
+      An index with no languages holds no rows, and this check skips it.
 
     Args:
         root: The edition directory.
@@ -285,7 +286,9 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
         ]
     findings += [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
     search = section.get("search")
-    if isinstance(search, Mapping):
+    # The seal of an edition with no rows writes an index with no languages and records no
+    # annotation fingerprint; such an index holds nothing an annotation could make stale.
+    if isinstance(search, Mapping) and search.get("languages"):
         findings += _check_index_annotations(conn, search.get("annotations"), annotation_fingerprint)
     return findings
 
