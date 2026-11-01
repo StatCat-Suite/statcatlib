@@ -108,7 +108,7 @@ class TestAgentQuery:
         agent = result.items[0]
         assert isinstance(agent, sc.Agent)
         assert agent.id == "ECB"
-        assert agent.name.get("en") == "European Central Bank"
+        assert agent.name.as_dict().get("en") == "European Central Bank"
         assert agent.type == "organization"
 
     def test_all_terminal_method(self, entity_store: sc.Catalog) -> None:

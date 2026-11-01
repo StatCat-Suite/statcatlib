@@ -24,7 +24,7 @@ class TestConceptScheme:
     def test_construction(self):
         scheme = sc.ConceptScheme(uri=SCHEME_URI, label=_i("Themes"))
         assert scheme.uri == SCHEME_URI
-        assert scheme.label.get("en") == "Themes"
+        assert scheme.label.as_dict().get("en") == "Themes"
         assert scheme.concepts == {}
         assert scheme.top_concepts == ()
 
@@ -44,7 +44,7 @@ class TestConcept:
     def test_construction(self):
         c = sc.Concept(notation="PUMF", label=_i("PUMF"))
         assert c.notation == "PUMF"
-        assert c.label.get("en") == "PUMF"
+        assert c.label.as_dict().get("en") == "PUMF"
         assert c.broader == ()
         assert c.narrower == ()
         assert c.related == ()
@@ -56,9 +56,9 @@ class TestConcept:
 
     def test_with_alt_label_and_definition(self):
         c = sc.Concept(notation="ECO", label=_i("Economy"), alt_label=_i("Econ"), definition=_i("Economic activity"))
-        assert c.alt_label.get("en") == "Econ"
+        assert c.alt_label.as_dict().get("en") == "Econ"
         assert c.definition is not None
-        assert c.definition.get("en") == "Economic activity"
+        assert c.definition.as_dict().get("en") == "Economic activity"
 
     def test_immutable(self):
         c = sc.Concept(notation="A", label=_i("A"))
@@ -93,7 +93,7 @@ class TestConceptRef:
         )
         assert ref.notation == "ECO"
         assert ref.scheme_uri == "urn:test:themes"
-        assert ref.label.get("en") == "Economy"
+        assert ref.label.as_dict().get("en") == "Economy"
 
     def test_equality_ignores_metadata(self):
         ref1 = sc.ConceptRef(uri="urn:test:x", notation="ECO", scheme_uri="urn:test:s")
@@ -167,7 +167,7 @@ class TestPutGetConceptScheme:
         result = store.get_concept_scheme(SCHEME_URI)
         assert result is not None
         assert result.uri == SCHEME_URI
-        assert result.label.get("en") == "Test Themes"
+        assert result.label.as_dict().get("en") == "Test Themes"
 
     def test_concepts_populated(self, store):
         store.put(_make_scheme())
@@ -175,7 +175,7 @@ class TestPutGetConceptScheme:
         assert result is not None
         assert "ECO" in result.concepts
         assert "LAB" in result.concepts
-        assert result.concepts["ECO"].label.get("en") == "Economy"
+        assert result.concepts["ECO"].label.as_dict().get("en") == "Economy"
 
     def test_top_concepts(self, store):
         store.put(_make_scheme())
@@ -212,7 +212,7 @@ class TestGetConcept:
         concept = store.get_concept(f"{SCHEME_URI}/ECO")
         assert concept is not None
         assert concept.notation == "ECO"
-        assert concept.label.get("en") == "Economy"
+        assert concept.label.as_dict().get("en") == "Economy"
 
     def test_nonexistent_returns_none(self, store):
         assert store.get_concept("urn:nonexistent/NOPE") is None

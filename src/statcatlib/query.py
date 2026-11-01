@@ -133,10 +133,11 @@ class MapCondition:
 
     Used inside ``ExistsFilter.conditions`` when the bridge-table column
     is a DuckDB MAP rather than a scalar.  ``element_at(col, key)`` is
-    emitted in the SQL instead of a plain ``col = ?``.
+    emitted in the SQL instead of a plain ``col = ?``. *key* is a language
+    tag, normalised by `sdmxlib.normalize_tag`, so ``"EN"`` matches ``"en"``.
     """
 
-    key: str  # language key, e.g. "en"
+    key: str = field(converter=sl.normalize_tag)  # language key, e.g. "en"
     value: str  # value to match
 
 
@@ -159,11 +160,12 @@ class MapFilter:
     """Filter on a MAP column of the main ``dataset`` table.
 
     Unlike ``ExistsFilter`` (which targets bridge tables via a subquery),
-    ``MapFilter`` adds a direct WHERE clause against ``d.<column>``.
+    ``MapFilter`` adds a direct WHERE clause against ``d.<column>``. *key*
+    is a language tag, normalised by `sdmxlib.normalize_tag`.
     """
 
     column: str  # "title", "description"
-    key: str  # language key, e.g. "en"
+    key: str = field(converter=sl.normalize_tag)  # language key, e.g. "en"
     value: str  # raw search text (ilike) or exact value (eq)
     op: str = "eq"  # "eq" | "ilike"
 
@@ -953,7 +955,7 @@ def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
     Example:
         store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
     """
-    return _SpatialFilter(lang=lang, label=label)
+    return _SpatialFilter(lang=sl.normalize_tag(lang), label=label)
 
 
 def has_spatial_uri(uri: str) -> ExistsFilter:

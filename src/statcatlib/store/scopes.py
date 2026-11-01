@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 import attrs
 import duckdb
+import sdmxlib
 from attrs import define, field
 from sdmxlib import InternationalString
 from sdmxlib.model.collections import ItemList
@@ -551,6 +552,7 @@ class SchemeScope:
 
     def labels(self, lang: str = "en") -> dict[str, str]:
         """Return ``{notation: display_label}`` for concepts in this scheme."""
+        lang = sdmxlib.normalize_tag(lang)
         rows = self._store.connection.execute(
             "SELECT notation, label[?] FROM statcat.concept WHERE in_scheme = ? AND label[?] IS NOT NULL",
             [lang, self.scheme, lang],
@@ -668,6 +670,7 @@ class CodelistsScope:
 
     def lang(self, lang: str) -> CodelistsScope:
         """Set language for label resolution. Returns new scope (lazy)."""
+        lang = sdmxlib.normalize_tag(lang)
         return attrs.evolve(self, lang=lang)
 
     def filter(self, *, text_contains: str) -> CodelistsScope:
@@ -745,6 +748,8 @@ class CodelistsScope:
             ``{(codelist_urn, code_id): label}`` for every pair that resolved.
             A pair with no label in *lang* falls back to its code id.
         """
+        if lang is not None:
+            lang = sdmxlib.normalize_tag(lang)
         if not pairs:
             return {}
         resolved_lang = lang if lang is not None else self._lang
@@ -809,6 +814,7 @@ class CodelistScope:
 
     def lang(self, lang: str) -> CodelistScope:
         """Set language for code label resolution. Returns new scope (lazy)."""
+        lang = sdmxlib.normalize_tag(lang)
         return attrs.evolve(self, lang=lang)
 
     def collect(self) -> ItemList[Code]:
@@ -852,6 +858,7 @@ class CodelistScope:
 
         Resolves via the sdmxlib localized_text table.
         """
+        lang = sdmxlib.normalize_tag(lang)
         try:
             rows = self._store.connection.execute(
                 """
@@ -880,6 +887,8 @@ class CodelistScope:
             ``{code_id: label}`` for every id that resolved. An id with no
             label in *lang* falls back to the id itself.
         """
+        if lang is not None:
+            lang = sdmxlib.normalize_tag(lang)
         if not code_ids:
             return {}
         resolved_lang = lang if lang is not None else self._lang
@@ -1349,6 +1358,7 @@ class _FilteredCodelistsScope:
 
     def lang(self, lang: str) -> _FilteredCodelistsScope:
         """Set language for label resolution. Returns new scope (lazy)."""
+        lang = sdmxlib.normalize_tag(lang)
         return attrs.evolve(self, lang=lang)
 
     def collect(self) -> list[CodelistScope]:

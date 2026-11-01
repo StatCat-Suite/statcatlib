@@ -46,7 +46,7 @@ def test_dataset_bridge_values_round_trip(store: sc.Catalog) -> None:
     store.put(_dataset())
     got = store.get(sc.OpenDataset, f"DS-{QUOTED}")
     assert got is not None
-    assert [kw.get("en") for kw in got.keywords] == [QUOTED, "plain"]
+    assert [kw.as_dict().get("en") for kw in got.keywords] == [QUOTED, "plain"]
     assert [t.uri for t in got.themes] == [f"urn:theme:{QUOTED}"]
     assert [s.uri for s in got.subject] == [f"urn:subject:{QUOTED}"]
     assert [c.label for c in got.spatial_coverage] == [_i(QUOTED), _i("no box")]
