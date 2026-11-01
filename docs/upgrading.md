@@ -85,6 +85,18 @@ and the errors `NoLiveEditionError`, `WorkingCopyExistsError`,
 - `add_language_alternates` and the CKAN `language` list store tags lowercase,
   as `sdmxlib.normalize_tag` spells them.
 
+### Checking a catalog and reporting on it
+
+Two new commands only read a catalog
+([Catalog administration](api/admin.md)):
+
+- `statcat verify-catalog CATALOG` checks the Inventory and every edition it
+  records, `data/` files included. It exits 0 when clean, 1 on a finding,
+  naming the file, and 2 when the catalog cannot be read.
+- `statcat doctor CATALOG` reports a synced-folder path, unsealed editions,
+  seal journal entries, sealed editions no Inventory version names, and files
+  a writer left in `inventory/`. It writes nothing.
+
 ### The bundle API and the data-path policies are removed
 
 | Removed | Replacement |
@@ -94,7 +106,8 @@ and the errors `NoLiveEditionError`, `WorkingCopyExistsError`,
 | `read_current_data_path`, `normalize_lake_data_path` | none |
 | `statcatlib.bundle.publish_bundle` | `WorkingCopy.seal` |
 | `statcatlib.bundle.check_bundle` | `sdmxlib.edition.check_edition(path, at=..., extensions={"statcat": check_catalog})` on an edition directory |
-| `statcat bundle check`, `explain`, `rebind`, `attach-cmd` | `sdmxlib edition check`, `copy` and `files`; `rebind` has no replacement, because an edition resolves its data path against its own directory |
+| `statcat bundle check` | `statcat verify-catalog CATALOG`, which checks every edition the Inventory records; `sdmxlib edition check` checks one edition directory |
+| `statcat bundle explain`, `rebind`, `attach-cmd` | `sdmxlib edition copy` and `files`; `rebind` has no replacement, because an edition resolves its data path against its own directory |
 
 `check_catalog(root, manifest, reg, profile)` takes sdmxlib 0.80's `Check`
 arguments: an `EditionRegistry` and the `check_edition` profile.

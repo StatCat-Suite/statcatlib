@@ -105,6 +105,7 @@ nav:
     - Domain Model: api/model.md
     - Query Filters: api/query.md
     - Source Connectors: api/sources.md
+    - Catalog Administration: api/admin.md
   - Reference:
     - Catalog: reference/catalog.md
     - Scopes: reference/scopes.md
@@ -113,6 +114,7 @@ nav:
     - Sources: reference/sources.md
     - Bundles: reference/bundle.md
     - Checks: reference/checks.md
+    - Diagnostics: reference/diagnostics.md
     - URNs: reference/urn.md
     - Testing: reference/testing.md
   - Design:
