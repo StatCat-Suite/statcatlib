@@ -681,9 +681,12 @@ class WorkingCopy:
                 shutil.rmtree(search_dir)
             return
         carried = store.embedding_metadata
-        model = store._embedding_model
-        if carried is not None and model is not None and self._rebuild_index is None:
-            log.info("%s: sealing re-encodes every text with the working copy's model", self._product_id)
+        if carried is not None and store._embedding_model is not None:
+            log.info(
+                "%s: the seal re-encodes every text; the carried index was built with %s",
+                self._product_id,
+                carried.model,
+            )
         if self._rebuild_index is not None:
             self._rebuild_index()
         else:
