@@ -7,14 +7,17 @@
 holds one module, `__init__.py`. Each command parses options, validates the
 catalog directory, and calls one library function. The work itself lives in
 `statcatlib.WorkingCopy.build_index` (`../store/working_copy.py`), which
-delegates to the private `_Store.build_index` (`../store/store.py`).
+delegates to the private `_Store.build_index` (`../store/store.py`), and in
+`statcatlib.diagnostics` (`../diagnostics.py`) for `verify-catalog` and
+`doctor`.
 
 The CLI needs the `search` extra (`uv add 'statcatlib[search]'`, or
 `pip install 'statcatlib[search]'`), which supplies `typer`, `rich`,
 `lancedb` and `sentence-transformers`. Importing the module without `typer`
 and `rich` fails.
 
-The console script is `statcat`. `build-index` is the only command.
+The console script is `statcat`, with three commands: `build-index`,
+`verify-catalog` and `doctor`.
 
 ## Interface
 
@@ -29,6 +32,8 @@ Commands:
 | Command | Function | Calls | Exit 1 when |
 | --- | --- | --- | --- |
 | `statcat build-index CATALOG PRODUCT` | `build_index` | `sc.Catalog.create(catalog, exist_ok=True).product(product).working_copy(resume=True).build_index(...)` | `catalog.json` is missing, the product has no unsealed edition, or `sentence_transformers` cannot be imported |
+| `statcat verify-catalog PATH` | `verify_catalog` | `diagnostics.verify_catalog(path)` | any finding, each printed as `FAIL <file>: <detail>`; exit 2 on `CatalogUnreadableError` |
+| `statcat doctor PATH` | `doctor` | `diagnostics.doctor(path)` | the report holds a warning |
 
 `build-index` options and their `WorkingCopy.build_index` keyword:
 
@@ -58,6 +63,8 @@ Private helpers that tests and later commands rely on:
   `Catalog.create(catalog, exist_ok=True)` and returns it with the product's
   resumed `WorkingCopy`. A product with no unsealed edition closes the
   catalog and exits 1, naming `working_copy()`.
+- `_say(line, style=None)` — prints *line* escaped, unhighlighted and with
+  `soft_wrap=True`, so a path in a finding is never split or styled.
 - `console` — the shared `rich.console.Console`; `log` — the
   `statcatlib.cli` logger (currently unused).
 - `_parse_codelist_policy(raw)` — accepts only mode `fts_only`
@@ -102,6 +109,8 @@ Private helpers that tests and later commands rely on:
 - Every install hint names `uv add` first and `pip install` second.
 
 ## Side Effects
+
+- `verify-catalog` and `doctor` write nothing.
 
 - `build-index` writes the working copy's `search/` directory: the
   edition's tables, `search/index.json`, and `search/embeddings.json`. It
