@@ -1,8 +1,9 @@
-"""DuckDB star schema for the Catalog — ``statcat`` namespace.
+"""DuckDB star schema for the catalog — ``statcat`` namespace.
 
-Single entry point: ``create_schema(conn)`` creates all catalog tables and
-returns a cursor with ``search_path = 'statcat'``.  Safe to call on an
-existing database — every DDL statement uses ``IF NOT EXISTS``.
+``create_schema(conn, catalog_name)`` creates all catalog tables in an
+edition's store and returns a cursor pointed at them (`use_statcat`). Safe
+to call on an existing database — every DDL statement uses
+``IF NOT EXISTS``.
 
 Multilingual columns
 --------------------
@@ -45,8 +46,8 @@ if TYPE_CHECKING:
     import duckdb
 
 #: The ``statcat`` schema this build writes and reads, recorded in ``statcat._meta``.
-#: `Catalog.open` refuses a catalog stamped with another (GH-39), so bumping it means
-#: rebuilding every catalog.
+#: `Product.view` and `Product.working_copy` refuse an edition stamped with another
+#: (GH-39), so bumping it means rebuilding every catalog.
 SCHEMA_VERSION = "2.2"
 
 # ── DDL ────────────────────────────────────────────────────────────────
@@ -409,7 +410,7 @@ def create_schema(conn: duckdb.DuckDBPyConnection, catalog_name: str | None = No
     for raw_stmt in _SCHEMA_DDL.split(";"):
         if clean := raw_stmt.strip():
             cursor.execute(clean)
-    # Stamped once, when the schema is created; a later open never restamps it.
+    # Stamped once, when the schema is created; a later edition carries the stamp as it is.
     cursor.execute(
         "INSERT OR IGNORE INTO _meta VALUES ('schema_version', $version)",
         {"version": SCHEMA_VERSION},

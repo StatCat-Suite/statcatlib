@@ -1,8 +1,8 @@
 """LanceDB vector + full-text index for statcatlib search.
 
-Isolated from the core store so that lancedb is never imported unless an
-``embedding_model`` is passed to ``Catalog``, or ``search()`` is called
-on a folder-mode catalog.  Core statcatlib has no dependency on lancedb.
+Isolated from the core store so that lancedb is imported only when an
+edition's search index is opened, built or searched. Core statcatlib has no
+dependency on lancedb.
 
 Each language gets its own table, holding one row per entity in that
 language, with a text column (for BM25 full-text search via Tantivy) and
@@ -272,7 +272,7 @@ _EXTENSION_COLUMNS: tuple[tuple[str, str], ...] = (
 
 
 class LanguageLayout(TypedDict):
-    """What one language's table was built with, as `Catalog.index_layout` reports it.
+    """What one language's table was built with, as `EditionView.index_layout` reports it.
 
     Public: this is the shape callers get back, and it is the thing to check
     after a build — "was French actually stemmed as French?" is answerable from
@@ -294,7 +294,7 @@ class LanguageLayout(TypedDict):
 
 
 class IndexAnnotations(TypedDict):
-    """The annotations an index was built from, as `Catalog.index_annotations` reports it.
+    """The annotations an index was built from, as `EditionView.index_annotations` reports it.
 
     `types` are the annotation types `build_index` read (what to exclude, what
     context and synonyms to fold in); `fingerprint` is a digest of every
@@ -1466,7 +1466,7 @@ class LanceIndex:
 
         Like `bm25_search` but yields the requested *columns*
         alongside the score (``_score`` is always included).  Used by
-        ``Catalog.search_codes`` to return structured code-row data
+        ``CodesScope.find`` to return structured code-row data
         without a second SQL round-trip.
 
         Args:

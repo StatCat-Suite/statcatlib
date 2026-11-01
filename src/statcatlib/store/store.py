@@ -249,7 +249,7 @@ def _refuse_unreadable_index(search_dir: Path) -> None:
 
 @define(frozen=True)
 class EmbeddingMetadata:
-    """Read-side view of a bundle's ``search/embeddings.json`` sidecar.
+    """Read-side view of an edition's ``search/embeddings.json`` sidecar.
 
     Returned by `EditionView.embedding_metadata`. Fields that were not
     present in the on-disk sidecar (e.g. when reading a v2 file with a v3
@@ -2949,7 +2949,7 @@ class _Store:
         Populated explicitly via `build_index` or by reading
         ``<catalog>/search/embeddings.json`` on `open`. The fields
         that were not persisted by the writing version surface as ``None``
-        — e.g. a bundle built with v2 has no ``embedding_dim``.
+        — e.g. an index built with v2 has no ``embedding_dim``.
 
         Use `check_index_compatible` for an opinionated
         compatibility check; reach for this property when you need a
@@ -3000,7 +3000,7 @@ class _Store:
         Raises `IncompatibleIndexError` when the persisted sidecar
         disagrees with the caller's expectations.
 
-        No-op when the bundle has no embeddings sidecar yet — there is
+        No-op when the edition has no embeddings sidecar yet — there is
         nothing to be incompatible with. No-op when neither *model_name*
         nor *embedding_dim* is supplied. ``None`` arguments are ignored
         (only fields the caller cares about get checked).
@@ -4353,7 +4353,7 @@ class _Store:
         if model_name is None and (self._document_prefix or self._query_prefix):
             warnings.warn(
                 "document_prefix / query_prefix are set but model_name is not, "
-                "so no embeddings.json is written and the next open() restores "
+                "so no embeddings.json is written and a later view restores "
                 "neither. Queries would then run unprefixed against prefixed "
                 "vectors. Pass model_name to build_index() to pin them.",
                 stacklevel=3,
@@ -4677,11 +4677,10 @@ class _Store:
     ) -> None:
         """Update `embedding_metadata` and write the sidecar.
 
-        Becomes a partial no-op for in-memory catalogs (in-memory has no
-        bundle dir to write to) but the in-memory ``EmbeddingMetadata``
-        is still updated so query-side helpers work within the session.
-        Without a *model_name* the sidecar is not written — there is
-        nothing meaningful for a later `open` to recover.
+        Without a ``search/`` directory nothing is written, but the
+        ``EmbeddingMetadata`` is still updated so query-side helpers work
+        within the session. Without a *model_name* the sidecar is not
+        written: there is nothing meaningful for a later view to recover.
         """
         # Resolve the carried-forward model name: explicit argument wins,
         # otherwise reuse whatever a previous build (or open()) recorded.
