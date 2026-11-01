@@ -730,17 +730,19 @@ The message names the re-ingest section of `docs/upgrading.md`.
 
 ### Issues filed on sdmxlib
 
-statcatlib files these as sdmxlib issues after this design is approved:
+Filed on 2026-11-01. The rest of this design refers to them as sdmxlib
+issues 1, 2 and 3.
 
-1. Add `describe` (and `create`, if sdmxlib prefers both) to `event.kind` in
-   Inventory 1.0, as a reader change. sdmxlib-rest GH-81 must pin it before
+1. StatCat-Suite/sdmxlib#334: add `describe` to `event.kind` in Inventory
+   1.0, as a reader change. sdmxlib-rest GH-81 must pin it before
    statcatlib S3 is released (P3).
-2. Expose one public `create_exclusive(path, data)` that fsyncs the staged
-   file and the directory, and use it in `write_journal` and in `seal`'s
-   manifest write. statcatlib's writer switches to it when it ships, and no
+2. StatCat-Suite/sdmxlib#335: expose one public
+   `create_exclusive(path, data)` that fsyncs the staged file and the
+   directory, and use it in `write_journal` and in `seal`'s manifest write. statcatlib's writer switches to it when it ships, and no
    slice waits on it.
-3. Add `LocalRegistry.edition(..., manifest_sha256=)`, so the attach checks
-   the Inventory's digest, as pods need to.
+3. StatCat-Suite/sdmxlib#336: add
+   `LocalRegistry.edition(..., manifest_sha256=)`, so the attach checks the
+   Inventory's digest, as pods need to.
 
 ## Alternatives Considered
 
