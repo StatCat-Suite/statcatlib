@@ -1,6 +1,7 @@
 """SDMX source connector for statcatlib.
 
-This is the only statcatlib module that imports sdmxlib beyond InternationalString.
+It builds catalog records from SDMX model types and writes them, with the
+structures and observations, into a working copy.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from sdmxlib.model.datastructure import DataStructure
 
 from statcatlib.model.agents import Agent
 from statcatlib.model.dataset import AggregateDataset
+from statcatlib.store.schema import first_row
 from statcatlib.store.working_copy import WorkingCopy
 
 if TYPE_CHECKING:
@@ -81,20 +83,21 @@ def _resolve_latest(store: WorkingCopy, identifier: str) -> str:
     if m is None:
         return identifier
     agency, flow_id = m.group(1), m.group(2)
-    row = (
+    rows = (
         store.view()
         ._cursor()
         .execute(
             """
-        SELECT identifier FROM dataset
-        WHERE identifier LIKE ?
-        ORDER BY identifier DESC
-        LIMIT 1
-        """,
+            SELECT identifier FROM dataset
+            WHERE identifier LIKE ?
+            ORDER BY identifier DESC
+            LIMIT 1
+            """,
             [f"{agency}:{flow_id}(%"],
         )
-        .fetchone()
+        .fetchall()
     )
+    row = first_row(rows)
     return row[0] if row else identifier
 
 
@@ -196,7 +199,7 @@ def prepare_sdmx(
     structural tables once ``local.ingest(registry)`` has been called.
 
     *registry* can also be a `LocalRegistry` whose store already holds the
-    structures, such as a bundle's: each flow's DSD is read from the store.
+    structures, such as an edition's: each flow's DSD is read from the store.
     """
     results: list[AggregateDataset] = []
     for flow in registry.get_all(Dataflow):

@@ -10,12 +10,14 @@ Requires the ``[search]`` extra (typer + sentence-transformers + lancedb).
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import sys
 import time
 import warnings
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
@@ -33,6 +35,9 @@ from rich.progress import (
 
 import statcatlib as sc
 from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES
+
+if TYPE_CHECKING:
+    from sdmxlib.edition import Lifecycle
 
 __all__ = ["app", "main"]
 
@@ -183,6 +188,13 @@ def _load_encoder(model_name: str, device: str | None) -> EmbeddingModel:
     return model
 
 
+class _Lifecycle(enum.StrEnum):
+    """The ``--lifecycle`` choices: a product's lifecycle, as `Product.working_copy` takes it."""
+
+    REVISABLE = "revisable"
+    FINAL = "final"
+
+
 def _require_catalog(catalog: Path) -> None:
     """Exit with code 1 unless *catalog* holds ``catalog.json``; nothing is created."""
     if not (catalog / "catalog.json").is_file():
@@ -194,11 +206,15 @@ def _require_catalog(catalog: Path) -> None:
         raise typer.Exit(code=1)
 
 
-def _resume(catalog: Path, product: str) -> tuple[sc.Catalog, sc.WorkingCopy]:
+def _resume(catalog: Path, product: str, lifecycle: Lifecycle) -> tuple[sc.Catalog, sc.WorkingCopy]:
     """Open *catalog* for writing and resume *product*'s working copy, or exit with code 1."""
     cat = sc.Catalog.create(catalog, exist_ok=True)
     try:
-        return cat, cat.product(product).working_copy(resume=True)
+        return cat, cat.product(product).working_copy(resume=True, lifecycle=lifecycle)
+    except sc.InventoryRuleError as exc:
+        cat.close()
+        console.print(f"[red]Cannot resume the working copy:[/] {exc}. Pass --lifecycle to match.")
+        raise typer.Exit(code=1) from None
     except FileNotFoundError:
         cat.close()
         console.print(
@@ -220,6 +236,11 @@ def build_index(
     product: str = typer.Argument(
         ...,
         help="The product whose working copy to index.",
+    ),
+    lifecycle: _Lifecycle = typer.Option(
+        _Lifecycle.REVISABLE,
+        "--lifecycle",
+        help="The product's lifecycle, as it was recorded.",
     ),
     model: str = typer.Option(
         _DEFAULT_MODEL,
@@ -314,9 +335,11 @@ def build_index(
     chosen model, prefixes, embedding dimensionality, and row counts, so
     that a query-side client can call
     `statcatlib.EditionView.check_index_compatible` to validate its encoder.
-    The working copy stays unsealed; seal it from Python with
-    `statcatlib.WorkingCopy.seal`, which rebuilds the index with the
-    arguments of the last build.
+    The working copy stays unsealed. `statcatlib.WorkingCopy.seal` rebuilds
+    the index with the arguments of the last ``build_index`` call made on
+    that working copy object, so a seal in a later process rebuilds with the
+    defaults: call ``wc.build_index(...)`` with these options before
+    ``wc.seal()`` to seal this index.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -357,7 +380,7 @@ def build_index(
         encoder = _load_encoder(model, device)
 
     with console.status("[dim]Opening the working copy…[/]"):
-        cat, store = _resume(catalog, product)
+        cat, store = _resume(catalog, product, "final" if lifecycle is _Lifecycle.FINAL else "revisable")
 
     progress = Progress(
         SpinnerColumn(),
@@ -412,7 +435,7 @@ def build_index(
 
 
 def main() -> None:
-    """Console-script entry point for ``statcatlib``."""
+    """Console-script entry point for ``statcat``."""
     app()
 
 

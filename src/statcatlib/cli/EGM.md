@@ -14,8 +14,7 @@ The CLI needs the `search` extra (`uv add 'statcatlib[search]'`, or
 `lancedb` and `sentence-transformers`. Importing the module without `typer`
 and `rich` fails.
 
-`main()`'s docstring calls the console script `statcatlib`; the script is
-`statcat`, as the module docstring says. `build-index` is the only command.
+The console script is `statcat`. `build-index` is the only command.
 
 ## Interface
 
@@ -35,6 +34,7 @@ Commands:
 
 | Option | Default | Keyword |
 | --- | --- | --- |
+| `--lifecycle` | `revisable` | `working_copy(lifecycle=)` when the working copy is resumed |
 | `--model` | `intfloat/multilingual-e5-base` (`_DEFAULT_MODEL`) | `model_name`, and the encoder that `_load_encoder` loads |
 | `--document-prefix`, `--query-prefix` | from `ASYMMETRIC_MODEL_PREFIXES`, else `""` | `document_prefix`, `query_prefix` |
 | `--batch-size` | 256 | sets env `STATCAT_EMBED_BATCH_SIZE` |
@@ -92,8 +92,8 @@ Private helpers that tests and later commands rely on:
   with its process, so a seal from a working copy resumed later rebuilds with
   the default arguments and the encoder passed to
   `working_copy(embedding_model=)`.
-- `build-index` resumes with the default lifecycle, `revisable`. A product
-  recorded as `final` raises `InventoryRuleError` (`rule="lifecycle"`).
+- `build-index` resumes with `--lifecycle` (`revisable` by default). A
+  product recorded with another lifecycle exits 1, naming the option.
 - `build-index` passes `model_name` to `WorkingCopy.build_index` on every
   call, so `search/embeddings.json` records the model and its prefixes.
 - Imports of `sentence_transformers` and `transformers`

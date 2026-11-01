@@ -148,6 +148,19 @@ class TestBuildIndexCli:
         assert "no unsealed edition" in result.output
         assert captured == {}
 
+    def test_a_final_product_needs_the_lifecycle_option(self, tmp_path: Path, captured: dict[str, Any]) -> None:
+        path = tmp_path / "final"
+        with sc.Catalog.create(path) as cat:
+            cat.product("p").working_copy(lifecycle="final").seal()
+            cat.product("p").working_copy(lifecycle="final").close()
+        refused = runner.invoke(app, ["build-index", str(path), "p"])
+        assert refused.exit_code == 1
+        assert "--lifecycle" in refused.output
+        assert captured == {}
+        result = runner.invoke(app, ["build-index", str(path), "p", "--lifecycle", "final"])
+        assert result.exit_code == 0, result.output
+        assert captured
+
     def test_the_working_copy_stays_unsealed(self, catalog_path: Path, captured: dict[str, Any]) -> None:
         result = runner.invoke(app, ["build-index", str(catalog_path), "p"])
         assert result.exit_code == 0, result.output

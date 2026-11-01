@@ -53,7 +53,7 @@ from statcatlib.store.inventory import (
     NonFastForwardError,
     producer,
 )
-from statcatlib.store.store import EditionView, _Store
+from statcatlib.store.store import EditionView, _refuse_statcat_schema_mismatch, _Store
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
@@ -398,8 +398,10 @@ class WorkingCopy:
             if previous is None:
                 # A product's first edition: the statcat tables are created here.
                 # An edition built on another arrives with them, in the copied
-                # metadata.duckdb. Every statement is IF NOT EXISTS, so a resumed
-                # first edition is left as it is.
+                # metadata.duckdb. A resumed first edition holds them already, so
+                # the version guard runs before any DDL; every statement is IF
+                # NOT EXISTS.
+                _refuse_statcat_schema_mismatch(registry.connection.cursor())
                 _catalog_schema.create_schema(registry.connection, registry.catalog_name).close()
             store = _Store._over(
                 registry.connection.cursor,
