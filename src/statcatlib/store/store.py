@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import importlib.metadata
 import json
+import logging
 import os
 import re
 import threading
@@ -59,7 +60,7 @@ from statcatlib.query import (
     PositionalFilter,
 )
 from statcatlib.store import schema as _catalog_schema
-from statcatlib.store.lance import LanceIndex
+from statcatlib.store.lance import LanceIndex, text_sha256
 from statcatlib.store.row import Row
 from statcatlib.store.scopes import (
     CodelistScope,
@@ -71,6 +72,8 @@ from statcatlib.store.scopes import (
 )
 from statcatlib.store.sentinel import make_unloaded
 from statcatlib.store.xhtml import xhtml_to_markdown
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["VALID_INCLUDE_RELS", "EditionView", "QueryBuilder", "Row", "SearchResult"]
 
@@ -689,6 +692,38 @@ def as_vectors(encoded: object) -> list[list[float]]:
         msg = f"embedding model returned {type(encoded).__name__}, expected an iterable of vectors"
         raise TypeError(msg)
     return [as_vector(row) for row in encoded]
+
+
+class _VectorReuse:
+    """The vectors one `build_index` may reuse, and its counts of reused and encoded texts (S2b).
+
+    A text whose `text_sha256` (model name, document prefix, text) names a
+    carried vector takes that vector; every other text is encoded. Without
+    a model name nothing is reused and no hash is recorded, since a vector
+    could not be tied to the model that made it.
+
+    Attributes:
+        model_name: The model the vectors belong to, or ``None``.
+        carried: Each stored vector by its hash.
+        reused: How many texts took a carried vector.
+        encoded: How many texts were encoded.
+    """
+
+    model_name: str | None
+    carried: Mapping[str, list[float]]
+    reused: int
+    encoded: int
+
+    def __init__(self, model_name: str | None, carried: Mapping[str, list[float]]) -> None:
+        """Hold *carried* for the texts of *model_name*."""
+        self.model_name = model_name
+        self.carried = carried if model_name is not None else {}
+        self.reused = 0
+        self.encoded = 0
+
+    def hash(self, prefix: str, text: str) -> str | None:
+        """The text's `text_sha256`, or ``None`` without a model name."""
+        return None if self.model_name is None else text_sha256(self.model_name, prefix, text)
 
 
 def _istring_to_map(s: InternationalString | None) -> dict[str, str] | None:
@@ -4024,6 +4059,7 @@ class _Store:
         *,
         embed_reference_metadata: bool,
         progress: Callable[[int, int], None] | None,
+        reuse: _VectorReuse,
     ) -> None:
         """Populate ``embedding`` on reference-metadata rows in place.
 
@@ -4035,9 +4071,10 @@ class _Store:
             return
         if embed_reference_metadata:
             items = [(r["id"], r["entity_type"], r["lang"], r["text"]) for r in refmeta_rows]
-            encoded = self._batch_encode(items, progress=progress)
+            encoded = self._batch_encode(items, progress=progress, reuse=reuse)
             for row, enc in zip(refmeta_rows, encoded, strict=True):
                 row["embedding"] = enc.get("embedding")
+                row["text_sha256"] = enc.get("text_sha256")
             return
         for row in refmeta_rows:
             row["embedding"] = None
@@ -4048,6 +4085,7 @@ class _Store:
         *,
         embed_concepts: bool,
         progress: Callable[[int, int], None] | None,
+        reuse: _VectorReuse,
     ) -> None:
         """Populate the ``embedding`` column on *concept_rows* in place.
 
@@ -4060,9 +4098,10 @@ class _Store:
             return
         if embed_concepts:
             items = [(r["id"], r["entity_type"], r["lang"], r["text"]) for r in concept_rows]
-            encoded = self._batch_encode(items, progress=progress)
+            encoded = self._batch_encode(items, progress=progress, reuse=reuse)
             for row, enc in zip(concept_rows, encoded, strict=True):
                 row["embedding"] = enc.get("embedding")
+                row["text_sha256"] = enc.get("text_sha256")
             return
         for row in concept_rows:
             row["embedding"] = None
@@ -4523,6 +4562,11 @@ class _Store:
         total = len(dataset_items) + len(code_rows) + len(concept_rows) + len(refmeta_rows)
         if progress is not None:
             progress(0, total)
+        # Read before add_bulk replaces the tables that hold them (S2b).
+        reuse = _VectorReuse(
+            model_name if model_name is not None else self.embedding_model_name,
+            self._lance.carried_vectors() if self._embedding_model is not None else {},
+        )
 
         # Row order is not load-bearing — PyArrow scans the whole batch, so
         # leading with ``embedding=None`` rows still infers the right type.
@@ -4531,17 +4575,20 @@ class _Store:
         # fts_only): inference yields a null-typed column and the ANN index
         # never builds. ``embedding_dim`` below pins the type from the model
         # so that case produces a properly typed, all-NULL column instead.
-        dataset_rows = self._build_dataset_lance_rows(dataset_items, progress=progress)
+        dataset_rows = self._build_dataset_lance_rows(dataset_items, progress=progress, reuse=reuse)
         self._attach_code_embeddings(
             code_rows,
             embed_codes=embed_codes,
             progress=progress,
             fts_only_urns=fts_only_urns,
+            reuse=reuse,
         )
-        self._attach_concept_embeddings(concept_rows, embed_concepts=embed_concepts, progress=progress)
+        self._attach_concept_embeddings(concept_rows, embed_concepts=embed_concepts, progress=progress, reuse=reuse)
         self._attach_reference_metadata_embeddings(
-            refmeta_rows, embed_reference_metadata=embed_reference_metadata, progress=progress
+            refmeta_rows, embed_reference_metadata=embed_reference_metadata, progress=progress, reuse=reuse
         )
+        if self._embedding_model is not None:
+            _log.info("build_index: reused %d carried vectors and encoded %d texts", reuse.reused, reuse.encoded)
 
         embedding_dim = _infer_embedding_dim(self._embedding_model, dataset_rows)
         # The annotation types this build read, and a digest of them, so a
@@ -4587,10 +4634,11 @@ class _Store:
         dataset_items: list[tuple[str, str, str, str]],
         *,
         progress: Callable[[int, int], None] | None,
+        reuse: _VectorReuse,
     ) -> list[SearchRow]:
         """Materialize dataset-level LanceDB rows, optionally embedded."""
         if self._embedding_model is not None:
-            return self._batch_encode(dataset_items, progress=progress)
+            return self._batch_encode(dataset_items, progress=progress, reuse=reuse)
         return [
             {
                 "id": item[0],
@@ -4621,6 +4669,7 @@ class _Store:
         *,
         embed_codes: bool,
         progress: Callable[[int, int], None] | None,
+        reuse: _VectorReuse,
         fts_only_urns: set[str] | None = None,
     ) -> None:
         """Populate the ``embedding`` column on *code_rows* in place.
@@ -4647,10 +4696,11 @@ class _Store:
                 )
                 for i in encode_idx
             ]
-            encoded = self._batch_encode(code_items, progress=progress)
+            encoded = self._batch_encode(code_items, progress=progress, reuse=reuse)
             encoded_set = set(encode_idx)
             for i, enc in zip(encode_idx, encoded, strict=True):
                 code_rows[i]["embedding"] = enc.get("embedding")
+                code_rows[i]["text_sha256"] = enc.get("text_sha256")
             for i, row in enumerate(code_rows):
                 if i not in encoded_set:
                     row["embedding"] = None
@@ -4738,52 +4788,65 @@ class _Store:
         self,
         items: list[tuple[str, str, str, str]],
         progress: Callable[[int, int], None] | None = None,
+        *,
+        reuse: _VectorReuse,
     ) -> list[SearchRow]:
         """Batch-encode texts and return LanceDB rows with embeddings.
 
-        Batch size defaults to 256 and can be overridden via the
-        ``STATCAT_EMBED_BATCH_SIZE`` env var — useful on hardware with
-        more GPU/unified memory than a typical CI machine.
+        A text whose `text_sha256` names a vector in *reuse* takes that
+        vector, and only the rest reach the model (S2b). Batch size defaults
+        to 256 and can be overridden via the ``STATCAT_EMBED_BATCH_SIZE``
+        env var, which helps on hardware with more GPU or unified memory
+        than a typical CI machine.
         """
+        assert self._embedding_model is not None  # noqa: S101
+        prefix = self._document_prefix
+        hashes = [reuse.hash(prefix, item[3]) for item in items]
+        vectors: list[list[float] | None] = [None if h is None else reuse.carried.get(h) for h in hashes]
+        missing = [i for i, vec in enumerate(vectors) if vec is None]
+        reuse.reused += len(items) - len(missing)
+        reuse.encoded += len(missing)
         batch_size = _embed_batch_size()
         total = len(items)
-        rows: list[SearchRow] = []
-        for i in range(0, total, batch_size):
-            batch = items[i : i + batch_size]
-            assert self._embedding_model is not None  # noqa: S101
-            prefix = self._document_prefix
-            texts = [prefix + item[3] for item in batch] if prefix else [item[3] for item in batch]
+        done = total - len(missing)
+        for start in range(0, len(missing), batch_size):
+            batch = missing[start : start + batch_size]
             # No `show_progress_bar=False` when `progress` is set: see
             # `EmbeddingModel`. The encoder draws no bar under normal logging,
             # and demanding the keyword excluded encoders statcatlib supports.
-            vecs = as_vectors(self._embedding_model.encode(texts))
-            rows.extend(
-                {
-                    "id": item[0],
-                    "entity_type": item[1],
-                    "lang": item[2],
-                    "text": item[3],
-                    "embedding": vec,
-                    "dimension_id": "",
-                    "dimension_label": "",
-                    "code_id": "",
-                    "code_label": "",
-                    "code_urn": "",
-                    "codelist_urn": "",
-                    "parent_id": "",
-                    "depth": 0,
-                    "concept_urn": "",
-                    "scheme_urn": "",
-                    "concept_id": "",
-                    "set_urn": "",
-                    "attribute_path": "",
-                    "section_title": "",
-                }
-                for item, vec in zip(batch, vecs, strict=True)
-            )
+            encoded = as_vectors(self._embedding_model.encode([prefix + items[i][3] for i in batch]))
+            for i, vec in zip(batch, encoded, strict=True):
+                vectors[i] = vec
+            done += len(batch)
             if progress is not None:
-                progress(min(i + batch_size, total), total)
-        return rows
+                progress(done, total)
+        if progress is not None and not missing and total:
+            progress(total, total)
+        return [
+            {
+                "id": item[0],
+                "entity_type": item[1],
+                "lang": item[2],
+                "text": item[3],
+                "embedding": vec,
+                "text_sha256": h,
+                "dimension_id": "",
+                "dimension_label": "",
+                "code_id": "",
+                "code_label": "",
+                "code_urn": "",
+                "codelist_urn": "",
+                "parent_id": "",
+                "depth": 0,
+                "concept_urn": "",
+                "scheme_urn": "",
+                "concept_id": "",
+                "set_urn": "",
+                "attribute_path": "",
+                "section_title": "",
+            }
+            for item, vec, h in zip(items, vectors, hashes, strict=True)
+        ]
 
     def _upsert_dimension_records(self, dataset: BaseDataset) -> _DimensionIds:
         """Upsert agents, contacts, frequencies, and licences.

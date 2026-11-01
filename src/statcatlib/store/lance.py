@@ -33,6 +33,7 @@ Search modes
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import warnings
 from collections.abc import Iterable, Mapping
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from lancedb.query import BooleanQuery, MatchQuery
 
-__all__: list[str] = ["LanceIndex", "make_schema"]
+__all__: list[str] = ["LanceIndex", "make_schema", "text_sha256"]
 
 #: Prefix for per-language tables. The full name carries the language and
 #: the edition that wrote it, ``search_fr__<edition id without hyphens>``, so
@@ -238,6 +239,12 @@ def _stemmer_for(lang: str) -> str | None:
 
 _EMBEDDING_COLUMN = "embedding"
 
+#: The column naming what an embedded row's vector was computed from (S2b).
+#: `text_sha256` hashes the model name, the document prefix and the text, so
+#: a rebuild reuses a carried vector whose hash matches and encodes only the
+#: texts whose hash is missing. A row without a vector holds NULL here.
+_HASH_COLUMN = "text_sha256"
+
 #: Columns every row carries, whatever entity kind it describes.
 #: ``text`` is the FTS target; ``lang`` is its BCP-47 language.
 _BASE_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -268,6 +275,8 @@ _EXTENSION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("set_urn", "string"),
     ("attribute_path", "string"),
     ("section_title", "string"),
+    # embedded rows: what the vector was computed from (`text_sha256`)
+    (_HASH_COLUMN, "string"),
 )
 
 
@@ -366,6 +375,8 @@ class SearchRow(TypedDict):
     set_urn: NotRequired[str | None]
     attribute_path: NotRequired[str | None]
     section_title: NotRequired[str | None]
+    # embedded rows: the hash `text_sha256` returns for the encoded text
+    text_sha256: NotRequired[str | None]
     # present only when an embedding model is configured
     embedding: NotRequired[list[float] | None]
 
@@ -440,6 +451,24 @@ def _embedding_dim_from_rows(rows: list[SearchRow]) -> int | None:
         if vec is not None:
             return len(vec)
     return None
+
+
+def text_sha256(model: str, prefix: str, text: str) -> str:
+    """The hash a search row records for the vector of *text* (S2b).
+
+    Two rows with the same hash were encoded from the same input by the same
+    model, so a rebuild reuses the stored vector in place of encoding again.
+
+    Args:
+        model: The embedding model's id, as ``embeddings.json`` records it.
+        prefix: The document prefix prepended before encoding.
+        text: The row's text.
+
+    Returns:
+        The SHA-256 of the three values, lowercase hex. They are hashed as a
+        JSON array, so no two triples share an input.
+    """
+    return hashlib.sha256(json.dumps([model, prefix, text]).encode()).hexdigest()
 
 
 def _to_arrow(rows: list[SearchRow], *, schema: pa.Schema | None = None) -> pa.Table:
@@ -848,6 +877,24 @@ class _LanguageIndex:
             return 0
         return self._tbl.count_rows(filter=f"{_EMBEDDING_COLUMN} IS NOT NULL")
 
+    def hashed_vectors(self) -> dict[str, list[float]]:
+        """This table's vectors, keyed by `text_sha256`; empty without either column."""
+        if self._tbl is None:
+            return {}
+        names = self._tbl.schema.names
+        if _HASH_COLUMN not in names or _EMBEDDING_COLUMN not in names:
+            return {}
+        table = (
+            self._tbl.search()
+            .where(f"{_HASH_COLUMN} IS NOT NULL AND {_EMBEDDING_COLUMN} IS NOT NULL")
+            .select([_HASH_COLUMN, _EMBEDDING_COLUMN])
+            .limit(None)
+            .to_arrow()
+        )
+        hashes = table.column(_HASH_COLUMN).to_pylist()
+        vectors = table.column(_EMBEDDING_COLUMN).to_pylist()
+        return {str(h): [float(x) for x in v] for h, v in zip(hashes, vectors, strict=True)}
+
     def drop(self) -> None:
         """Drop this language's table, ignoring a table that isn't there."""
         with contextlib.suppress(Exception):
@@ -1223,6 +1270,23 @@ class LanceIndex:
     def count_rows(self) -> int:
         """Total rows across every language."""
         return sum(li.count_rows() for li in self._langs.values())
+
+    def carried_vectors(self) -> dict[str, list[float]]:
+        """Every stored vector, keyed by its row's `text_sha256`.
+
+        `_Store.build_index` reads them before `add_bulk` replaces the
+        tables, and reuses a vector whose hash matches a text it would
+        encode. A table written before the column existed contributes
+        nothing, so its texts are encoded again.
+
+        Returns:
+            Each hash with its vector, across every language the manifest
+            names.
+        """
+        found: dict[str, list[float]] = {}
+        for index in self._langs.values():
+            found.update(index.hashed_vectors())
+        return found
 
     # -- writes --------------------------------------------------------
 
