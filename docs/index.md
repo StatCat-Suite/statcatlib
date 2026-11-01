@@ -12,17 +12,45 @@ APIs: SDMX REST endpoints, CKAN portals, institutional REST services. Finding
 the right dataset requires knowing which agency publishes it, what dimensions
 it covers, what geographic codes are available, whether it is current, and
 where it fits in the production chain. statcatlib materializes that metadata
-from one or more sources into a local database and answers these questions
+from one or more sources into a local catalog and answers these questions
 with queries against it.
+
+## Catalogs, products and editions
+
+A catalog is a directory of products, and each product is a chain of immutable
+editions. `Catalog.create(path)` creates a catalog.
+`cat.product("14100287").working_copy()` starts the product's one unsealed
+edition, a `WorkingCopy`, which ingest writes into and `wc.view()` reads back.
+`wc.seal()` turns it into an immutable edition, rebuilds its search index, and
+records it as the product's live edition. `Catalog.open(path)` opens the
+catalog read-only, and `cat.product("14100287").view()` returns an
+`EditionView` of the live edition. Every query in these docs runs on an
+`EditionView`.
+
+```python
+import statcatlib as sc
+
+with sc.Catalog.create("my_catalog") as cat:
+    wc = cat.product("14100287").working_copy()
+    sc.ingest_sdmx(wc, registry)   # registry: SDMX artefacts fetched with sdmxlib
+    wc.view().query(sc.AggregateDataset).count()
+    wc.seal()
+
+with sc.Catalog.open("my_catalog") as cat:
+    cat.product("14100287").view().query(sc.AggregateDataset).count()
+```
+
+The [Catalog Format](catalog-format.md) page specifies the files of a catalog
+and its editions.
 
 ## The three layers
 
-statcatlib keeps discovery, structure and observation data in three separate
-layers.
+Each edition keeps discovery, structure and observation data in three
+separate layers.
 
 ```mermaid
 graph LR
-    subgraph Discovery["Discovery layer — Catalog (DuckDB)"]
+    subgraph Discovery["Discovery layer — statcat schema (DuckDB)"]
         DS[datasets]
         AG[agents]
         TH[themes]
@@ -56,12 +84,12 @@ graph LR
 LFS microdata" run here.
 
 **Structural layer** — SDMX artifacts (`dataflow`, `dsd_component`, `codelist`,
-`code`) owned by sdmxlib, ingested into the same DuckDB connection in the `sdmx` schema. Structural
+`code`) owned by sdmxlib, ingested into the same DuckDB database in the `sdmx` schema. Structural
 filters (`has_code`, `has_dimensions`) JOIN directly into these tables.
 
 **Observation layer** — the actual numbers. `ingest_data()` writes a dataflow's
 observations to a DuckLake table, one row per observation, and registers an
-sdmxlib `DataflowBinding` for it. `store.registry.obs(flow)` reads them back as a
+sdmxlib `DataflowBinding` for it. `view.registry.obs(flow)` reads them back as a
 Polars frame, long or pivoted.
 
 ## The materialized graph
@@ -72,7 +100,7 @@ in SQL:
 | RDF concept | statcatlib equivalent |
 |---|---|
 | URI | SDMX URN (e.g. `urn:sdmx:...Dataflow=ESTAT:NAMA_10_GDP(1.0)`) |
-| Graph federation | Ingest: copy remote artifacts into local DuckDB |
+| Graph federation | Ingest: copy remote artifacts into an edition's DuckDB database |
 | SPARQL joins | SQL JOINs across catalog and sdmxlib tables |
 | Named graph | `kind` column on `dataset` (`open`, `aggregate`, `microdata`, `geospatial`, `publication`) |
 | prov:wasDerivedFrom | `lineage.source_id → lineage.target_id` |
@@ -87,7 +115,7 @@ graph LR
     subgraph statcatlib
         direction TB
         MODEL["model/\nBaseDataset + 5 variants\nAgent, Distribution, …"]
-        STORE["store/\nCatalog\nQueryBuilder, SearchResult"]
+        STORE["catalog.py, store/\nCatalog, WorkingCopy, EditionView\nQueryBuilder, SearchResult"]
         QUERY["query.py\nhas_code(), publishes()\nserves(), distribution()"]
         SOURCES["sources/\ningest_sdmx()\ningest_ckan()"]
     end
@@ -98,7 +126,7 @@ graph LR
         SLREST["RestRegistry\nfetch from SDMX REST"]
     end
 
-    DUCKDB[("DuckDB\ncatalog folder")]
+    DUCKDB[("DuckDB\none per edition")]
     POLARS["Polars DataFrame\nobs data"]
 
     SLREST -->|fetch| SLMODEL
@@ -241,18 +269,19 @@ erDiagram
     `dataset`, `agent`, `concept_scheme`, `concept`, `distribution`, `lineage` and
     related bridge tables are in the `statcat` schema, owned by statcatlib. `dataflow`, `dsd_component`,
     `code`, `codelist` are in the `sdmx` schema, owned by sdmxlib. Both live in the same DuckDB
-    database and are queried together via cross-schema SQL JOINs. `has_code()` and `has_dimensions()`
+    database, one per edition, and are queried together via cross-schema SQL JOINs. `has_code()` and `has_dimensions()`
     JOIN through the `sdmx` schema via `sdmx_dataflow_urn`.
 
 ## Query surface
 
-`Catalog` exposes four operations:
+`EditionView`, from `cat.product(id).view()` or `wc.view()`, exposes four
+operations:
 
 | Operation | Returns | Generic? | Use for |
 |---|---|---|---|
 | `get(cls, id)` | `T \| None` | Yes | Direct lookup by identifier |
 | `query(cls)` | `QueryBuilder[T]` | Yes | Structured filtering and sorting |
-| `search(text)` | `SearchResult[BaseDataset]` | No | Full-text BM25 across all datasets |
+| `search(text)` | `SearchResult[Hit]` | No | Full-text BM25 across datasets, concepts and codes |
 | `facets(*fields)` | `dict[str, dict[str, int]]` | No | Aggregation counts for UI facets |
 
 `QueryBuilder` supports chaining:
@@ -261,7 +290,7 @@ erDiagram
 import statcatlib.query as q
 
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(
         q.has_code("geo", "DE"),
         q.has_dimensions(["geo", "freq"]),
@@ -280,20 +309,20 @@ Cross-entity queries reach through the dataset graph:
 
 ```python
 # Agents that publish datasets with GEO=CA
-store.query(sc.Agent).filter(
+view.query(sc.Agent).filter(
     q.publishes(q.has_code("geo", "CA"))
 ).all()
 
 # Services serving aggregate datasets
-store.query(sc.DataService).filter(q.serves(kind="aggregate")).all()
+view.query(sc.DataService).filter(q.serves(kind="aggregate")).all()
 ```
 
 Lineage traversal follows PROV-O semantics:
 
 ```python
 # All upstream sources, transitively
-store.dataset("gdp-chained-dollars").upstream(depth=5)
+view.dataset("gdp-chained-dollars").upstream(depth=5)
 
 # Impact analysis: datasets that depend on this classification
-store.dataset("CL_GEO").downstream(relationship="uses_classification")
+view.dataset("CL_GEO").downstream(relationship="uses_classification")
 ```

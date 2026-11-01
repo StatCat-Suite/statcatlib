@@ -3,7 +3,19 @@
 Generated from the docstrings. [Catalog API](../api/store.md) walks through
 the same surface with examples.
 
+## The catalog model
+
 ::: statcatlib.Catalog
+
+::: statcatlib.Product
+
+::: statcatlib.Edition
+
+::: statcatlib.WorkingCopy
+
+::: statcatlib.EditionView
+
+## Queries
 
 ::: statcatlib.QueryBuilder
 
@@ -40,3 +52,21 @@ the same surface with examples.
 ::: statcatlib.IncompatibleCatalogError
 
 ::: statcatlib.IncompatibleIndexError
+
+::: statcatlib.NoLiveEditionError
+
+::: statcatlib.WorkingCopyExistsError
+
+::: statcatlib.WorkingCopyClosedError
+
+::: statcatlib.SealCheckError
+
+::: statcatlib.JournalError
+
+::: statcatlib.InventoryRuleError
+
+::: statcatlib.NonFastForwardError
+
+::: statcatlib.InventoryConflictError
+
+::: statcatlib.InventoryContentionError

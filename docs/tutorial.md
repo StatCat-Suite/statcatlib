@@ -1,8 +1,9 @@
 # Tutorial
 
-This tutorial walks through building a catalog from scratch: creating a store,
-ingesting data from multiple sources, querying with filters and full-text search,
-and tracking provenance with lineage. Each section builds on the previous one.
+This tutorial walks through building a catalog from scratch: creating a
+catalog and a working copy, ingesting data from multiple sources, querying with
+filters and full-text search, tracking provenance with lineage, and sealing the
+working copy into an edition. Each section builds on the previous one.
 
 ## Installation
 
@@ -11,49 +12,59 @@ uv add statcatlib
 # or: pip install statcatlib
 ```
 
-## 1. Create a catalog store
+## 1. Create a catalog and a working copy
 
-`Catalog` is the single entry point to the catalog. Pass a folder path for
-a persistent catalog or omit it for an in-memory store:
+A catalog is a directory of products, and each product is a chain of immutable
+editions. `Catalog.create(path)` creates one; `exist_ok=True` reopens an
+existing catalog for writing. Writes go into a product's working copy, its one
+unsealed edition:
 
 ```python
 import statcatlib as sc
 
-# In-memory — ephemeral, useful for scripts and tests
-store = sc.Catalog()
+cat = sc.Catalog.create("my_catalog")
+wc = cat.product("tutorial").working_copy()
 
-# Catalog folder — persistent across restarts
-# Opening it creates my_catalog/ with meta.duckdb and lake.ducklake
-store = sc.Catalog("my_catalog")
+# An EditionView of the working copy, which sees each write as it is made
+view = wc.view()
 ```
 
-Construction is cheap and does not touch the disk. The connection opens on
-`.open()`, or on entering a `with` block.
+The examples below write with `wc` and read with `view`. Section 14 seals the
+working copy into an edition and reads it back with `Catalog.open`.
 
-The store is a context manager that closes the connection on exit:
+A product has one working copy at a time, and one writer. A second
+`working_copy()` call raises `WorkingCopyExistsError` while one is unsealed.
+`working_copy(resume=True)` reopens the unsealed one, and its `discard()`
+throws it away. `wc.close()` leaves it unsealed for a later resume.
+
+`Catalog` and `WorkingCopy` are context managers. For a throwaway catalog in
+tests and scripts, `statcatlib.testing.temporary_catalog()` creates one in a
+temporary directory and deletes it when the block ends:
 
 ```python
-with sc.Catalog("my_catalog") as store:
-    ...  # queries and ingests here
+from statcatlib.testing import temporary_catalog
+
+with temporary_catalog() as cat, cat.product("scratch").working_copy() as wc:
+    ...  # ingests and queries here
 ```
 
 ## 2. Add datasets manually
 
-Any dataset kind can be added directly with `put()`, with no remote source:
+Any dataset kind can be added directly with `wc.put()`, with no remote source:
 
 ```python
 from sdmxlib import InternationalString as I18n
 
 # Store a concept scheme before citing its concepts as themes.
 # This populates the concept table so theme labels appear in search results.
-store.put(sc.ConceptScheme(
+wc.put(sc.ConceptScheme(
     uri="urn:myorg:themes",
     label=I18n(en="My Themes"),
     concepts={"ENV": sc.Concept(notation="ENV", label=I18n(en="Environment"))},
 ))
 
 # Generic dataset (DCAT-AP dcat:Dataset)
-store.put(sc.OpenDataset(
+wc.put(sc.OpenDataset(
     identifier="co2-emissions-2024",
     title=I18n(en="CO2 Emissions 2024", fr="Émissions CO2 2024"),
     description=I18n(en="Annual CO2 emissions by country"),
@@ -64,7 +75,7 @@ store.put(sc.OpenDataset(
 ))
 
 # Statistical dataset (StatDCAT-AP stat:StatDataset)
-store.put(sc.AggregateDataset(
+wc.put(sc.AggregateDataset(
     identifier="MY:DATASET(1.0)",
     title=I18n(en="My Statistical Dataset"),
     description=I18n(en="Annual counts by region"),
@@ -73,7 +84,7 @@ store.put(sc.AggregateDataset(
 ))
 
 # Microdata — variable-level metadata
-store.put(sc.MicrodataDataset(
+wc.put(sc.MicrodataDataset(
     identifier="lfs-2023-q4",
     title=I18n(en="Labour Force Survey 2023 Q4 PUMF"),
     description=I18n(en="Public use microdata file"),
@@ -86,7 +97,7 @@ store.put(sc.MicrodataDataset(
 ))
 
 # Geospatial dataset
-store.put(sc.GeospatialDataset(
+wc.put(sc.GeospatialDataset(
     identifier="sgc-2021",
     title=I18n(en="Standard Geographical Classification 2021"),
     description=I18n(en="Official Canadian geographic classification"),
@@ -99,7 +110,7 @@ store.put(sc.GeospatialDataset(
 ))
 
 # Publication dataset
-store.put(sc.PublicationDataset(
+wc.put(sc.PublicationDataset(
     identifier="pub-71-607-x2023017",
     title=I18n(en="Labour Force Survey, December 2023"),
     description=I18n(en="Monthly labour market snapshot"),
@@ -109,10 +120,10 @@ store.put(sc.PublicationDataset(
 ))
 ```
 
-Pass a list or tuple to `put()` to add many datasets at once:
+Pass a list or tuple to `wc.put()` to add many datasets at once:
 
 ```python
-store.put([ds1, ds2, ds3, ...])
+wc.put([ds1, ds2, ds3, ...])
 ```
 
 ### Structural filters (`has_code`, `has_dimensions`)
@@ -125,10 +136,11 @@ filtered by publisher, status, keyword, title, and other metadata fields.
 ## 3. Ingest from SDMX
 
 `ingest_sdmx()` writes SDMX structural artifacts (codelists, DSDs, dataflows)
-into the shared DuckDB and creates an `AggregateDataset` catalog record for each
-dataflow. `ingest_data()` then writes the observation data for one dataflow into
-the bundle's DuckLake and binds the table to the dataflow, so it reads back
-through `store.registry.obs(...)`.
+into the working copy's DuckDB database through `wc.registry`, and creates an
+`AggregateDataset` catalog record for each dataflow. `ingest_data()` then
+writes the observation data for one dataflow into the working copy's DuckLake
+and binds the table to the dataflow, so it reads back through
+`view.registry.obs(...)`.
 
 ```mermaid
 sequenceDiagram
@@ -141,14 +153,14 @@ sequenceDiagram
 
     App->>RestRegistry: get(urn, resolve=True)
     RestRegistry->>RestRegistry: fetch Dataflow + DSD + codelists
-    App->>ingest_sdmx: ingest_sdmx(store, reg.registry)
-    ingest_sdmx->>DuckDB: store.registry.ingest() → writes structural tables
-    ingest_sdmx->>DuckDB: store.put([...]) → writes AggregateDataset rows
-    App->>ingest_data: ingest_data(store, reg, identifier)
-    ingest_data->>DuckLake: reg.obs(flow).frame() → writes the long table
-    ingest_data->>DuckDB: store.registry.add(binding) → binds table to dataflow
-    App->>DuckDB: store.query(...)
-    App->>DuckLake: store.registry.obs(flow) → reads observations
+    App->>ingest_sdmx: ingest_sdmx(wc, reg.registry)
+    ingest_sdmx->>DuckDB: wc.registry.ingest() → writes structural tables
+    ingest_sdmx->>DuckDB: wc.put([...]) → writes AggregateDataset rows
+    App->>ingest_data: ingest_data(wc, reg, identifier)
+    ingest_data->>DuckLake: wc.registry.write_observations() → writes the long table
+    ingest_data->>DuckDB: wc.registry.add(binding) → binds table to dataflow
+    App->>DuckDB: view.query(...)
+    App->>DuckLake: view.registry.obs(flow) → reads observations
 ```
 
 ### Ingest a single dataflow
@@ -157,12 +169,11 @@ sequenceDiagram
 import sdmxlib as sl
 import statcatlib as sc
 
-with sc.Catalog("my_catalog") as store:
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        # resolve() sends references=descendants — one HTTP request returns the
-        # Dataflow, its DSD, and all referenced codelists.
-        reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
-        sc.ingest_sdmx(store, reg.registry)
+with sl.RestRegistry(sl.Provider.ESTAT) as reg:
+    # resolve() sends references=descendants — one HTTP request returns the
+    # Dataflow, its DSD, and all referenced codelists.
+    reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
+    sc.ingest_sdmx(wc, reg.registry)
 ```
 
 ### Ingest multiple dataflows
@@ -173,16 +184,15 @@ can fetch several dataflows and ingest once at the end:
 ```python
 DATAFLOWS = ["NAMA_10_GDP", "UNE_RT_M", "PRIC_HPI_IDX"]
 
-with sc.Catalog("my_catalog") as store:
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        for df_id in DATAFLOWS:
-            reg.get(sl.Dataflow.urn_for(agency="ESTAT", id=df_id), resolve=True)
-        sc.ingest_sdmx(store, reg.registry)
+with sl.RestRegistry(sl.Provider.ESTAT) as reg:
+    for df_id in DATAFLOWS:
+        reg.get(sl.Dataflow.urn_for(agency="ESTAT", id=df_id), resolve=True)
+    sc.ingest_sdmx(wc, reg.registry)
 ```
 
 !!! warning "Memory"
     All resolved artefacts accumulate in `reg.registry` as Python objects before
-    being written to DuckDB. For very large ingests, open a fresh `RestRegistry`
+    being written to the working copy. For very large ingests, open a fresh `RestRegistry`
     per batch to bound memory use.
 
 ### Ingest with publisher and theme overrides
@@ -194,7 +204,7 @@ ingested dataset — useful when all dataflows come from one agency:
 publisher = sc.Agent(id="ESTAT", name=I18n(en="Eurostat"))
 theme_ref = sc.ConceptRef(uri="urn:myorg:themes/ECONOMY")
 
-sc.ingest_sdmx_registry(store, reg.registry, publisher=publisher, themes=[theme_ref])
+sc.ingest_sdmx_registry(wc, reg.registry, publisher=publisher, themes=[theme_ref])
 ```
 
 Themes passed here are `ConceptRef` pointers. Store the corresponding
@@ -203,18 +213,16 @@ Themes passed here are `ConceptRef` pointers. Store the corresponding
 ### Ingest observation data
 
 `ingest_data()` fetches the observation data for one dataflow and writes it into
-the bundle's DuckLake, one row per observation, under `parquet/`. It needs a
-folder-mode catalog:
+the working copy's DuckLake, one row per observation:
 
 ```python
-with sc.Catalog("my_catalog") as store:
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
-        sc.ingest_sdmx(store, reg.registry)
+with sl.RestRegistry(sl.Provider.ESTAT) as reg:
+    reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
+    sc.ingest_sdmx(wc, reg.registry)
 
-        # Writes the table estat.df_nama_10_gdp_1_0 and returns its name.
-        # measure_dim records the default pivot axis for readers.
-        sc.ingest_data(store, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
+    # Writes the table estat.df_nama_10_gdp_1_0 and returns its name.
+    # measure_dim records the default pivot axis for readers.
+    sc.ingest_data(wc, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
 ```
 
 `ingest_data()` accepts `(latest)` as the version and resolves it to the highest
@@ -231,30 +239,29 @@ Any CKAN portal (open.canada.ca, data.gov, data.gov.uk, …) can be ingested by
 its base URL:
 
 ```python
-with sc.Catalog("open_canada") as store:
-    datasets = sc.ingest_ckan(
-        store,
-        "https://open.canada.ca/data",
-        organization="statcan-statcan",
-        limit=500,
-    )
-    print(f"Ingested {len(datasets)} datasets")
+datasets = sc.ingest_ckan(
+    wc,
+    "https://open.canada.ca/data",
+    organization="statcan-statcan",
+    limit=500,
+)
+print(f"Ingested {len(datasets)} datasets")
 ```
 
 CKAN datasets are ingested as `OpenDataset` records, with distributions mapped
 from CKAN resources. Language tags are kept as the portal sends them.
 open.canada.ca's `en-t-fr` and `fr-t-en` tags (English translated from French,
 French translated from English) stay separate from `en` and `fr`. Ingest
-records the pairs the portal declares, and `store.language_alternates()`
+records the pairs the portal declares, and `view.language_alternates()`
 lists them.
 
 ## 5. Direct lookup
 
-`get()` retrieves a single dataset by identifier and narrows to the requested type:
+`view.get()` retrieves a single dataset by identifier and narrows to the requested type:
 
 ```python
 # Returns AggregateDataset | None
-ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+ds = view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
 
 if ds is not None:
     print(ds.title.get("en"))
@@ -267,11 +274,11 @@ mismatch) returns `None` — type narrowing is strict.
 
 ## 6. Structured queries
 
-`query()` returns a `QueryBuilder` for chaining filters before executing:
+`view.query()` returns a `QueryBuilder` for chaining filters before executing:
 
 ```python
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT", status="current")
     .sort_by("modified", desc=True)
     .limit(10)
@@ -286,10 +293,10 @@ for ds in results.items:
 ### Convenience terminals
 
 ```python
-items = store.query(sc.AggregateDataset).filter(status="current").all()
-ds    = store.query(sc.AggregateDataset).filter(publisher="BIS").first()
-ds    = store.query(sc.AggregateDataset).filter(identifier="BIS:CBS_Q(1.0)").one()
-n     = store.query(sc.AggregateDataset).filter(status="archived").count()
+items = view.query(sc.AggregateDataset).filter(status="current").all()
+ds    = view.query(sc.AggregateDataset).filter(publisher="BIS").first()
+ds    = view.query(sc.AggregateDataset).filter(identifier="BIS:CBS_Q(1.0)").one()
+n     = view.query(sc.AggregateDataset).filter(status="archived").count()
 ```
 
 ## 7. Composable filter objects
@@ -304,13 +311,13 @@ import statcatlib.query as q
 
 ```python
 # Datasets that include code GEO=DE in their codelist
-store.query(sc.AggregateDataset).filter(q.has_code("geo", "DE")).all()
+view.query(sc.AggregateDataset).filter(q.has_code("geo", "DE")).all()
 
 # Datasets with both a GEO and a FREQ dimension
-store.query(sc.AggregateDataset).filter(q.has_dimensions(["geo", "freq"])).all()
+view.query(sc.AggregateDataset).filter(q.has_dimensions(["geo", "freq"])).all()
 
 # Combine: German data with geographic + frequency coverage
-store.query(sc.AggregateDataset).filter(
+view.query(sc.AggregateDataset).filter(
     q.has_code("geo", "DE"),
     q.has_dimensions(["geo", "freq", "age"]),
 ).all()
@@ -340,10 +347,10 @@ flowchart LR
 
 ```python
 # Datasets with a CSV distribution
-store.query(sc.OpenDataset).filter(q.distribution(format="CSV")).all()
+view.query(sc.OpenDataset).filter(q.distribution(format="CSV")).all()
 
 # Datasets served by a specific API endpoint
-store.query(sc.AggregateDataset).filter(
+view.query(sc.AggregateDataset).filter(
     q.has_service(endpoint_url="https://sdmx.oecd.org/public/rest")
 ).all()
 ```
@@ -352,7 +359,7 @@ store.query(sc.AggregateDataset).filter(
 
 ```python
 # All three conditions must hold simultaneously
-store.query(sc.AggregateDataset).filter(
+view.query(sc.AggregateDataset).filter(
     q.has_code("geo", "CA"),
     q.has_dimensions(["geo", "freq"]),
     q.distribution(format="CSV"),
@@ -365,26 +372,26 @@ store.query(sc.AggregateDataset).filter(
 
 ```python
 # Agents that publish aggregate datasets with GEO=CA
-agents = store.query(sc.Agent).filter(
+agents = view.query(sc.Agent).filter(
     q.publishes(q.has_code("geo", "CA"), kind="aggregate")
 ).all()
 
 # Agents that publish both aggregate and open datasets
 agents = (
-    store.query(sc.Agent)
+    view.query(sc.Agent)
     .filter(q.publishes(kind="aggregate"))
     .filter(q.publishes(kind="open"))
     .all()
 )
 
 # Data services that serve aggregate datasets
-services = store.query(sc.DataService).filter(
+services = view.query(sc.DataService).filter(
     q.serves(kind="aggregate")
 ).all()
 
 # Combine with field filters — ECB's services only
 services = (
-    store.query(sc.DataService)
+    view.query(sc.DataService)
     .filter(q.serves(q.has_code("geo", "DE")))
     .filter(id="ECB-API")
     .all()
@@ -393,18 +400,20 @@ services = (
 
 ## 9. Full-text search
 
-`search()` runs BM25 full-text search over datasets, concepts and codes, and
+`view.search()` runs BM25 full-text search over datasets, concepts and codes, and
 ranks the hits by relevance. A dataset is indexed by its title, description,
 keywords, theme labels and dimension names. Each result is a `Hit` carrying the
 matched entity as `hit.payload`; pass `kinds=("dataset",)` for datasets only.
 
 !!! note "Requires `statcatlib[search]`"
-    `store.search()` requires a folder-mode catalog backed by LanceDB. Install
-    with `uv add 'statcatlib[search]'` (or `pip install 'statcatlib[search]'`)
-    and pass a folder path to `Catalog`.
+    Search reads the edition's LanceDB index. Install it with
+    `uv add 'statcatlib[search]'` (or `pip install 'statcatlib[search]'`).
+    `wc.seal()` builds the index of a sealed edition. To search the working
+    copy before the seal, build its index first with `wc.build_index()`.
 
 ```python
-results = store.search("gross domestic product", kinds=("dataset",), limit=10)
+wc.build_index()
+results = view.search("gross domestic product", kinds=("dataset",), limit=10)
 for hit in results.items:
     print(hit.score, hit.payload.title.get("en"))
 ```
@@ -414,7 +423,7 @@ search anything other than English — the default `"en"` will not match
 French text:
 
 ```python
-results = store.search("produit intérieur brut", lang="fr", limit=10)
+results = view.search("produit intérieur brut", lang="fr", limit=10)
 ```
 
 To combine full-text search with structured filters, use `.search()` on a
@@ -422,7 +431,7 @@ To combine full-text search with structured filters, use `.search()` on a
 
 ```python
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT")
     .search("unemployment quarterly")
     .sort_by("modified", desc=True)
@@ -432,11 +441,11 @@ results = (
 
 ## 10. Facets
 
-`facets()` returns aggregation counts across all datasets — useful for building
+`view.facets()` returns aggregation counts across all datasets — useful for building
 filter panels in UIs or understanding catalog composition:
 
 ```python
-counts = store.facets("publisher", "themes", "frequency", "status")
+counts = view.facets("publisher", "themes", "frequency", "status")
 
 # {"publisher": {"ESTAT": 42, "ECB": 18, ...},
 #  "themes":    {"Economy": 35, "Labour": 22, ...},
@@ -448,7 +457,7 @@ Request facets alongside a query — counts will reflect only the matched datase
 
 ```python
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT")
     .include("publisher", "themes")
     .with_facets("themes", "frequency")
@@ -469,7 +478,7 @@ sentinel:
 ```python
 # 3 batch queries instead of ~17
 items = (
-    store.query(sc.BaseDataset)
+    view.query(sc.BaseDataset)
     .filter(status="current")
     .include("publisher", "themes")
     .all()
@@ -490,18 +499,18 @@ if not sc.is_unloaded(ds.themes):
         print(theme.label)
 ```
 
-Use `.full()` to revert to loading everything; `store.get()` always loads all
+Use `.full()` to revert to loading everything; `view.get()` always loads all
 relationships regardless of `.include()`.
 
 ### Row projections
 
 When you only need a few columns, `.select()` bypasses object reconstruction
-entirely — one SQL query, no `store.get()` per row. Results are `Row` objects:
+entirely — one SQL query, no `view.get()` per row. Results are `Row` objects:
 a `dict` subclass that supports both dict-style and attribute-style access.
 
 ```python
 rows = (
-    store.query(sc.BaseDataset)
+    view.query(sc.BaseDataset)
     .filter(status="current")
     .sort_by("title", lang="en")
     .select("identifier", "title", lang="en")
@@ -512,21 +521,21 @@ for row in rows:
     print(row.identifier, row["title"])  # both access styles work
 
 # Single-column projection
-ids = store.query(sc.BaseDataset).scalars("identifier").values()
+ids = view.query(sc.BaseDataset).scalars("identifier").values()
 # → ["EXR", "M1", ...]
 ```
 
 ## 12. Lineage and provenance
 
 statcatlib tracks derivation relationships between datasets using a PROV-O-aligned
-model. Record relationships with `add_lineage()`, then traverse them with
-`upstream()` and `downstream()`.
+model. Record relationships with `wc.add_lineage()`, then traverse them with
+`upstream()` and `downstream()` on a view.
 
 ### Recording lineage
 
 ```python
 # Aggregate table derived from survey microdata
-store.add_lineage(
+wc.add_lineage(
     source_id="lfs-microdata",
     target_id="ESTAT:UNE_RT_M(1.0)",
     relationship="aggregated_from",
@@ -536,7 +545,7 @@ store.add_lineage(
 )
 
 # Seasonal adjustment
-store.add_lineage(
+wc.add_lineage(
     source_id="ESTAT:UNE_RT_M(1.0)",
     target_id="ESTAT:UNE_RT_M_SA(1.0)",
     relationship="adjusted_from",
@@ -570,17 +579,17 @@ The `confidence` field tracks how the relationship was established:
 
 ```python
 # All upstream sources of the unemployment table, transitively
-ancestors = store.dataset("ESTAT:UNE_RT_M(1.0)").upstream(depth=5).collect()
+ancestors = view.dataset("ESTAT:UNE_RT_M(1.0)").upstream(depth=5).collect()
 
 # Only follow aggregation edges
-agg_sources = store.dataset("ESTAT:UNE_RT_M(1.0)").upstream(relationship="aggregated_from").collect()
+agg_sources = view.dataset("ESTAT:UNE_RT_M(1.0)").upstream(relationship="aggregated_from").collect()
 
 # Impact analysis: all datasets that depend on CL_GEO
-affected = store.dataset("CL_GEO").downstream(relationship="uses_classification").collect()
+affected = view.dataset("CL_GEO").downstream(relationship="uses_classification").collect()
 
 # Because the return is a QueryBuilder, you can chain before materialising
 current_descendants = (
-    store.dataset("lfs-microdata")
+    view.dataset("lfs-microdata")
     .downstream()
     .filter(status="current")
     .include("publisher")
@@ -588,7 +597,7 @@ current_descendants = (
 )
 
 # Direct inspection of lineage records
-rows = store.dataset("ESTAT:UNE_RT_M(1.0)").lineage_records(
+rows = view.dataset("ESTAT:UNE_RT_M(1.0)").lineage_records(
     role="target",              # this dataset is the derived output
     relationship="aggregated_from",
     confidence="asserted",
@@ -599,17 +608,17 @@ for r in rows:
 
 ## 13. Reading observations
 
-`ingest_data()` binds its table to the dataflow, so the co-located sdmxlib
-registry reads it back. `store.registry.obs(flow)` returns a lazy query in
+`ingest_data()` binds its table to the dataflow, so the edition's sdmxlib
+registry reads it back. `view.registry.obs(flow)` returns a lazy query in
 sdmxlib's query language; nothing is read until a terminal such as `.frame()`
 or `.pivot()`:
 
 ```python
 import sdmxlib as sl
 
-ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+ds = view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
 flow = sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn)
-obs = store.registry.obs(flow)
+obs = view.registry.obs(flow)
 
 # Long layout: one row per observation, a column per dimension and measure
 annual_de = obs.filter(obs.col("freq") == "A", obs.col("geo") == "DE").frame()
@@ -622,25 +631,54 @@ Both terminals return a `polars.DataFrame`, typed from the DSD: codes come back
 as their codelist's `pl.Enum`. Hand the frame to Polars for anything further,
 for example `annual_de.lazy().sort("TIME_PERIOD")`.
 
-## 14. Persistent catalog workflow
+## 14. Seal the edition and read it back
 
-For a catalog that survives restarts, use a folder path. The structural graph,
-the observation tables and their bindings all survive close and reopen, so no
-re-ingest is needed:
+`wc.seal()` turns the working copy into an immutable edition. It rebuilds the
+search index from the edition's rows, with the arguments of the last
+`wc.build_index()` call, or the defaults when there was none, and records the
+edition as the product's live edition. `seal()` returns the `Edition`, and the
+working copy and its views are closed afterwards.
 
 ```python
-# First run — ingest
-with sc.Catalog("my_catalog") as store:
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
-        sc.ingest_sdmx(store, reg.registry)
-        sc.ingest_data(store, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
+edition = wc.seal()
+print(edition.edition_id)
+cat.close()
+```
 
-# Subsequent runs — query and read observations, no network
-with sc.Catalog("my_catalog") as store:
-    ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
-    obs = store.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
+To refuse an edition before anything is written, pass seal checks to the same
+call, in place of the plain `wc.seal()` above. A check that finds a problem
+raises `SealCheckError` and leaves the working copy open to fix:
+
+```python
+from statcatlib import checks
+
+edition = wc.seal(checks=[checks.conf_status()])  # refuses observations whose CONF_STATUS is not "F"
+```
+
+`Catalog.open(path)` opens the catalog read-only, and
+`cat.product(id).view()` returns an `EditionView` of the product's live
+edition. The structural graph, the observation tables and their bindings are
+all in the sealed edition, so later runs read them with no re-ingest and no
+network:
+
+```python
+with sc.Catalog.open("my_catalog") as cat:
+    view = cat.product("tutorial").view()
+    ds = view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+    obs = view.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
     wide = obs.pivot(on=ds.measure_dim)
+```
+
+A view stays on its edition. After a later seal, call `cat.refresh()` and then
+`cat.product("tutorial").view()` again to read the new live edition. To change
+the product, reopen the catalog for writing and start a new working copy. It
+builds on the live edition, and its seal records the next one:
+
+```python
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    with cat.product("tutorial").working_copy() as wc:
+        wc.put(updated_dataset)
+        wc.seal()
 ```
 
 ## Putting it all together
@@ -653,43 +691,57 @@ import statcatlib as sc
 import statcatlib.query as q
 from sdmxlib import InternationalString as I18n
 
-with sc.Catalog("national_stats") as store:
 
-    # --- Eurostat SDMX ---
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        for df_id in ["UNE_RT_M", "LFSI_EMP_M"]:
-            reg.get(sl.Dataflow.urn_for(agency="ESTAT", id=df_id), resolve=True)
-        sc.ingest_sdmx(store, reg.registry)
-
-    # --- Manual curation ---
-    store.put(sc.OpenDataset(
-        identifier="custom-dataset-001",
-        title=I18n(en="Custom Dataset"),
-        description=I18n(en="Manually curated"),
-    ))
-
-    # --- Discovery queries ---
-
+def discover(view: sc.EditionView) -> None:
     # Statistical datasets about unemployment with German geography
     unemployment = (
-        store.query(sc.AggregateDataset)
+        view.query(sc.AggregateDataset)
         .filter(q.has_code("geo", "DE"))
         .search("unemployment")  # requires statcatlib[search]
         .all()
     )
 
     # Agents that publish aggregate datasets
-    agents = store.query(sc.Agent).filter(q.publishes(kind="aggregate")).all()
+    agents = view.query(sc.Agent).filter(q.publishes(kind="aggregate")).all()
 
     # Counts by theme, publisher and frequency
-    print(store.facets("themes", "publisher", "frequency"))
+    print(view.facets("themes", "publisher", "frequency"))
 
-    # --- Lineage ---
-    store.add_lineage(
-        "14100287",
-        "lfs-summary-2024",
-        "aggregated_from",
-        confidence="asserted",
-    )
-    ancestors = store.dataset("lfs-summary-2024").upstream().collect()
+    # Lineage traversal
+    ancestors = view.dataset("lfs-summary-2024").upstream().collect()
+
+
+with sc.Catalog.create("national_stats", exist_ok=True) as cat:
+    with cat.product("labour").working_copy() as wc:
+
+        # --- Eurostat SDMX ---
+        with sl.RestRegistry(sl.Provider.ESTAT) as reg:
+            for df_id in ["UNE_RT_M", "LFSI_EMP_M"]:
+                reg.get(sl.Dataflow.urn_for(agency="ESTAT", id=df_id), resolve=True)
+            sc.ingest_sdmx(wc, reg.registry)
+
+        # --- Manual curation ---
+        wc.put(sc.OpenDataset(
+            identifier="custom-dataset-001",
+            title=I18n(en="Custom Dataset"),
+            description=I18n(en="Manually curated"),
+        ))
+
+        # --- Lineage ---
+        wc.add_lineage(
+            "14100287",
+            "lfs-summary-2024",
+            "aggregated_from",
+            confidence="asserted",
+        )
+
+        # --- Discovery queries on the working copy ---
+        wc.build_index()
+        discover(wc.view())
+
+        wc.seal()
+
+# --- The same queries on the sealed, live edition ---
+with sc.Catalog.open("national_stats") as cat:
+    discover(cat.product("labour").view())
 ```

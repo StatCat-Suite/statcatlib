@@ -1,7 +1,10 @@
 # Source Connectors
 
 statcatlib ships two source connectors for ingesting from remote data sources.
-All connectors write to the shared DuckDB via `Catalog`.
+Every connector writes into a product's working copy, the `WorkingCopy` that
+`cat.product(id).working_copy()` returns, and raises `TypeError` when given an
+`EditionView`. `wc.seal()` then turns the working copy into an immutable
+edition.
 
 ## SDMX
 
@@ -27,8 +30,8 @@ Returns an `AggregateDataset` with `identifier`, `title`, `description`,
 `dimension_names`, `sdmx_dataflow_urn`, `publisher`, and `themes` (if provided).
 
 `has_code()` and `has_dimensions()` work on datasets stored by `ingest_sdmx()`
-because the structural tables are written alongside the catalog record via the
-shared DuckDB connection.
+because the structural tables are written alongside the catalog record, in the
+same edition's database.
 
 Use `dataset_from_dataflow()` when you want to convert individual artefacts
 without the full ingest pipeline.
@@ -37,22 +40,21 @@ without the full ingest pipeline.
 
 ```python
 ingest_sdmx(
-    store: Catalog,
-    registry: sdmxlib.model.registry.Registry,
+    store: WorkingCopy,
+    registry: sdmxlib.InMemoryRegistry,
 ) -> list[AggregateDataset]
 ```
 
-Ingest all artefacts from an sdmxlib `Registry`:
+Ingest all artefacts from an sdmxlib registry into a working copy:
 
-1. Calls `store.registry.ingest(registry)` to write codelists,
-   DSDs, and dataflows into sdmxlib's structural tables via the shared
-   connection.
+1. Calls `store.registry.ingest(registry)` to write codelists, DSDs, and
+   dataflows into sdmxlib's structural tables in the working copy's edition.
 2. For each `Dataflow` in the registry, calls `dataset_from_dataflow()` and
-   then `store.put(dataset)`; SDMX structural tables written in step 1 provide
+   then `store.put(datasets)`; SDMX structural tables written in step 1 provide
    the structural index for `has_code()` / `has_dimensions()` filters.
-3. Rebuilds the LanceDB search index on exit (if LanceDB is available).
 
-Returns the list of `AggregateDataset` objects created.
+Returns the list of `AggregateDataset` objects created. The search index sees
+them after `wc.build_index()`, and the seal rebuilds it from the edition's rows.
 
 **Example:**
 
@@ -60,19 +62,25 @@ Returns the list of `AggregateDataset` objects created.
 import sdmxlib as sl
 import statcatlib as sc
 
-with sc.Catalog("my_catalog") as store:
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
-        datasets = sc.ingest_sdmx(store, reg.registry)
-        print(f"Ingested {len(datasets)} datasets")
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    with cat.product("estat").working_copy() as wc:
+        with sl.RestRegistry(sl.Provider.ESTAT) as reg:
+            reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
+            datasets = sc.ingest_sdmx(wc, reg.registry)
+            print(f"Ingested {len(datasets)} datasets")
+        print(wc.view().query(sc.AggregateDataset).count(), "datasets in the working copy")
+        wc.seal()
+
+with sc.Catalog.open("my_catalog") as cat:
+    print(cat.product("estat").view().query(sc.AggregateDataset).count(), "datasets in the live edition")
 ```
 
 ### `ingest_sdmx_registry`
 
 ```python
 ingest_sdmx_registry(
-    store: Catalog,
-    registry: sdmxlib.model.registry.Registry,
+    store: WorkingCopy,
+    registry: sdmxlib.InMemoryRegistry,
     *,
     publisher: Agent | None = None,
     themes: list[ConceptRef] | None = None,
@@ -86,14 +94,14 @@ consistent publisher record:
 ```python
 publisher = sc.Agent(id="ESTAT", name=InternationalString(en="Eurostat"))
 themes = [sc.ConceptRef(uri="urn:myorg:themes/ECONOMY")]
-sc.ingest_sdmx_registry(store, reg.registry, publisher=publisher, themes=themes)
+sc.ingest_sdmx_registry(wc, reg.registry, publisher=publisher, themes=themes)
 ```
 
 ### `ingest_data`
 
 ```python
 ingest_data(
-    store: Catalog,
+    store: WorkingCopy,
     reg: ObservationSource,
     identifier: str,
     *,
@@ -101,18 +109,19 @@ ingest_data(
 ) -> str
 ```
 
-Materialise observation data for one dataflow into the bundle's lake. The
-observations are fetched with `reg.obs(flow).frame()` in the long layout, one
-row per observation with a column per dimension and measure, and written into
-`lake.<agency>.df_<id>_<version>` through the bundle's DuckLake-backed data
-store. A re-run replaces the table. `ingest_data` then registers an sdmxlib
-`DataflowBinding` for the table, so the dataflow reads back through
-`store.registry.obs(flow)`.
+Materialise observation data for one dataflow into the working copy's
+DuckLake. The observations are fetched with `reg.obs(flow).frame()` in the
+long layout, one row per observation with a column per dimension and measure,
+and written into the table `<agency>.df_<id>_<version>` through
+`wc.registry.write_observations`. A re-run replaces the table. `ingest_data`
+then registers an sdmxlib `DataflowBinding` for the table, so the dataflow
+reads back through `view.registry.obs(flow)`, on `wc.view()` and on every
+edition sealed from the working copy.
 
 **Parameters:**
 
-- `store` — a folder-mode `Catalog` (a DuckLake is ATTACHed on `open()`) that
-  already holds an `AggregateDataset` for `identifier` — run `ingest_sdmx` first
+- `store` — the `WorkingCopy` that already holds an `AggregateDataset` for
+  `identifier` — run `ingest_sdmx` first
 - `reg` — where to fetch observations from: any object with
   `obs(flow) -> sdmxlib.ObsQuery` (`ObservationSource`), usually an open
   `RestRegistry`
@@ -126,21 +135,24 @@ store. A re-run replaces the table. `ingest_data` then registers an sdmxlib
 **Returns:** the fully-qualified table location (`<schema>.<table>`).
 
 ```python
-with sc.Catalog("my_catalog") as store:
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
-        sc.ingest_sdmx(store, reg.registry)
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    with cat.product("estat").working_copy() as wc:
+        with sl.RestRegistry(sl.Provider.ESTAT) as reg:
+            reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
+            sc.ingest_sdmx(wc, reg.registry)
 
-        table = sc.ingest_data(
-            store, reg,
-            "ESTAT:NAMA_10_GDP(latest)",
-            measure_dim="na_item",
-        )
-        print(f"Observations written to {table}")
+            table = sc.ingest_data(
+                wc, reg,
+                "ESTAT:NAMA_10_GDP(latest)",
+                measure_dim="na_item",
+            )
+            print(f"Observations written to {table}")
+        wc.seal()
 ```
 
 **Raises:**
 
+- `TypeError` — if `store` is not a `WorkingCopy`, such as an `EditionView`
 - `KeyError` — if no `AggregateDataset` exists for `identifier`
 - `ValueError` — if the dataset carries no `sdmx_dataflow_urn`, `identifier`
   is not in `AGENCY:ID(VERSION)` form, the dataflow's DSD is not stored, or
@@ -197,7 +209,7 @@ with CkanClient("https://open.canada.ca/data") as client:
 
 ```python
 ingest_ckan(
-    store: Catalog,
+    store: WorkingCopy,
     base_url: str,
     *,
     organization: str | None = None,
@@ -208,7 +220,8 @@ ingest_ckan(
 
 Ingest datasets from a CKAN portal as `OpenDataset` records, paging
 internally up to `limit` results. It also records the portal's declared
-language pairs with `store.add_language_alternates(..., source=base_url)`.
+language pairs with `WorkingCopy.add_language_alternates(..., source=base_url)`.
+It raises `TypeError` when `store` is not a `WorkingCopy`.
 
 **Parameters:**
 
@@ -229,19 +242,22 @@ CKAN declares no default language, so a plain string is stored under `und`
 code, under `zxx`. No field is given an English value the portal did not send.
 
 ```python
-# All StatCan datasets from open.canada.ca
-datasets = sc.ingest_ckan(
-    store,
-    "https://open.canada.ca/data",
-    organization="statcan-statcan",
-    limit=500,
-)
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    with cat.product("open-canada").working_copy() as wc:
+        # All StatCan datasets from open.canada.ca
+        datasets = sc.ingest_ckan(
+            wc,
+            "https://open.canada.ca/data",
+            organization="statcan-statcan",
+            limit=500,
+        )
 
-# Environmental datasets from a thematic filter
-env_datasets = sc.ingest_ckan(
-    store,
-    "https://open.canada.ca/data",
-    subject="environment",
-    limit=100,
-)
+        # Environmental datasets from a thematic filter
+        env_datasets = sc.ingest_ckan(
+            wc,
+            "https://open.canada.ca/data",
+            subject="environment",
+            limit=100,
+        )
+        wc.seal()
 ```

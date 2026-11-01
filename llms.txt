@@ -1,6 +1,6 @@
 # statcatlib
 
-> statcatlib is a Python library for building, managing, and querying statistical metadata catalogs. It materializes remote catalog and structural metadata into a local DuckDB database and exposes a fluent Python API for discovery, filtering, full-text search, and provenance lineage. Designed to be embedded in ETL pipelines, data platforms, and analytical tooling.
+> statcatlib is a Python library for building, managing, and querying statistical metadata catalogs. It materializes remote catalog and structural metadata into a local catalog, a directory of products, each a chain of immutable editions held in DuckDB, and exposes a fluent Python API for discovery, filtering, full-text search, and provenance lineage. Designed to be embedded in ETL pipelines, data platforms, and analytical tooling.
 
 Inspired by DCAT-AP, StatDCAT-AP, SDMX, DDI, and PROV-O. Pairs with [sdmxlib](https://github.com/StatCat-Suite/sdmxlib) for standards-aware workflows.
 
@@ -12,31 +12,40 @@ import statcatlib.query as q
 from sdmxlib import InternationalString as I18n
 ```
 
-### Create a store
+### Create a catalog, write a product, seal it
+
+A catalog is a directory of products; each product is a chain of immutable editions. Writes go into a product's one unsealed edition, its `WorkingCopy`. Reads run on an `EditionView`.
 
 ```python
-store = sc.Catalog()                             # in-memory
-store = sc.Catalog("my_catalog")                 # persistent folder (open-or-create)
+with sc.Catalog.create("my_catalog") as cat:           # exist_ok=True reopens an existing catalog for writing
+    wc = cat.product("14100287").working_copy()         # start the product's one unsealed edition
+    wc.put(dataset)                                     # write; sc.ingest_sdmx(wc, ...) and wc.registry too
+    wc.view().get(sc.OpenDataset, "co2-2024")           # an EditionView that sees the working copy's writes
+    edition = wc.seal()                                 # immutable edition, search index rebuilt, recorded live
+
+with sc.Catalog.open("my_catalog") as cat:             # read-only
+    view = cat.product("14100287").view()               # EditionView of the live edition
+    view.get(sc.OpenDataset, "co2-2024")
 ```
 
-Use as a context manager:
-
-```python
-with sc.Catalog("my_catalog") as store:
-    ...
-```
+- `wc.seal(checks=[sc.checks.conf_status()])` runs seal checks first; a finding raises `SealCheckError` and leaves the working copy open.
+- `wc.discard()` throws the unsealed edition away. `wc.close()` (or leaving `with wc:`) keeps it unsealed; `product.working_copy(resume=True)` reopens it. A product has one working copy at a time.
+- A view stays on its edition. `cat.refresh()`, then `cat.product(id).view()`, follows the live one. `cat.products()` lists products with a live edition; `product.editions()` lists the live edition.
+- `Catalog.search` and `Catalog.facets` raise `NotImplementedError`; search and count one product's view.
+- Throwaway catalog: `with statcatlib.testing.temporary_catalog() as cat: ...`
+- In the examples below, `wc` is a `WorkingCopy` (writes) and `view` is an `EditionView` (reads). `wc.view()` has every read method too.
 
 ### Add datasets
 
 ```python
 # Store a SKOS concept scheme before citing its concepts as themes
-store.put(sc.ConceptScheme(
+wc.put(sc.ConceptScheme(
     uri="urn:myorg:themes",
     label=I18n(en="My Themes"),
     concepts={"ENV": sc.Concept(notation="ENV", label=I18n(en="Environment"))},
 ))
 
-store.put(sc.OpenDataset(
+wc.put(sc.OpenDataset(
     identifier="co2-2024",
     title=I18n(en="CO2 Emissions 2024"),
     description=I18n(en="Annual CO2 emissions by country"),
@@ -46,13 +55,13 @@ store.put(sc.OpenDataset(
     status="current",
 ))
 
-store.put([ds1, ds2, ds3])  # batch add — accepts list or tuple
+wc.put([ds1, ds2, ds3])  # batch add — accepts list or tuple
 ```
 
 ### Direct lookup
 
 ```python
-ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+ds = view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
 ```
 
 Returns `None` if not found or type doesn't match.
@@ -143,7 +152,7 @@ statcatlib models themes as first-class SKOS artefacts. Two artefact types own d
 two ref types are lightweight pointers carried by datasets and catalogs.
 
 - `ConceptScheme(uri, label, definition, concepts, top_concepts)` — a SKOS vocabulary.
-  `concepts` maps `notation → Concept`. Store via `store.put(scheme)`.
+  `concepts` maps `notation → Concept`. Store via `wc.put(scheme)`.
 - `Concept(notation, label, alt_label, definition, broader, narrower, related)` — a SKOS
   concept within a scheme. `notation` is the local id; `broader`/`narrower`/`related`
   are notation strings within the same scheme.
@@ -151,12 +160,12 @@ two ref types are lightweight pointers carried by datasets and catalogs.
   Identity is the URI; `label`/`scheme_uri`/`notation` are denormalized hints.
   Carries on `Dataset.themes`, `.subject`, `.dataset_type`.
 - `ConceptSchemeRef(uri, label)` — typed pointer to a concept scheme.
-  Carries on `Catalog.theme_taxonomy`.
+  Carries on `CatalogDescription.theme_taxonomy`.
 - `is_concept_in_scheme(scheme, notation) -> bool` — pure-Python validation helper.
 
 ```python
 # Store a concept scheme (cascades to concept rows)
-store.put(sc.ConceptScheme(
+wc.put(sc.ConceptScheme(
     uri="urn:sdmx:themes",
     label=I18n(en="Statistical Themes"),
     concepts={
@@ -182,11 +191,11 @@ before indexing so theme labels appear in BM25 search results.
 
 ### QueryBuilder
 
-`store.query(cls)` returns a `QueryBuilder[T]`. Builders are immutable: each method returns a new one, so calls chain.
+`view.query(cls)` returns a `QueryBuilder[T]`. Builders are immutable: each method returns a new one, so calls chain.
 
 ```python
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT", status="current")
     .search("unemployment quarterly")
     .include("publisher", "themes")   # load only these relationships
@@ -220,20 +229,20 @@ to an `UNLOADED` sentinel. Use `.full()` to revert to loading everything.
 
 ```python
 # 3 batch queries instead of ~17
-store.query(sc.BaseDataset).include("publisher", "themes", "keywords").all()
+view.query(sc.BaseDataset).include("publisher", "themes", "keywords").all()
 
 # Explicit full hydration
-store.query(sc.BaseDataset).full().all()
+view.query(sc.BaseDataset).full().all()
 
 # get() is always fully loaded — no .include() needed
-store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
 ```
 
 Unloaded fields raise `sc.NotLoadedError` (subclass of `AttributeError`) on
 access. Use `sc.is_unloaded(value)` to check before accessing:
 
 ```python
-ds = store.query(sc.BaseDataset).include("publisher").first()
+ds = view.query(sc.BaseDataset).include("publisher").first()
 ds.publisher.name    # OK — was included
 ds.themes[0]         # NotLoadedError: 'themes' was not loaded
                      #   Add 'themes' to .include() or call .full()
@@ -256,7 +265,7 @@ reconstruction (single SQL query):
 ```python
 # Row projection — .select() returns Row objects (dict subclass with attribute access)
 rows = (
-    store.query(sc.BaseDataset)
+    view.query(sc.BaseDataset)
     .filter(q.title_contains("GDP"))
     .sort_by("title", lang="en")
     .limit(3)
@@ -269,11 +278,11 @@ rows[0]["title"]     # dict-style access — both work
 isinstance(rows[0], dict)  # True
 
 # Flat value projection — .scalars() returns bare values
-ids = store.query(sc.BaseDataset).filter(status="current").scalars("identifier").values()
+ids = view.query(sc.BaseDataset).filter(status="current").scalars("identifier").values()
 # → ["EXR", "M1", "UNEMP", ...]
 
 # .row() is the single-row terminal; .first() and .one() raise ValueError under a projection
-row = store.query(sc.BaseDataset).filter(identifier="EXR").select("identifier", "title", lang="en").row()
+row = view.query(sc.BaseDataset).filter(identifier="EXR").select("identifier", "title", lang="en").row()
 # → Row({"identifier": "EXR", "title": "Exchange Rate EUR/USD"})
 ```
 
@@ -284,7 +293,7 @@ Selectable columns: `identifier`, `kind`, `status`, `issued`, `modified`, `landi
 ### Seeding with IDs
 
 ```python
-store.query(sc.BaseDataset).from_ids(["ID1", "ID2", "ID3"]).all()
+view.query(sc.BaseDataset).from_ids(["ID1", "ID2", "ID3"]).all()
 ```
 
 ### Field filters (keyword arguments)
@@ -333,7 +342,7 @@ q.description_contains("quarterly")       # case-insensitive ILIKE on descriptio
 All filters are ANDed:
 
 ```python
-store.query(sc.AggregateDataset).filter(
+view.query(sc.AggregateDataset).filter(
     q.has_code("geo", "DE"),
     q.has_dimensions(["geo", "freq"]),
     q.distribution(format="CSV"),
@@ -346,20 +355,20 @@ store.query(sc.AggregateDataset).filter(
 
 ```python
 # Sort by multilingual title (requires lang parameter)
-store.query(sc.BaseDataset).sort_by("title", lang="en").all()
-store.query(sc.BaseDataset).sort_by("title", lang="en", desc=True).all()
+view.query(sc.BaseDataset).sort_by("title", lang="en").all()
+view.query(sc.BaseDataset).sort_by("title", lang="en", desc=True).all()
 ```
 
 ### Cross-entity queries
 
 ```python
 # Agents that publish aggregate datasets with GEO=CA
-store.query(sc.Agent).filter(
+view.query(sc.Agent).filter(
     q.publishes(q.has_code("geo", "CA"), kind="aggregate")
 ).all()
 
 # Data services serving aggregate datasets
-store.query(sc.DataService).filter(
+view.query(sc.DataService).filter(
     q.serves(kind="aggregate")
 ).all()
 ```
@@ -370,12 +379,12 @@ A dataset's search text holds its title, description and keywords, plus its them
 
 ```python
 # Standalone BM25 search over datasets, concepts and codes; each item is a Hit
-results = store.search("gross domestic product", kinds=("dataset",), limit=10)
+results = view.search("gross domestic product", kinds=("dataset",), limit=10)
 results.items[0].payload.identifier
 
 # Combined with filters via QueryBuilder
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT")
     .search("labour force")
     .execute()
@@ -384,23 +393,23 @@ results = (
 
 ## Semantic and hybrid search
 
-Requires `embedding_model` at construction (install with `statcatlib[search]`):
+Requires an embedding model on the view (install with `statcatlib[search]`):
 
 ```python
 from sentence_transformers import SentenceTransformer
 
 model = SentenceTransformer("intfloat/multilingual-e5-small")
-store = sc.Catalog("my_catalog", embedding_model=model)
+view = cat.product("14100287").view(embedding_model=model)   # query_prefix= too; BM25 needs no model
 
 # Pure vector search — returns Hit objects; hit.payload is the dataset
-results = store.datasets.find("people moving between provinces", mode="vector")
+results = view.datasets.find("people moving between provinces", mode="vector")
 
 # Hybrid BM25 + vector (RRF fusion) — recommended
-results = store.datasets.find("labour market monthly data", mode="hybrid", limit=20)
+results = view.datasets.find("labour market monthly data", mode="hybrid", limit=20)
 
 # Hybrid via QueryBuilder with filters
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(status="current")
     .hybrid_search("unemployment trends")
     .limit(20)
@@ -408,24 +417,26 @@ results = (
 )
 ```
 
-Build index for existing catalog:
+Build the index of a working copy, so `wc.view()` can search before the seal:
 
 ```python
-n = store.build_index()  # returns count of datasets indexed
+n = wc.build_index()  # returns count of datasets indexed
 # Uses batch encoding (256 texts per encode() call) and bulk LanceDB writes
-n = store.build_index(embedding_model=model)  # with vector embeddings
+n = wc.build_index(embedding_model=model)  # with vector embeddings
 ```
+
+`wc.seal()` rebuilds the index from the edition's rows with the arguments of the last `wc.build_index()` call, or the defaults when there was none. CLI: `statcat build-index CATALOG PRODUCT [options]` resumes the product's working copy, builds its index, and leaves it unsealed.
 
 ## Facets
 
 ```python
 # Global facet counts
-counts = store.facets("publisher", "themes", "frequency", "status", "type", "spatial")
+counts = view.facets("publisher", "themes", "frequency", "status", "type", "spatial")
 # {"publisher": {"ESTAT": 42, ...}, "themes": {"Labour": 22, ...}, ...}
 
 # In-context facets (filtered)
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT")
     .with_facets("themes", "frequency")
     .execute()
@@ -438,9 +449,9 @@ print(results.facets["themes"])
 Publisher and theme facets return IDs. Use label methods for display names:
 
 ```python
-store.agent_labels(lang="en")    # {"ESTAT": "Eurostat", "ECB": "European Central Bank", ...}
-store.concept_labels(lang="en")  # {"<concept uri>": "Economy and finance", ...}
-store.spatial_labels(lang="en")  # {"Canada": "Canada", ...}
+view.agent_labels(lang="en")    # {"ESTAT": "Eurostat", "ECB": "European Central Bank", ...}
+view.concept_labels(lang="en")  # {"<concept uri>": "Economy and finance", ...}
+view.spatial_labels(lang="en")  # {"Canada": "Canada", ...}
 ```
 
 ## Source connectors
@@ -450,34 +461,37 @@ store.spatial_labels(lang="en")  # {"Canada": "Canada", ...}
 ```python
 import sdmxlib as sl
 
-with sc.Catalog("my_catalog") as store:
-    with sl.RestRegistry(sl.Provider.ESTAT) as reg:
-        reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
-        sc.ingest_sdmx(store, reg.registry)
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    with cat.product("estat").working_copy() as wc:
+        with sl.RestRegistry(sl.Provider.ESTAT) as reg:
+            reg.get(sl.Dataflow.urn_for(agency="ESTAT", id="NAMA_10_GDP"), resolve=True)
+            sc.ingest_sdmx(wc, reg.registry)
 
-        # With publisher/theme overrides
-        publisher = sc.Agent(id="ESTAT", name=I18n(en="Eurostat"))
-        sc.ingest_sdmx_registry(store, reg.registry, publisher=publisher)
+            # With publisher/theme overrides
+            publisher = sc.Agent(id="ESTAT", name=I18n(en="Eurostat"))
+            sc.ingest_sdmx_registry(wc, reg.registry, publisher=publisher)
 
-        # Write observations to the bundle's DuckLake (long layout) and bind them to the dataflow
-        sc.ingest_data(store, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
+            # Write observations to the edition's DuckLake (long layout) and bind them to the dataflow
+            sc.ingest_data(wc, reg, "ESTAT:NAMA_10_GDP(latest)", measure_dim="na_item")
+        wc.seal()
 ```
+
+Every ingest function takes a `WorkingCopy` and raises `TypeError` for an `EditionView`. SDMX structures and observations go through `wc.registry` (`wc.registry.ingest(...)`, `wc.registry.write_observations(...)`).
 
 ### CKAN (open.canada.ca, data.gov, ...)
 
 ```python
-from statcatlib.sources.ckan import CkanClient
-
-with sc.Catalog("open_canada") as store:
-    with CkanClient("https://open.canada.ca/data") as client:
-        sc.ingest_ckan(store, client, organization="statcan-statcan", rows=500)
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    with cat.product("open-canada").working_copy() as wc:
+        sc.ingest_ckan(wc, "https://open.canada.ca/data", organization="statcan-statcan", limit=500)
+        wc.seal()
 ```
 
 ## Lineage and provenance (PROV-O)
 
 ```python
-# Record a derivation relationship
-store.add_lineage(
+# Record a derivation relationship, in a working copy
+wc.add_lineage(
     source_id="lfs-microdata",
     target_id="14100287",
     relationship="aggregated_from",
@@ -486,15 +500,15 @@ store.add_lineage(
     confidence="asserted",  # or "extracted", "inferred"
 )
 
-# Transitive traversal — returns QueryBuilder, chain before materialising
-ancestors = store.dataset("14100287").upstream(depth=5).collect()
-dependents = store.dataset("CL_GEO").downstream(relationship="uses_classification").collect()
+# Transitive traversal on a view — returns QueryBuilder, chain before materialising
+ancestors = view.dataset("14100287").upstream(depth=5).collect()
+dependents = view.dataset("CL_GEO").downstream(relationship="uses_classification").collect()
 
 # Chain filters after traversal
-current = store.dataset("14100287").upstream().filter(status="current").collect()
+current = view.dataset("14100287").upstream().filter(status="current").collect()
 
 # Inspect records
-rows = store.dataset("14100287").lineage_records(role="target", relationship="aggregated_from")
+rows = view.dataset("14100287").lineage_records(role="target", relationship="aggregated_from")
 ```
 
 Relationship vocabulary: `derived_from`, `aggregated_from`, `adjusted_from`, `revision_of`, `supplement_to`, `feeds_into`, `uses_classification`, `replaces`.
@@ -507,43 +521,43 @@ Scopes are lazy handles representing positions in the catalog graph. Navigation 
 import statcatlib as sc
 
 # Navigate theme schemes
-store.themes.collect()                              # list[SchemeScope]
-store.themes["subjects"].collect()                   # ItemList[Concept]
-store.themes["subjects"]["13"].collect()             # Concept
+view.themes.collect()                              # list[SchemeScope]
+view.themes["subjects"].collect()                   # ItemList[Concept]
+view.themes["subjects"]["13"].collect()             # Concept
 
 # Cross-entity navigation — .datasets returns a lazy QueryBuilder
-store.themes["subjects"]["13"].datasets.collect()    # list[BaseDataset]
-store.themes["subjects"].datasets.limit(10).collect()
+view.themes["subjects"]["13"].datasets.collect()    # list[BaseDataset]
+view.themes["subjects"].datasets.limit(10).collect()
 
 # Codelist navigation — use sc.urn helpers to build URN strings
-store.codelist(sc.urn.codelist("SDMX", "CL_GEO")).collect()          # ItemList[Code]
-store.codelist(sc.urn.codelist("SDMX", "CL_GEO"))["ON"].collect()    # Code
-store.codelist(sc.urn.codelist("SDMX", "CL_GEO")).datasets.collect() # datasets using this codelist
+view.codelist(sc.urn.codelist("SDMX", "CL_GEO")).collect()          # ItemList[Code]
+view.codelist(sc.urn.codelist("SDMX", "CL_GEO"))["ON"].collect()    # Code
+view.codelist(sc.urn.codelist("SDMX", "CL_GEO")).datasets.collect() # datasets using this codelist
 
 # CodelistsScope — supports enrich with labels, lang, and text filtering
-store.codelists.lang("en").enrich(n=sc.each("datasets").count()).collect()
+view.codelists.lang("en").enrich(n=sc.each("datasets").count()).collect()
 # → [{"urn": "...", "label": "Geography", "n": 5}, ...]
 
 # Filter codelists by label text (SQL-level, case-insensitive)
-store.codelists.filter(text_contains="geo").enrich(n=sc.each("datasets").count()).collect()
+view.codelists.filter(text_contains="geo").enrich(n=sc.each("datasets").count()).collect()
 
-store.codelist(urn).label("en")   # quick name lookup
+view.codelist(urn).label("en")   # quick name lookup
 
 # Enriched per-code output includes code name labels
-store.codelist(urn).lang("en").enrich(n=sc.each("datasets").count()).collect()
+view.codelist(urn).lang("en").enrich(n=sc.each("datasets").count()).collect()
 # → [{"code_id": "ON", "label": "Ontario", "n": 5}, ...]
 
 # Batch label resolution — single SQL query for many codes
-store.codelist(geo_urn).batch_labels(["CA", "US", "DE"])
+view.codelist(geo_urn).batch_labels(["CA", "US", "DE"])
 # → {"CA": "Canada", "US": "United States", "DE": "Germany"}
 
 # Across multiple codelists in one query
-store.codelists.batch_labels([(geo_urn, "CA"), (freq_urn, "A")], lang="en")
+view.codelists.batch_labels([(geo_urn, "CA"), (freq_urn, "A")], lang="en")
 # → {(geo_urn, "CA"): "Canada", (freq_urn, "A"): "Annual"}
 
 # Dimension traversal
-dims = store.dimensions(ds).collect()              # ItemList[DimensionInfo]
-codelist = store.dimensions(ds)["GEO"].codelist    # CodelistScope | None
+dims = view.dimensions(ds).collect()              # ItemList[DimensionInfo]
+codelist = view.dimensions(ds)["GEO"].codelist    # CodelistScope | None
 ```
 
 ### Sub-traversal expressions (`sc.each`)
@@ -555,16 +569,16 @@ n_datasets = sc.each("datasets").count()
 has_data = sc.each("datasets").exists()
 
 # Enrich each concept with dataset counts
-store.themes["subjects"].enrich(n=n_datasets).collect()
+view.themes["subjects"].enrich(n=n_datasets).collect()
 
 # Multiple enrichments
-store.themes["subjects"].enrich(
+view.themes["subjects"].enrich(
     sc.each("datasets").count().alias("total"),
     sc.each("datasets").filter(status="current").count().alias("current"),
 ).collect()
 
 # Filter, enrich, and sort — all lazy until .collect()
-store.themes["subjects"] \
+view.themes["subjects"] \
     .filter(has_data) \
     .enrich(n=n_datasets) \
     .sort_by(n_datasets, desc=True) \
@@ -575,14 +589,14 @@ store.themes["subjects"] \
 
 | Scope | Entry point | `.collect()` returns |
 |---|---|---|
-| `ThemesScope` | `store.themes` | `list[SchemeScope]` |
-| `SchemeScope` | `store.themes["id"]` | `ItemList[Concept]` |
-| `ConceptScope` | `store.themes["id"]["cid"]` | `Concept` |
-| `CodelistsScope` | `store.codelists` | `list[CodelistScope]` |
-| `CodelistScope` | `store.codelist("urn")` | `ItemList[Code]` |
-| `CodeScope` | `store.codelist("urn")["id"]` | `Code` |
-| `DimensionsScope` | `store.dimensions(ds)` | `ItemList[DimensionInfo]` |
-| `DimensionScope` | `store.dimensions(ds)["GEO"]` | `DimensionInfo` |
+| `ThemesScope` | `view.themes` | `list[SchemeScope]` |
+| `SchemeScope` | `view.themes["id"]` | `ItemList[Concept]` |
+| `ConceptScope` | `view.themes["id"]["cid"]` | `Concept` |
+| `CodelistsScope` | `view.codelists` | `list[CodelistScope]` |
+| `CodelistScope` | `view.codelist("urn")` | `ItemList[Code]` |
+| `CodeScope` | `view.codelist("urn")["id"]` | `Code` |
+| `DimensionsScope` | `view.dimensions(ds)` | `ItemList[DimensionInfo]` |
+| `DimensionScope` | `view.dimensions(ds)["GEO"]` | `DimensionInfo` |
 
 All collection scopes (ThemesScope, SchemeScope, CodelistsScope, CodelistScope, DimensionsScope) support `.enrich()`, `.filter()`, `.sort_by()`. Single-item scopes (ConceptScope, CodeScope, DimensionScope) have `.collect()` and navigation only. `CodelistScope` also has `.label(lang)` for quick name lookup.
 
@@ -605,35 +619,35 @@ All collection scopes (ThemesScope, SchemeScope, CodelistsScope, CodelistScope, 
 For `AggregateDataset` records linked to SDMX structural metadata:
 
 ```python
-# Dimension → codes mapping
-codes = store.code_map("ESTAT:NAMA_10_GDP(1.0)")
-# {"na_item": ["B1GQ", "P31_S14", ...], "geo": ["AT", "BE", ...]}
+# Dimension → code → label mapping
+codes = view.code_map("ESTAT:NAMA_10_GDP(1.0)", lang="en")
+# {"na_item": {"B1GQ": "Gross domestic product at market prices", ...}, "geo": {"AT": "Austria", ...}}
 
 # Full sdmxlib Codelist object
-cl = store.codelist_for("ESTAT:NAMA_10_GDP(1.0)", "geo")
+cl = view.codelist_for("ESTAT:NAMA_10_GDP(1.0)", "geo")
 
 # DSD (Data Structure Definition)
-dsd = store.get_structure("ESTAT:NAMA_10_GDP(1.0)")
+dsd = view.get_structure(view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)"))
 
 # Impact analysis — datasets sharing a codelist
-affected = store.codelists["urn:sdmx:...Codelist=ESTAT:CL_GEO(1.0)"].datasets.execute().items
-related = store.dataset("ESTAT:NAMA_10_GDP(1.0)").related("codelist")
+affected = view.codelists["urn:sdmx:...Codelist=ESTAT:CL_GEO(1.0)"].datasets.execute().items
+related = view.dataset("ESTAT:NAMA_10_GDP(1.0)").related("codelist")
 
-# Direct sdmxlib access
-reg = store.registry
+# Direct sdmxlib access to the read surface (get, query, obs) over the same edition
+reg = view.registry
 ```
 
 ## Reading observations
 
 `ingest_data()` registers an sdmxlib `DataflowBinding` for the table it writes,
-so the co-located registry reads it back. The query is lazy until a terminal;
+so the edition's registry reads it back. The query is lazy until a terminal;
 `.frame()` and `.pivot()` return a `polars.DataFrame` typed from the DSD.
 
 ```python
 import sdmxlib as sl
 
-ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
-obs = store.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
+ds = view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+obs = view.registry.obs(sl.Dataflow.parse_urn(ds.sdmx_dataflow_urn))
 
 annual_de = obs.filter(obs.col("freq") == "A", obs.col("geo") == "DE").frame()  # long
 wide = obs.pivot(on=ds.measure_dim)  # one column per code of the pivot axis
@@ -665,33 +679,38 @@ parsed.id           # "CL_GEO"
 parsed.version      # "1.0"
 ```
 
-Use with store APIs:
+Use with view APIs:
 
 ```python
-store.codelist(sc.urn.codelist("SDMX", "CL_GEO")).collect()
-store.codelists[sc.urn.codelist("ESTAT", "CL_GEO")].datasets.execute().items
+view.codelist(sc.urn.codelist("SDMX", "CL_GEO")).collect()
+view.codelists[sc.urn.codelist("ESTAT", "CL_GEO")].datasets.execute().items
 ```
 
 ## Architecture
 
-One DuckDB database, three layers:
+Each edition holds three layers in one DuckDB database and its DuckLake:
 
 - **Discovery layer** (statcatlib, `statcat` schema) — dataset, agent, concept_scheme, concept, distribution, lineage
 - **Structural layer** (sdmxlib, `sdmx` schema) — dataflow, data_structure, codelist, code
-- **Observation layer** (DuckLake tables, bound to dataflows) — actual time-series data, read with `store.registry.obs(flow)`
+- **Observation layer** (DuckLake tables, bound to dataflows) — actual time-series data, read with `view.registry.obs(flow)`
+
+The catalog's files (`catalog.json`, the Inventory, one directory per edition) are specified in the Catalog Format page of the docs; callers reach them only through the API.
 
 statcatlib queries JOIN freely across both its own tables and sdmxlib's tables. The `sdmx_dataflow_urn` field on `AggregateDataset` is the foreign key that links the two. `has_code()` and `has_dimensions()` JOIN through sdmxlib's structural tables (only work for datasets that have `sdmx_dataflow_urn` set via SDMX ingest).
 
 ## Public API (`statcatlib.__all__`)
 
 ### Model types
-`Agent`, `AggregateDataset`, `BaseDataset`, `Catalog`, `CatalogRecord`, `Concept`, `ConceptRef`, `ConceptScheme`, `ConceptSchemeRef`, `ContactPoint`, `DataService`, `Dataset`, `DatasetT`, `Distribution`, `Frequency`, `GeospatialDataset`, `InternationalString`, `LicenceDocument`, `MicrodataDataset`, `OpenDataset`, `ProvenanceStatement`, `PublicationDataset`, `QualityAnnotation`, `SpatialCoverage`, `Standard`, `StatisticalDataset`, `TemporalCoverage`, `Variable`, `is_concept_in_scheme`
+`Agent`, `AggregateDataset`, `BaseDataset`, `CatalogDescription`, `CatalogRecord`, `Concept`, `ConceptRef`, `ConceptScheme`, `ConceptSchemeRef`, `ContactPoint`, `DataService`, `Dataset`, `DatasetT`, `Distribution`, `Frequency`, `GeospatialDataset`, `InternationalString`, `LicenceDocument`, `MicrodataDataset`, `OpenDataset`, `ProvenanceStatement`, `PublicationDataset`, `QualityAnnotation`, `SpatialCoverage`, `Standard`, `StatisticalDataset`, `TemporalCoverage`, `Variable`, `is_concept_in_scheme`
 
-### Store and scopes
-`Catalog`, `QueryBuilder`, `Row`, `SearchResult`, `ConceptSchemesScope`, `ConceptSchemeScope`, `ThemesScope`, `SchemeScope`, `ConceptScope`, `CodelistsScope`, `CodelistScope`, `CodeScope`, `DimensionsScope`, `DimensionScope`, `DimensionInfo`
+### Catalog, views and scopes
+`Catalog`, `Product`, `Edition`, `WorkingCopy`, `EditionView`, `QueryBuilder`, `Row`, `SearchResult`, `ConceptSchemesScope`, `ConceptSchemeScope`, `ThemesScope`, `SchemeScope`, `ConceptScope`, `CodelistsScope`, `CodelistScope`, `CodeScope`, `DimensionsScope`, `DimensionScope`, `DimensionInfo`
 
 ### Sentinels and error types
-`NotLoadedError`, `is_unloaded`
+`NotLoadedError`, `is_unloaded`, `IncompatibleCatalogError`, `IncompatibleIndexError`, `NoLiveEditionError`, `WorkingCopyExistsError`, `WorkingCopyClosedError`, `SealCheckError`, `JournalError`, `InventoryConflictError`, `InventoryContentionError`, `InventoryRuleError`, `NonFastForwardError`
+
+### Seal checks (`statcatlib.checks`)
+`conf_status`, `SealCheck`
 
 ### Expression language (`statcatlib.expr`)
 `each`, `Expr`, `TraversalExpr`, `CountExpr`, `ExistsExpr`, `AliasedExpr`
@@ -700,7 +719,7 @@ statcatlib queries JOIN freely across both its own tables and sdmxlib's tables. 
 `codelist`, `dataflow`, `data_structure`, `concept_scheme`, `parse`
 
 ### Source functions
-`dataset_from_dataflow`, `ingest_ckan`, `ingest_data`, `ingest_sdmx`, `ingest_sdmx_registry`
+`dataset_from_dataflow`, `ingest_ckan`, `ingest_data`, `ingest_sdmx`, `ingest_sdmx_registry`, `prepare_sdmx`
 
 ### Query filters (`statcatlib.query`)
 `has_code`, `has_dimensions`, `distribution`, `has_service`, `publishes`, `serves`, `has_spatial`, `has_keyword`, `title_contains`, `description_contains`, `ExistsFilter`, `MapCondition`, `MapFilter`, `PositionalFilter`

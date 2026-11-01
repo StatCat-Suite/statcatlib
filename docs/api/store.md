@@ -1,104 +1,186 @@
 # Catalog API
 
-`Catalog` is the single entry point to the catalog. It wraps a DuckDB
-connection and exposes read, write, and query operations on the catalog star schema.
+A catalog is a directory of products, and each product is a chain of immutable
+editions. Four classes make up the API:
+
+- `Catalog` creates or opens the catalog and returns its products.
+- `Product` returns a view of its live edition, and starts its working copy.
+- `WorkingCopy` is the product's one unsealed edition. It holds the write
+  methods (`put`, `add_lineage`, `add_language_alternates`, `build_index`) and
+  the writable sdmxlib registry, and `seal()` turns it into an edition.
+- `EditionView` reads one edition. It holds every query method on this page:
+  `get`, `query`, `search`, `facets`, the scopes, and the structural lookups.
+
+In the examples, `wc` is a `WorkingCopy` and `view` is an `EditionView`.
+Callers reach the catalog's files only through this API.
+[Catalog Format](../catalog-format.md) specifies them.
 
 ## Lifecycle
 
-### Constructors
+### Catalogs
 
 ```python
-Catalog()
-Catalog(":memory:")
+Catalog.create(path: str | Path, *, exist_ok: bool = False) -> Catalog
+Catalog.open(path: str | Path) -> Catalog
 ```
 
-Create an in-memory store. No data is persisted after the process exits.
-Useful for tests, scripts, and ephemeral pipelines.
+`Catalog.create` creates a catalog at `path`, a missing or empty directory,
+and returns it writable. With `exist_ok=True` it reopens an existing catalog
+for writing, and writes nothing. It raises `FileExistsError` when `path` is a
+catalog and `exist_ok` is false.
+
+`Catalog.open` opens the catalog at `path` read-only and writes nothing. Its
+products' `working_copy()` raises `RuntimeError`. It raises
+`FileNotFoundError` when `path` is not a catalog.
+
+Both raise `IncompatibleCatalogError` for a directory holding a statcatlib 0.11
+catalog, a published sdmxlib 0.72 bundle, or other files, and change nothing
+in it. [Upgrading](../upgrading.md) gives the re-ingest steps.
+
+A catalog is a context manager. `close()` closes every view it returned.
 
 ```python
-Catalog(path: str | Path, *, embedding_model: Any | None = None)
+import statcatlib as sc
+
+with sc.Catalog.create("my_catalog") as cat:
+    wc = cat.product("14100287").working_copy()
+    sc.ingest_sdmx(wc, registry)
+    print(wc.view().query(sc.AggregateDataset).count())
+    wc.seal()
+
+with sc.Catalog.open("my_catalog") as cat:
+    view = cat.product("14100287").view()
+    print(view.query(sc.AggregateDataset).count())
 ```
 
-Name a catalog folder at `path`. Construction is cheap and does **not** touch the
-disk — the DuckDB connection opens on `.open()` or on entering a `with` block,
-which creates `path/meta.duckdb` and `path/lake.ducklake` if they do not exist.
-Querying an unopened catalog raises `RuntimeError`.
+```python
+cat.product(product_id: str) -> Product
+cat.products() -> list[str]
+cat.refresh() -> None
+cat.writable -> bool
+cat.catalog_id -> str
+```
 
-Pass `embedding_model` to enable semantic and hybrid search. The model must have
-an `encode(str) -> list[float]` method — any SentenceTransformers, OpenAI, or
-Cohere model works. A LanceDB dataset is created at `{path}/search/`.
+`product` returns the product `product_id`, which need not exist yet. A
+product id names a directory: letters, digits, `.`, `_` and `-`, starting with
+a letter or digit. `products` lists the products with a live edition.
+`refresh` re-reads the catalog's Inventory, so `product(id).view()` returns
+the newest live edition.
+
+`Catalog.search` and `Catalog.facets` raise `NotImplementedError`. Search and
+count one product's view.
+
+For tests and scripts, `statcatlib.testing.temporary_catalog()` creates a
+catalog in a temporary directory and deletes it when the block ends:
+
+```python
+from statcatlib.testing import temporary_catalog
+
+with temporary_catalog() as cat:
+    wc = cat.product("scratch").working_copy()
+```
+
+### Products
+
+```python
+product.view(*, embedding_model: EmbeddingModel | None = None, query_prefix: str = "") -> EditionView
+```
+
+A read-only `EditionView` of the product's live edition, as of the catalog's
+last `refresh`. The view stays on that edition after a later seal; call
+`product.view()` again after `cat.refresh()` to follow the live edition. It
+raises `NoLiveEditionError` when the product has no live edition.
+
+Pass `embedding_model`, the model the index was built with, for vector and
+hybrid search. Any model with an `encode` method works, such as a
+SentenceTransformers model. BM25 search needs none. `query_prefix` defaults to the one the index recorded.
 
 ```python
 from sentence_transformers import SentenceTransformer
+
 model = SentenceTransformer("intfloat/multilingual-e5-small")
-store = sc.Catalog("my_catalog", embedding_model=model)
+view = cat.product("14100287").view(embedding_model=model)
 ```
 
 Requires the `search` optional extra: `uv add 'statcatlib[search]'`, or
-`pip install 'statcatlib[search]'` (`uv run --extra search` in a checkout). In-memory stores cannot use `embedding_model`
-(raises `ValueError`).
+`pip install 'statcatlib[search]'` (`uv run --extra search` in a checkout).
 
 ```python
-Catalog.from_connection(conn: duckdb.DuckDBPyConnection)
+product.working_copy(
+    *,
+    lifecycle: str = "revisable",
+    resume: bool = False,
+    embedding_model: EmbeddingModel | None = None,
+    document_prefix: str = "",
+    query_prefix: str = "",
+) -> WorkingCopy
 ```
 
-Attach to an existing DuckDB connection. The store does **not** own the
-connection — it will not close it on `close()` or context manager exit. Use
-this when sharing a connection with sdmxlib's `LocalRegistry`:
+Start the product's working copy on its live edition. The working copy starts
+with the live edition's rows, so a seal records the next edition of the
+product. A product has one working copy at a time, and one writer.
+`working_copy()` raises `WorkingCopyExistsError` while one is unsealed, and
+`resume=True` reopens it. `lifecycle` is `"revisable"` or `"final"`; a product
+keeps the lifecycle it was first recorded with. `embedding_model` and the
+prefixes are the encoder settings the seal's index rebuild uses.
 
 ```python
-import duckdb
-import sdmxlib as sl
-import statcatlib as sc
-
-conn = duckdb.connect("shared.duckdb")
-store = sc.Catalog.from_connection(conn)
-local_reg = sl.LocalRegistry(conn)   # same connection, same tables
+product.editions() -> list[Edition]
 ```
 
-### Opening
+The product's live edition, with the `previous` edition its manifest records,
+or an empty list.
+
+### Working copies
 
 ```python
-store.open() -> Self
+wc.view() -> EditionView
+wc.seal(checks: Iterable[SealCheck] = ()) -> Edition
+wc.discard() -> None
+wc.close() -> None
+wc.registry -> sdmxlib.LocalRegistry
+wc.product_id -> str
+wc.edition_id -> str
+wc.previous -> str | None
 ```
 
-Open the connection, creating the catalog folder if it does not exist —
-open-or-create, and the only spelling. Prefer the context manager, which opens
-on entry and closes on exit:
+`view` returns an `EditionView` over the working copy that sees each write as
+it is made.
+
+`seal` turns the working copy into an immutable edition. It runs `checks`
+against the working copy's view, rebuilds the search index from the edition's
+rows with the arguments of the last `build_index` call (the defaults when
+there was none), and records the edition as the product's live edition. A
+check that finds a problem raises `SealCheckError` and leaves the working copy
+open. `statcatlib.checks.conf_status()` refuses observations whose
+confidentiality status is not public:
 
 ```python
-with sc.Catalog("my_catalog") as store:
-    store.query(sc.AggregateDataset).limit(5).collect()
+from statcatlib import checks
+
+edition = wc.seal(checks=[checks.conf_status()])
 ```
 
-### Properties
+`discard` deletes the unsealed edition. `close` leaves it unsealed, for
+`working_copy(resume=True)`; leaving a `with wc:` block calls it. After a
+seal, a discard or a close, every method on the working copy and on its views
+raises `WorkingCopyClosedError`.
 
-```python
-store.connection -> duckdb.DuckDBPyConnection
-```
-
-The underlying DuckDB connection. Use for raw SQL queries or to pass to
-sdmxlib's `LocalRegistry`.
-
-### Context manager
-
-```python
-with sc.Catalog("my_catalog") as store:
-    ...
-store.close()
-```
-
-`close()` closes the DuckDB connection if the store owns it (not in
-connection-mode). Safe to call multiple times.
+`registry` is the writable sdmxlib registry over the edition.
+`wc.registry.ingest(...)` adds SDMX structures, and
+`wc.registry.write_observations(...)` writes observations into the edition's
+DuckLake.
 
 ---
 
 ## Writing datasets
 
+The write methods are `WorkingCopy` methods.
+
 ### `put`
 
 ```python
-store.put(obj: BaseDataset | ConceptScheme | list[BaseDataset | ConceptScheme] | tuple[...]) -> None
+wc.put(obj: BaseDataset | ConceptScheme | list[BaseDataset | ConceptScheme] | tuple[...]) -> None
 ```
 
 Add or update a dataset, a SKOS concept scheme, or a list/tuple of either.
@@ -115,10 +197,10 @@ If a record with the same `identifier`/`uri` already exists it is replaced
 
 ```python
 # Single dataset
-store.put(sc.OpenDataset(identifier="co2-2024", title=I18n(en="CO2 2024"), description=I18n(en="...")))
+wc.put(sc.OpenDataset(identifier="co2-2024", title=I18n(en="CO2 2024"), description=I18n(en="...")))
 
 # Concept scheme (cascades to concept rows)
-store.put(sc.ConceptScheme(
+wc.put(sc.ConceptScheme(
     uri="urn:myorg:themes",
     label=I18n(en="My Themes"),
     concepts={
@@ -127,13 +209,13 @@ store.put(sc.ConceptScheme(
 ))
 
 # Batch — any mix of dataset kinds and concept schemes
-store.put([ds1, ds2, scheme1])
+wc.put([ds1, ds2, scheme1])
 ```
 
 **Theme indexing note:** `put(dataset)` writes only the `dataset_theme` bridge
 rows. For theme labels to appear in BM25 search results, store the
-`ConceptScheme` first so the `concept` table is populated before `build_index()`
-runs.
+`ConceptScheme` first so the `concept` table is populated before the index is
+built, by `wc.build_index()` or by the seal.
 
 **SDMX structural filters:** `has_code()` and `has_dimensions()` JOIN through
 sdmxlib's structural tables via `sdmx_dataflow_urn`. These filters only work for
@@ -143,10 +225,13 @@ datasets created by `ingest_sdmx()`.
 
 ## Reading datasets
 
+The read methods are `EditionView` methods, on `cat.product(id).view()` and on
+`wc.view()`.
+
 ### `get`
 
 ```python
-store.get(cls: type[T], identifier: str) -> T | None
+view.get(cls: type[T], identifier: str) -> T | None
 ```
 
 Direct lookup by identifier. Returns `None` if:
@@ -158,7 +243,7 @@ Type narrowing is strict — requesting `AggregateDataset` for an `OpenDataset`
 returns `None`.
 
 ```python
-ds = store.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
+ds = view.get(sc.AggregateDataset, "ESTAT:NAMA_10_GDP(1.0)")
 if ds is not None:
     print(ds.sdmx_dataflow_urn)
     print(ds.measure_dim)
@@ -167,7 +252,7 @@ if ds is not None:
 Use `sc.BaseDataset` to retrieve without type filtering:
 
 ```python
-ds = store.get(sc.BaseDataset, "co2-2024")
+ds = view.get(sc.BaseDataset, "co2-2024")
 ```
 
 ---
@@ -177,20 +262,20 @@ ds = store.get(sc.BaseDataset, "co2-2024")
 ### `query`
 
 ```python
-store.query(cls: type[T], **kwargs) -> QueryBuilder[T]
+view.query(cls: type[T], **kwargs) -> QueryBuilder[T]
 ```
 
 Start a structured query. Returns a `QueryBuilder` — no database round-trip
 until `.execute()`, `.all()`, `.first()`, `.one()`, or `.count()` is called.
 
 ```python
-results = store.query(sc.AggregateDataset).filter(publisher="ESTAT").execute()
+results = view.query(sc.AggregateDataset).filter(publisher="ESTAT").execute()
 ```
 
 ### `search`
 
 ```python
-store.search(
+view.search(
     text: str,
     *,
     kinds: Sequence[str] = ("dataset", "concept", "code"),
@@ -219,22 +304,22 @@ to narrow by dataset kind.
 | `rrf_k`    | Reciprocal-Rank-Fusion constant for merging across kinds |
 
 Requires LanceDB (`statcatlib[search]`). Returns an empty `SearchResult` when
-the LanceDB index has not been built yet; never raises for in-memory or
-unbuilt-index stores.
+the edition has no search index, as in a product's first working copy before
+`wc.build_index()`, or without the extra; it never raises for a missing index.
 
 ```python
-results = store.search("labour force survey", kinds=("dataset",), limit=10)
+results = view.search("labour force survey", kinds=("dataset",), limit=10)
 for hit in results.items:
     print(hit.score, hit.payload.identifier, hit.payload.title.get("en"))
 
 # Fuzzy search catches typos and spelling variations
-results = store.search("consumr price", fuzzy=1)
+results = view.search("consumr price", fuzzy=1)
 ```
 
 ### Vector and hybrid search — `datasets.find`
 
 ```python
-store.datasets.find(
+view.datasets.find(
     query: str, *, mode: str = "bm25", lang: str = "en", limit: int = 50,
     offset: int = 0, operator: str = "or", fuzzy: int = 0, rrf_k: int = 60,
 ) -> SearchResult[Hit[BaseDataset]]
@@ -246,28 +331,30 @@ which merges both rankings with Reciprocal Rank Fusion (k=60 by default).
 Each `Hit` carries the dataset as `hit.payload`, plus `hit.score` and
 `hit.source` (`"bm25"`, `"vector"`, or `"hybrid"` when both matched).
 
-`"vector"` and `"hybrid"` encode `query` with the configured
-`embedding_model` and raise `RuntimeError` without one. `cat.concepts`,
-`cat.codes` and `cat.reference_metadata` have the same `find`.
+`"vector"` and `"hybrid"` encode `query` with the view's embedding model and
+raise `RuntimeError` without one. Pass it as
+`cat.product(id).view(embedding_model=model)`; a working copy's view uses the
+model given to `working_copy()` or to `wc.build_index()`. `view.concepts`,
+`view.codes` and `view.reference_metadata` have the same `find`.
 
 ```python
 from sentence_transformers import SentenceTransformer
 
 model = SentenceTransformer("intfloat/multilingual-e5-small")  # 384 dims, bilingual
-store = sc.Catalog("my_catalog", embedding_model=model)
+view = cat.product("14100287").view(embedding_model=model)
 
 # Pure semantic
-results = store.datasets.find("people moving between provinces", mode="vector")
+results = view.datasets.find("people moving between provinces", mode="vector")
 
 # Hybrid — recommended for most queries
-results = store.datasets.find("labour market monthly data", mode="hybrid", limit=20)
+results = view.datasets.find("labour market monthly data", mode="hybrid", limit=20)
 for hit in results.items:
     print(hit.payload.identifier, hit.score, hit.source)
 
 # Hybrid + relational filter via QueryBuilder
 import statcatlib.query as q
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(q.has_code("GEO", "ON"), status="current")
     .hybrid_search("unemployment by region")
     .limit(20)
@@ -278,28 +365,48 @@ results = (
 ### `build_index`
 
 ```python
-store.build_index(embedding_model: Any = None) -> int
+wc.build_index(
+    embedding_model: EmbeddingModel | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    *,
+    include_codes: bool = True,
+    embed_codes: bool = False,
+    max_codes_per_codelist: int = 500,
+    ...
+) -> int
 ```
 
-Re-index all datasets for search and optionally build ANN vectors.
-If `embedding_model` is provided it is stored for future vector operations.
+A `WorkingCopy` method. Re-index the working copy's datasets, concepts and
+codes for search, and optionally build ANN vectors, so `wc.view()` can search
+before the seal. If `embedding_model` is provided it is stored for future
+vector operations on the working copy.
 
-Returns the number of datasets embedded.
+Returns the number of datasets indexed.
 
 ```python
 from sentence_transformers import SentenceTransformer
 import statcatlib as sc
 
 model = SentenceTransformer("intfloat/multilingual-e5-small")
-store = sc.Catalog("my_catalog").open()
-n = store.build_index(model)
-print(f"embedded {n} datasets")
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    with cat.product("14100287").working_copy() as wc:
+        ...  # ingest into wc
+        n = wc.build_index(model)
+        print(f"indexed {n} datasets")
+        wc.seal()
 ```
 
-After `build_index()` completes, open the store with `embedding_model=model`
-to use `datasets.find(mode="vector")` and `mode="hybrid"`.
+`wc.seal()` rebuilds the index from the edition's rows with the arguments of
+the last `build_index` call, or the defaults when there was none, so a sealed
+edition's index holds exactly its rows. To use `datasets.find(mode="vector")`
+and `mode="hybrid"` on the sealed edition, pass the model to
+`cat.product(id).view(embedding_model=model)`.
 
-Requires the `search` optional extra. Raises `ValueError` for in-memory stores.
+`statcat build-index CATALOG PRODUCT [options]` runs `build_index` from the
+command line. It resumes the product's working copy, builds its index, and
+leaves the working copy unsealed.
+
+Requires the `search` optional extra.
 
 A rebuild is atomic: the new index is written in full and committed in one
 step, so an interrupted `build_index()` leaves the previous index intact and
@@ -310,14 +417,14 @@ still serving rather than half-replaced.
 ### `index_layout`
 
 ```python
-store.index_layout -> dict[str, dict[str, Any]]
+view.index_layout -> dict[str, dict[str, Any]]
 ```
 
 What each language's search index was built with — `{lang: {"table", "rows",
 "stemmer"}}`. Empty when no index has been built.
 
 ```python
-print(store.index_layout)
+print(view.index_layout)
 # {"en": {"table": "search_en__000001", "rows": 946,  "stemmer": "English"},
 #  "fr": {"table": "search_fr__000001", "rows": 1173, "stemmer": "French"}}
 ```
@@ -335,7 +442,7 @@ It also doubles as a startup guard. An index written by a *newer* statcatlib is
 not readable by an older one, which returns zero hits with no error:
 
 ```python
-if not store.index_layout:
+if not view.index_layout:
     raise RuntimeError("search index missing or built by a newer statcatlib")
 ```
 
@@ -344,7 +451,7 @@ if not store.index_layout:
 ### `facets`
 
 ```python
-store.facets(*fields: str) -> dict[str, dict[str, int]]
+view.facets(*fields: str) -> dict[str, dict[str, int]]
 ```
 
 Aggregation counts across all datasets for each requested field. Useful for
@@ -355,12 +462,12 @@ Supported fields: `"publisher"`, `"themes"`, `"frequency"`, `"status"`,
 
 A `"spatial"` key is the region's `uri` when it has one, such as a CKAN
 `geographic_region` code stored as a concept URI, and its English label
-otherwise. `store.spatial_labels(lang)` maps each key to a display label,
+otherwise. `view.spatial_labels(lang)` maps each key to a display label,
 read from the region's concept for a `uri` key, and `q.has_spatial_uri(key)`
 filters on a `uri` key.
 
 ```python
-counts = store.facets("publisher", "themes", "frequency")
+counts = view.facets("publisher", "themes", "frequency")
 # {"publisher": {"ESTAT": 42, "ECB": 18}, "themes": {"Labour": 22, ...}}
 ```
 
@@ -368,27 +475,27 @@ counts = store.facets("publisher", "themes", "frequency")
 
 ## Structural traversal
 
-These methods query sdmxlib's structural tables (codelists, DSDs, dataflows)
-via the shared connection.
+These `EditionView` methods query sdmxlib's structural tables (codelists,
+DSDs, dataflows) in the edition's database.
 
 ### `code_map`
 
 ```python
-store.code_map(identifier: str) -> dict[str, list[str]]
+view.code_map(dataset_id: str, lang: str = "en") -> dict[str, dict[str, str]]
 ```
 
 Return all dimension→codes for an `AggregateDataset`. Keys are dimension IDs;
-values are lists of code IDs.
+values map each code ID to its label in `lang`.
 
 ```python
-codes = store.code_map("ESTAT:NAMA_10_GDP(1.0)")
-# {"na_item": ["B1GQ", "P31_S14", ...], "geo": ["AT", "BE", "DE", ...], ...}
+codes = view.code_map("ESTAT:NAMA_10_GDP(1.0)")
+# {"na_item": {"B1GQ": "Gross domestic product at market prices", ...}, "geo": {"AT": "Austria", ...}, ...}
 ```
 
 ### `codelist_for`
 
 ```python
-store.codelist_for(identifier: str, dimension_id: str) -> sdmxlib.model.codelist.Codelist | None
+view.codelist_for(dataset_id: str, dimension: str) -> sdmxlib.model.codelist.Codelist | None
 ```
 
 Return the full sdmxlib `Codelist` object for a specific dimension of an
@@ -397,7 +504,7 @@ Return the full sdmxlib `Codelist` object for a specific dimension of an
 ### `get_structure`
 
 ```python
-store.get_structure(identifier: str) -> sdmxlib.model.datastructure.DataStructure | None
+view.get_structure(ds: AggregateDataset) -> sdmxlib.model.datastructure.DataStructure | None
 ```
 
 Return the sdmxlib `DataStructure` (DSD) for an `AggregateDataset`. Returns
@@ -406,16 +513,19 @@ Return the sdmxlib `DataStructure` (DSD) for an `AggregateDataset`. Returns
 ### `registry`
 
 ```python
-store.registry -> sdmxlib.LocalRegistry
+view.registry -> sdmxlib.EditionRegistry
 ```
 
-Return a `LocalRegistry` backed by the store's DuckDB connection. Use this to
-query sdmxlib structural objects (dataflows, codelists, DSDs) directly:
+The sdmxlib read surface over the same edition: `get`, `query` and `obs`. Use
+this to query sdmxlib structural objects (dataflows, codelists, DSDs) and
+observations directly:
 
 ```python
-reg = store.registry
+reg = view.registry
 flow = reg.get(sl.SdmxUrn.parse("urn:sdmx:..."))
 ```
+
+A working copy's writable registry is `wc.registry`, an `sdmxlib.LocalRegistry`.
 
 ---
 
@@ -424,7 +534,7 @@ flow = reg.get(sl.SdmxUrn.parse("urn:sdmx:..."))
 ### `add_lineage`
 
 ```python
-store.add_lineage(
+wc.add_lineage(
     source_id: str,
     target_id: str,
     relationship: str,
@@ -438,11 +548,11 @@ store.add_lineage(
 ) -> None
 ```
 
-Record a PROV-O-aligned derivation edge from `source_id` (upstream) to
+A `WorkingCopy` method. Record a PROV-O-aligned derivation edge from `source_id` (upstream) to
 `target_id` (downstream). The triple `(source_id, target_id, relationship)`
 is unique — calling again with the same triple updates the other fields (upsert).
 
-**`relationship` vocabulary** (see `Catalog.LINEAGE_RELATIONSHIPS`):
+**`relationship` vocabulary** (see `WorkingCopy.LINEAGE_RELATIONSHIPS`):
 
 | Value | Meaning |
 |---|---|
@@ -455,11 +565,11 @@ is unique — calling again with the same triple updates the other fields (upser
 | `uses_classification` | Dataset depends on a codelist |
 | `replaces` | Target replaces source (archival) |
 
-**`confidence` vocabulary** (see `Catalog.LINEAGE_CONFIDENCE`):
+**`confidence` vocabulary** (see `WorkingCopy.LINEAGE_CONFIDENCE`):
 `"asserted"` (manual), `"extracted"` (scraped), `"inferred"` (LLM).
 
 ```python
-store.add_lineage(
+wc.add_lineage(
     "lfs-microdata",
     "ESTAT:UNE_RT_M(1.0)",
     "aggregated_from",
@@ -475,14 +585,15 @@ store.add_lineage(
 ### `add_language_alternates`
 
 ```python
-store.add_language_alternates(
+wc.add_language_alternates(
     pairs: Mapping[str, Sequence[str]],
     *,
     source: str,
 ) -> None
 ```
 
-Record language tags that a source declares as alternates of a primary tag.
+A `WorkingCopy` method. Record language tags that a source declares as
+alternates of a primary tag.
 open.canada.ca's CKAN schema declares `{"en": ["en-t-fr"], "fr": ["fr-t-en"]}`.
 `en-t-fr` is an RFC 6497 transformed-content tag, meaning English translated
 from French, so text under it is English. statcatlib infers no pairs from the
@@ -501,20 +612,20 @@ any pair is refused:
   primary to one.
 
 ```python
-store.add_language_alternates({"en": ["en-t-fr"]}, source="https://open.canada.ca/data")
+wc.add_language_alternates({"en": ["en-t-fr"]}, source="https://open.canada.ca/data")
 ```
 
 ### `language_alternates`
 
 ```python
-store.language_alternates() -> list[Row]
+view.language_alternates() -> list[Row]
 ```
 
 The recorded pairs, one `Row` per alternate tag with `primary_tag`,
 `alternate_tag` and `source`, ordered by primary then alternate tag.
 
 ```python
-for pair in store.language_alternates():
+for pair in view.language_alternates():
     print(pair.primary_tag, pair.alternate_tag, pair.source)
 # en en-t-fr https://open.canada.ca/data
 # fr fr-t-en https://open.canada.ca/data
@@ -522,12 +633,12 @@ for pair in store.language_alternates():
 
 ### `DatasetScope` — lineage navigation
 
-Lineage traversal and querying is accessed via `store.dataset(id)`:
+Lineage traversal and querying is accessed via `view.dataset(id)`:
 
 #### `.lineage_records()`
 
 ```python
-store.dataset(id).lineage_records(
+view.dataset(id).lineage_records(
     *,
     role: str = "either",
     relationship: str | None = None,
@@ -549,7 +660,7 @@ Return lineage rows involving the dataset as plain dicts. Each dict has keys:
 #### `.upstream()`
 
 ```python
-store.dataset(id).upstream(
+view.dataset(id).upstream(
     *,
     relationship: str | None = None,
     depth: int = 10,
@@ -566,11 +677,11 @@ Because this returns a `QueryBuilder`, you can chain `.filter()`, `.include()`,
 
 ```python
 # Simple traversal
-ancestors = store.dataset("ESTAT:UNE_RT_M_SA(1.0)").upstream(depth=5).collect()
+ancestors = view.dataset("ESTAT:UNE_RT_M_SA(1.0)").upstream(depth=5).collect()
 
 # Chain additional operations before executing
 publishers = (
-    store.dataset("ESTAT:UNE_RT_M_SA(1.0)")
+    view.dataset("ESTAT:UNE_RT_M_SA(1.0)")
     .upstream()
     .include("publisher")
     .scalars("publisher")
@@ -581,7 +692,7 @@ publishers = (
 #### `.downstream()`
 
 ```python
-store.dataset(id).downstream(
+view.dataset(id).downstream(
     *,
     relationship: str | None = None,
     depth: int = 10,
@@ -593,11 +704,11 @@ all descendant datasets in the catalog.
 
 ```python
 # Impact analysis: datasets affected by a change to CL_GEO
-affected = store.dataset("CL_GEO").downstream(relationship="uses_classification").collect()
+affected = view.dataset("CL_GEO").downstream(relationship="uses_classification").collect()
 
 # Chain filters after traversal
 current_descendants = (
-    store.dataset("lfs-microdata")
+    view.dataset("lfs-microdata")
     .downstream()
     .filter(status="current")
     .collect()
@@ -607,7 +718,7 @@ current_descendants = (
 #### `.related()`
 
 ```python
-store.dataset(id).related(edge: str) -> QueryBuilder[BaseDataset]
+view.dataset(id).related(edge: str) -> QueryBuilder[BaseDataset]
 ```
 
 Find datasets sharing an entity via the given edge type. Currently supports
@@ -615,7 +726,7 @@ Find datasets sharing an entity via the given edge type. Currently supports
 codelist with the given dataset.
 
 ```python
-related = store.dataset("ESTAT:NAMA_10_GDP(1.0)").related("codelist").collect()
+related = view.dataset("ESTAT:NAMA_10_GDP(1.0)").related("codelist").collect()
 ```
 
 #### `.codelists`
@@ -623,7 +734,7 @@ related = store.dataset("ESTAT:NAMA_10_GDP(1.0)").related("codelist").collect()
 Navigate to codelists used by this dataset (lazy scope).
 
 ```python
-store.dataset("housing-stats").codelists.collect()
+view.dataset("housing-stats").codelists.collect()
 ```
 
 #### `.themes`
@@ -631,7 +742,7 @@ store.dataset("housing-stats").codelists.collect()
 Navigate to themes assigned to this dataset (lazy scope).
 
 ```python
-store.dataset("housing-stats").themes.collect()
+view.dataset("housing-stats").themes.collect()
 ```
 
 ---
@@ -641,7 +752,7 @@ store.dataset("housing-stats").themes.collect()
 ### `CodelistScope.batch_labels`
 
 ```python
-store.codelist(urn).batch_labels(
+view.codelist(urn).batch_labels(
     code_ids: list[str],
     lang: str | None = None,
 ) -> dict[str, str]
@@ -653,18 +764,18 @@ no entry. `lang` defaults to the scope's `.lang()` setting.
 
 ```python
 geo_urn = sc.urn.codelist("SDMX", "CL_GEO")
-labels = store.codelist(geo_urn).batch_labels(["CA", "US", "DE"])
+labels = view.codelist(geo_urn).batch_labels(["CA", "US", "DE"])
 # → {"CA": "Canada", "US": "United States", "DE": "Germany"}
 
 # Language override via scope
-labels = store.codelist(geo_urn).lang("fr").batch_labels(["CA", "US"])
+labels = view.codelist(geo_urn).lang("fr").batch_labels(["CA", "US"])
 # Falls back to code_id when French label is absent
 ```
 
 ### `CodelistsScope.batch_labels`
 
 ```python
-store.codelists.batch_labels(
+view.codelists.batch_labels(
     pairs: list[tuple[str, str]],
     lang: str | None = None,
 ) -> dict[tuple[str, str], str]
@@ -680,7 +791,7 @@ pairs = [
     (sc.urn.codelist("SDMX", "CL_GEO"), "US"),
     (sc.urn.codelist("SDMX", "CL_FREQ"), "A"),
 ]
-labels = store.codelists.batch_labels(pairs, lang="en")
+labels = view.codelists.batch_labels(pairs, lang="en")
 # → {("urn:...CL_GEO...", "CA"): "Canada",
 #    ("urn:...CL_GEO...", "US"): "United States",
 #    ("urn:...CL_FREQ...", "A"): "Annual"}
@@ -690,7 +801,7 @@ labels = store.codelists.batch_labels(pairs, lang="en")
 
 ## QueryBuilder
 
-`QueryBuilder[T]` is returned by `store.query()`. Builders are immutable: each
+`QueryBuilder[T]` is returned by `view.query()`. Builders are immutable: each
 method returns a new `QueryBuilder` and leaves the original unchanged, so
 calls chain.
 
@@ -722,7 +833,7 @@ Add BM25 full-text search. Combines with any `.filter()` conditions.
 
 | Parameter  | Description |
 |------------|-------------|
-| `lang`     | Which language's index to search, as for `store.search()`. A French query needs `lang="fr"` |
+| `lang`     | Which language's index to search, as for `view.search()`. A French query needs `lang="fr"` |
 | `operator` | `"or"` (default) matches any term; `"and"` requires all terms |
 | `fuzzy`    | Levenshtein edit distance for fuzzy matching: `0` (default), `1`, or `2` |
 
@@ -732,14 +843,14 @@ Add BM25 full-text search. Combines with any `.filter()` conditions.
 .hybrid_search(text: str, *, lang: str = "en") -> QueryBuilder[T]
 ```
 
-Add hybrid BM25 + vector search (RRF). Requires `embedding_model` on the store.
+Add hybrid BM25 + vector search (RRF). Requires an embedding model on the view.
 Relational filters from `.filter()` are applied on top of the RRF-merged result.
 `lang` selects the language's index for both techniques, as for `.search`.
 
 ```python
 import statcatlib.query as q
 results = (
-    store.query(sc.AggregateDataset)
+    view.query(sc.AggregateDataset)
     .filter(status="current")
     .filter(q.has_code("GEO", "ON"))
     .hybrid_search("unemployment trends")
@@ -772,7 +883,7 @@ Pagination controls.
 .with_facets(*fields: str) -> QueryBuilder[T]
 ```
 
-Request facet counts alongside the result. Same fields as `store.facets()`.
+Request facet counts alongside the result. Same fields as `view.facets()`.
 Counts will reflect the filtered result set, not the whole catalog.
 
 ### `.include`
@@ -790,10 +901,10 @@ Multiple `.include()` calls accumulate. Use `.full()` to revert.
 
 ```python
 # Load only publisher and themes — 3 queries instead of ~17
-store.query(sc.BaseDataset).include("publisher", "themes").all()
+view.query(sc.BaseDataset).include("publisher", "themes").all()
 
 # Accumulate across calls
-store.query(sc.BaseDataset).include("publisher").include("themes", "keywords").all()
+view.query(sc.BaseDataset).include("publisher").include("themes", "keywords").all()
 ```
 
 Unloaded relationships are set to a special `UNLOADED` sentinel (not `None` or
@@ -801,7 +912,7 @@ Unloaded relationships are set to a special `UNLOADED` sentinel (not `None` or
 field raises `NotLoadedError`:
 
 ```python
-ds = store.query(sc.BaseDataset).include("publisher").first()
+ds = view.query(sc.BaseDataset).include("publisher").first()
 ds.publisher.name    # OK — publisher was included
 ds.themes            # returns UNLOADED sentinel (falsy, no raise)
 ds.themes[0]         # raises NotLoadedError: 'themes' was not loaded
@@ -849,10 +960,10 @@ Load all relationships (the default behaviour). Useful to explicitly opt into
 full hydration, or to reset after a partial `.include()` chain:
 
 ```python
-store.query(sc.BaseDataset).filter(...).full().all()
+view.query(sc.BaseDataset).filter(...).full().all()
 ```
 
-Note: `store.get()` always loads all relationships regardless of `.include()`.
+Note: `view.get()` always loads all relationships regardless of `.include()`.
 
 ### Terminal methods
 
@@ -895,7 +1006,7 @@ instead.
 `Row` is a `dict` subclass that also supports attribute-style field access:
 
 ```python
-rows = store.query(sc.BaseDataset).select("identifier", "status").rows()
+rows = view.query(sc.BaseDataset).select("identifier", "status").rows()
 row = rows[0]
 
 row["identifier"]   # dict-style access
@@ -915,14 +1026,14 @@ row.nonexistent     # AttributeError: Row has no field 'nonexistent'
 ```
 
 Set row projection mode. Use `.rows()` or `.row()` as the terminal.
-A single SQL query is issued — no `store.get()` call per row.
+A single SQL query is issued — no `view.get()` call per row.
 
 Selectable columns: `identifier`, `kind`, `status`, `issued`, `modified`,
 `landing_page`, `version` (flat), `title`, `description` (MAP — require `lang`).
 
 ```python
 rows = (
-    store.query(sc.BaseDataset)
+    view.query(sc.BaseDataset)
     .filter(status="current")
     .sort_by("title", lang="en")
     .select("identifier", "title", lang="en")
@@ -946,10 +1057,10 @@ Set scalar projection mode. Use `.values()` or `.value()` as the terminal.
 Single SQL query.
 
 ```python
-ids = store.query(sc.BaseDataset).filter(status="current").scalars("identifier").values()
+ids = view.query(sc.BaseDataset).filter(status="current").scalars("identifier").values()
 # → ["EXR", "M1", "UNEMP", ...]
 
-titles = store.query(sc.BaseDataset).scalars("title", lang="en").values()
+titles = view.query(sc.BaseDataset).scalars("title", lang="en").values()
 # → ["Exchange Rates", "Money Supply", ...]
 ```
 
