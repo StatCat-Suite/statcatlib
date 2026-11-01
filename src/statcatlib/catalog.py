@@ -14,7 +14,8 @@ The layout is the sharded catalog spec's §4.1::
 `Catalog.open` opens one read-only. `Catalog.product` returns a `Product`:
 its `Product.view` reads the live edition, and `Product.working_copy` starts
 the product's one unsealed edition, a `WorkingCopy`, which
-`WorkingCopy.seal` turns into the next edition.
+`WorkingCopy.seal` turns into the next edition. `Catalog.seal` seals several
+products' working copies and records them in one Inventory version.
 
 Callers reach storage only through this API: no method takes or returns a path
 inside the catalog.
@@ -32,19 +33,23 @@ from typing import TYPE_CHECKING, NoReturn, Self
 
 import sdmxlib
 from attrs import frozen
-from sdmxlib.edition import read_manifest
+from sdmxlib.edition import ManifestError, read_manifest
 from sdmxlib.inventory import CATALOG_NAME, LiveEdition, LiveInventory, local_fetch
 
-from statcatlib.store.inventory import InventoryWriter
+from statcatlib.store.inventory import Change, InventoryContentionError, InventoryRuleError, InventoryWriter
 from statcatlib.store.store import VIEW_ATTRIBUTES, EditionView, IncompatibleCatalogError, _Store
-from statcatlib.store.working_copy import Edition, WorkingCopy, manifest_sha256
+from statcatlib.store.working_copy import Edition, SealCheckError, WorkingCopy, manifest_sha256
 
 if TYPE_CHECKING:
-    from sdmxlib.edition import Lifecycle
+    from collections.abc import Callable, Iterable, Mapping
+
+    from sdmxlib.edition import Finding, Lifecycle
+    from sdmxlib.inventory import FullInventory
 
     from statcatlib.store.store import EmbeddingModel
+    from statcatlib.store.working_copy import _Sealed
 
-__all__ = ["Catalog", "Edition", "NoLiveEditionError", "Product"]
+__all__ = ["Catalog", "Edition", "NoLiveEditionError", "Product", "SealOutcomes"]
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +62,33 @@ _PRODUCT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 class NoLiveEditionError(LookupError):
     """The product has no live edition, so there is nothing for a public reader to view."""
+
+
+@frozen
+class SealOutcomes:
+    """What `Catalog.seal` did with each working copy, keyed by product id.
+
+    Every product of the batch is in exactly one of the two mappings.
+
+    Attributes:
+        sealed: Each recorded product's new edition. All of them were
+            recorded in one Inventory version.
+        refused: Each refused product's error. A `SealCheckError`, a
+            `NonFastForwardError` from the pre-check, or another
+            `InventoryRuleError` from sdmxlib's rules leaves the working copy
+            open; a `ManifestError` closes it, and
+            ``working_copy(resume=True)`` reopens it. An `InventoryRuleError`
+            at record time leaves the sealed edition on disk unrecorded, and an
+            `InventoryContentionError` at record time leaves it for the
+            product's next ``working_copy()`` to record.
+    """
+
+    sealed: Mapping[str, Edition]
+    refused: Mapping[str, Exception]
+
+
+class _NothingToRecordError(Exception):
+    """Every product of a batch was refused at record time, so no Inventory version is written."""
 
 
 @frozen
@@ -135,6 +167,88 @@ def _check_product_id(product_id: str) -> str:
         )
         raise ValueError(msg)
     return product_id
+
+
+def _seal_each(
+    batch: list[WorkingCopy],
+    checks: tuple[Callable[[EditionView], Iterable[Finding]], ...],
+    refused: dict[str, Exception],
+) -> list[tuple[WorkingCopy, _Sealed]]:
+    """`Catalog.seal`'s first two passes: pre-check every working copy, then seal each that passed.
+
+    Args:
+        batch: The working copies.
+        checks: The seal checks.
+        refused: Filled with each refused product's error.
+
+    Returns:
+        Each sealed working copy with its edition, not yet recorded.
+    """
+    ready: list[WorkingCopy] = []
+    for wc in batch:
+        try:
+            wc._precheck(checks)
+        except (SealCheckError, InventoryRuleError, InventoryContentionError) as exc:
+            refused[wc.product_id] = exc
+        else:
+            ready.append(wc)
+    sealed: list[tuple[WorkingCopy, _Sealed]] = []
+    for wc in ready:
+        try:
+            sealed.append((wc, wc._seal_edition()))
+        except ManifestError as exc:
+            refused[wc.product_id] = exc
+    return sealed
+
+
+def _record_batch(
+    writer: InventoryWriter, sealed: list[tuple[WorkingCopy, _Sealed]], refused: dict[str, Exception]
+) -> dict[str, Edition]:
+    """`Catalog.seal`'s last pass: record every sealed edition sdmxlib's rules accept, in one commit.
+
+    Args:
+        writer: The catalog's Inventory writer.
+        sealed: Each sealed working copy with its edition.
+        refused: Filled with each product refused at record time.
+
+    Returns:
+        Each recorded product's edition.
+    """
+    at_record: dict[str, InventoryRuleError] = {}
+
+    def change(full: FullInventory | None) -> Change:
+        at_record.clear()
+        leaves = {}
+        for wc, done in sealed:
+            try:
+                leaves[wc.product_id] = wc._next_leaf(full, done)
+            except InventoryRuleError as exc:
+                at_record[wc.product_id] = exc
+        if not leaves:
+            raise _NothingToRecordError
+        return Change(leaves=leaves)
+
+    products = ", ".join(wc.product_id for wc, _ in sealed)
+    try:
+        writer.commit(change, kind="seal", reason=f"seal {products}")
+    except _NothingToRecordError:
+        pass
+    except InventoryContentionError as exc:
+        # The journal entries stay, so each product's next working_copy() records its edition.
+        for wc, _ in sealed:
+            msg = f"{exc}; the edition {wc.edition_id} is recorded at the next working_copy()"
+            refused[wc.product_id] = InventoryContentionError(msg)
+        return {}
+    recorded: dict[str, Edition] = {}
+    for wc, done in sealed:
+        exc = at_record.get(wc.product_id)
+        if exc is None:
+            wc._recorded()
+            recorded[wc.product_id] = done.edition
+        else:
+            wc._unrecorded(exc)
+            refused[wc.product_id] = exc
+    return recorded
 
 
 class Catalog:
@@ -301,6 +415,77 @@ class Catalog:
         """
         self._require_open()
         return Product._for(self, _check_product_id(product_id))
+
+    def _require_writer(self) -> InventoryWriter:
+        """The Inventory writer, or `RuntimeError` for a catalog from `open`."""
+        self._require_open()
+        if self._writer is None:
+            msg = (
+                f"the catalog {self._root} was opened read-only with Catalog.open; open it for writing with "
+                f"Catalog.create({str(self._root)!r}, exist_ok=True)"
+            )
+            raise RuntimeError(msg)
+        return self._writer
+
+    def seal(
+        self,
+        working_copies: Iterable[WorkingCopy],
+        *,
+        checks: Iterable[Callable[[EditionView], Iterable[Finding]]] = (),
+    ) -> SealOutcomes:
+        """Seal several products' working copies and record them in one Inventory version.
+
+        It runs `WorkingCopy.seal`'s steps in three passes. First it settles
+        each product's journal, runs *checks* against each working copy's
+        view, and refuses each one whose base is no longer live, before any
+        sdmxlib seal. Then it seals each remaining working copy (search
+        index, section, sdmxlib's journal entry and manifest). Last it
+        records every sealed edition in one Inventory commit, leaving out
+        each product whose record sdmxlib's rules refuse. A refusal in one
+        product never stops another's seal.
+
+        A crash during the batch can leave its products recorded across
+        several Inventory versions: each sealed, unrecorded edition keeps its
+        journal entry, and its product's next ``working_copy()`` records it.
+
+        Args:
+            working_copies: The working copies, one per product, each from
+                this catalog.
+            checks: Seal checks (`statcatlib.checks.SealCheck`), run against
+                every working copy's view.
+
+        Returns:
+            Each product's outcome. An empty batch writes nothing.
+
+        Before anything is sealed, a working copy of another catalog, or two
+        of one product, raise `ValueError`, and a sealed, discarded or closed
+        working copy raises `WorkingCopyClosedError`. A catalog opened
+        read-only with `Catalog.open` raises `RuntimeError`.
+        """
+        writer = self._require_writer()
+        batch = self._check_batch(working_copies)
+        refused: dict[str, Exception] = {}
+        sealed = _seal_each(batch, tuple(checks), refused)
+        recorded = _record_batch(writer, sealed, refused) if sealed else {}
+        return SealOutcomes(sealed=recorded, refused=refused)
+
+    def _check_batch(self, working_copies: Iterable[WorkingCopy]) -> list[WorkingCopy]:
+        """The batch as a list, once each working copy is open, of this catalog, and alone for its product."""
+        batch = list(working_copies)
+        seen: set[str] = set()
+        for wc in batch:
+            wc._live()
+            if wc._writer.root != self._root:
+                msg = (
+                    f"the working copy of {wc.product_id} belongs to the catalog {wc._writer.root}; "
+                    f"this catalog is {self._root}"
+                )
+                raise ValueError(msg)
+            if wc.product_id in seen:
+                msg = f"two working copies of {wc.product_id} in one batch; a product seals once per batch"
+                raise ValueError(msg)
+            seen.add(wc.product_id)
+        return batch
 
     def _engine_for_views(self) -> sdmxlib.EditionEngine:
         if self._engine is None:
@@ -516,22 +701,12 @@ class Product:
         Returns:
             The working copy.
 
-        Raises:
-            RuntimeError: The catalog was opened read-only with `Catalog.open`.
-
+        A catalog opened read-only with `Catalog.open` raises `RuntimeError`.
         A product recorded with another lifecycle raises `InventoryRuleError`
         (``rule="lifecycle"``), and one with an unsealed edition raises
         `WorkingCopyExistsError` unless *resume* is true.
         """
-        cat = self._catalog
-        cat._require_open()
-        writer = cat._writer
-        if writer is None:
-            msg = (
-                f"the catalog {cat._root} was opened read-only with Catalog.open; open it for writing with "
-                f"Catalog.create({str(cat._root)!r}, exist_ok=True)"
-            )
-            raise RuntimeError(msg)
+        writer = self._catalog._require_writer()
         return WorkingCopy._start(
             writer,
             self._product_id,

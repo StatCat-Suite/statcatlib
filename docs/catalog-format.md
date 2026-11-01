@@ -283,7 +283,13 @@ Columns of other kinds hold an empty value.
 | `set_urn` | string | reference-metadata rows |
 | `attribute_path` | string | reference-metadata rows |
 | `section_title` | string | reference-metadata rows |
+| `text_sha256` | string | embedded rows: the SHA-256, lowercase hex, of the JSON array `[model, document_prefix, text]`; `NULL` for a row not embedded, or when no model name is known |
 | `embedding` | fixed-size list of float32 | every row, only when an embedding model is configured; `NULL` for a row not embedded |
+
+A producer MAY reuse a stored vector for a text whose `text_sha256` matches,
+in place of encoding it again; statcatlib's `build_index` does. A table
+written before the column was added has none, and a reader MUST accept it.
+Adding a column changes no existing field, so the manifest version stays 3.
 
 ### 4.3 `embeddings.json`
 

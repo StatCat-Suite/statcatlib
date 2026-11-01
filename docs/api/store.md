@@ -171,6 +171,56 @@ raises `WorkingCopyClosedError`.
 `wc.registry.write_observations(...)` writes observations into the edition's
 DuckLake.
 
+### Sealing several products
+
+```python
+cat.seal(working_copies: Iterable[WorkingCopy], *, checks: Iterable[SealCheck] = ()) -> SealOutcomes
+```
+
+`Catalog.seal` seals one working copy per product and records every edition
+it can in one Inventory version, so a bulk ingest of N products writes N
+leaves and one root. It runs in three passes:
+
+1. For every working copy, it settles the product's journal, runs `checks`
+   against the working copy's view, and refuses a working copy whose base is
+   no longer the live edition. Nothing is sealed until every working copy has
+   passed or been refused.
+2. It seals each working copy that passed: the search index, the `statcat`
+   section, and sdmxlib's journal entry and manifest.
+3. It records the sealed editions in one commit, leaving out each product
+   whose record sdmxlib's rules refuse.
+
+A refusal in one product never stops another's seal. `SealOutcomes.sealed`
+maps each recorded product to its `Edition`, and `SealOutcomes.refused` maps
+each refused product to its error:
+
+| Error | When | The working copy |
+|---|---|---|
+| `SealCheckError` | a check found something | stays open |
+| `NonFastForwardError` | its base is no longer live, before the seal | stays open; `discard()` it |
+| `ManifestError` | sdmxlib refused the edition | closed; `working_copy(resume=True)` reopens it |
+| `InventoryRuleError` | sdmxlib's rules refused the record, such as a rollback landing during the batch | sealed and unrecorded, logged at WARNING |
+| `InventoryContentionError` | the commit lost 8 races in a row | sealed; the product's next `working_copy()` records it |
+
+```python
+with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
+    batch = []
+    for product_id, source in sources.items():
+        wc = cat.product(product_id).working_copy()
+        ingest_sdmx(wc, source)
+        batch.append(wc)
+    outcomes = cat.seal(batch, checks=[checks.conf_status()])
+    for product_id, error in outcomes.refused.items():
+        print(product_id, error)
+```
+
+Every working copy in the batch belongs to this catalog and to a different
+product; otherwise `seal` raises `ValueError` before it seals anything. A
+crash during a batch can leave its products recorded across several Inventory
+versions: each sealed, unrecorded edition keeps its journal entry, and its
+product's next `working_copy()` records it in a version of its own. On a
+laptop catalog that is acceptable.
+
 ---
 
 ## Writing datasets
@@ -398,7 +448,23 @@ with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
 
 `wc.seal()` rebuilds the index from the edition's rows with the arguments of
 the last `build_index` call, or the defaults when there was none, so a sealed
-edition's index holds exactly its rows. To use `datasets.find(mode="vector")`
+edition's index holds exactly its rows.
+
+Each embedded row records `text_sha256`, the SHA-256 of the model name, the
+document prefix and the text. When `build_index` is called with `model_name`,
+it reads the stored vectors before the rebuild replaces the tables and gives
+each text whose hash matches its stored vector; only the other texts reach
+the model. The seal repeats the last `build_index` call, so a working copy
+that calls `wc.build_index(model_name=...)` and changes no text calls
+`encode` zero times, and one with edits encodes only the edited texts. A
+change of model name or document prefix re-encodes every text.
+
+Without `model_name`, `build_index` reuses nothing and encodes every text,
+since the encoder may be a different model from the one that wrote the
+stored vectors; it logs that at INFO. This includes a seal of a working copy
+that never called `build_index`. The rows still record `text_sha256` under
+the model name `embeddings.json` records, so a later build that passes
+`model_name` can reuse them. To use `datasets.find(mode="vector")`
 and `mode="hybrid"` on the sealed edition, pass the model to
 `cat.product(id).view(embedding_model=model)`.
 

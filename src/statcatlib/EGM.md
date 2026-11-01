@@ -3,8 +3,8 @@
 ## Overview
 
 `statcatlib` is the package root. `__init__.py` re-exports the public API of
-`model`, `sources` and `store`; `Catalog`, `Product`, `Edition` and
-`NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
+`model`, `sources` and `store`; `Catalog`, `Product`, `Edition`,
+`SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
 `InventoryContentionError`, `InventoryRuleError` and `NonFastForwardError`
 from `store/inventory.py`, and `WorkingCopyExistsError`,
 `WorkingCopyClosedError`, `SealCheckError` and `JournalError` from
@@ -47,6 +47,14 @@ and test catalogs (`testing.py`).
     live edition, sorted), `product(product_id) -> Product` (`ValueError`
     unless the id matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`), `close()` and the
     context manager.
+  - `seal(working_copies, *, checks=()) -> SealOutcomes`: the batched seal.
+    It refuses, with `ValueError`, a working copy of another catalog or two
+    of one product, and raises `WorkingCopyClosedError` for a closed one,
+    before sealing anything. Then it runs `WorkingCopy._precheck` (journal,
+    checks, fast-forward) for every working copy, `_seal_edition` for each
+    that passed, and records every sealed edition in one
+    `InventoryWriter.commit`, leaving out each product whose `_next_leaf`
+    raises `InventoryRuleError`. `RuntimeError` on a catalog from `open`.
   - `search` and `facets` raise `NotImplementedError` naming
     `product(id).view()`. `__getattr__` raises `AttributeError` naming
     `cat.product(id).view().<name>` for every name in
@@ -60,6 +68,10 @@ and test catalogs (`testing.py`).
   `Catalog.product` is the only constructor.
 - `NoLiveEditionError` (`LookupError`): `view()` on a product with no live
   edition.
+- `SealOutcomes`: a frozen attrs value with `sealed` (product id to
+  `Edition`, all recorded in one version) and `refused` (product id to the
+  error: `SealCheckError`, `NonFastForwardError` or another
+  `InventoryRuleError`, `ManifestError`, or `InventoryContentionError`).
 - `Edition` is re-exported from `store/working_copy.py`.
 
 ### `checks.py`
@@ -166,6 +178,11 @@ The module keeps its 0.11 name and describes editions. Imported from
   `sdmxlib.EditionEngine`, and `Catalog.close` closes them all.
 - A seal check only reads: `seal` runs every check against `wc.view()`
   before writing anything, and any finding raises `SealCheckError`.
+- `Catalog.seal` runs every pre-check before any sdmxlib seal, and writes at
+  most one Inventory version; a batch whose products are all refused writes
+  none. A refusal in one product never stops another's. A crash during the
+  batch leaves each sealed, unrecorded edition's journal entry, so its
+  product's next `working_copy()` records it, in a version of its own.
 - `MapCondition`, `MapFilter` and `has_spatial` pass their language tag
   through `sdmxlib.normalize_tag`.
 - `Expr` nodes are frozen attrs objects and run no SQL themselves.

@@ -144,7 +144,8 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 
 ### `lance.py`
 
-- `LanceIndex(path, *, edition_id=None)` routes by language over one `_LanguageIndex` table per language: `add`, `add_bulk`, `drop_carried`, `bm25_search`, `bm25_search_rows`, `search`, `search_rows`, `build_fts_index`, `build_index`, `describe`, `languages`, `table_for`, `count_rows`, `orphan_tables`, `discard_orphans`, `unreadable_version` (static), and the properties `version` and `annotations`. *edition_id* names the edition whose tables a rebuild writes; `None` opens a sealed edition's index for reading only.
+- `LanceIndex(path, *, edition_id=None)` routes by language over one `_LanguageIndex` table per language: `add`, `add_bulk`, `drop_carried`, `bm25_search`, `bm25_search_rows`, `search`, `search_rows`, `build_fts_index`, `build_index`, `carried_vectors`, `describe`, `languages`, `table_for`, `count_rows`, `orphan_tables`, `discard_orphans`, `unreadable_version` (static), and the properties `version` and `annotations`. *edition_id* names the edition whose tables a rebuild writes; `None` opens a sealed edition's index for reading only.
+- `text_sha256(model, prefix, text)`: the SHA-256 of the JSON array `[model, prefix, text]`, recorded in each embedded row's `text_sha256` column.
 - `LanguageLayout`, `IndexAnnotations`, `SearchRow`, `Bm25HitRow`, `VectorHitRow` (TypedDicts), `make_schema(*, embedding_dim)`.
 
 ### Small modules
@@ -203,11 +204,25 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `catalog_section(store)`; close the store and registry;
   `sdmxlib.edition.seal`, which writes the journal entry and then the
   manifest; commit the record (`kind="seal"`), live when the catalog's
-  embargo is off; clear the journal entry.
+  embargo is off; clear the journal entry. The steps are split for
+  `Catalog.seal`: `_precheck(checks)` (steps 0 to 2), `_seal_edition()`
+  (steps 3 to 5, returning a private `_Sealed` with the edition and its
+  manifest's store schema), `_next_leaf(full, sealed)` (the record's leaf;
+  `InventoryRuleError` on a refusal), `_recorded()` and `_unrecorded(exc)`
+  (clear the journal entry; the second also logs the WARNING).
 - The seal's index rebuild reuses the arguments of the last
   `WorkingCopy.build_index` call on that object, or the defaults when there
   was none. Without lancedb installed it deletes `search/`, so a carried
   index never describes the previous edition's rows.
+- Embedding reuse (S2b): each embedded search row records `text_sha256`,
+  `lance.text_sha256(model, prefix, text)`. `_Store.build_index` reads
+  `LanceIndex.carried_vectors()` before `add_bulk` replaces the tables, and
+  `_batch_encode` takes a stored vector for each text whose hash matches and
+  encodes the rest. Vectors are reused only when `build_index` gets
+  `model_name` explicitly (`_Store._vector_reuse`); without it every text is
+  encoded, an INFO line says so, and the hash uses `embedding_model_name`
+  (the carried `embeddings.json`). With no name at all `text_sha256` is NULL. A table without the column
+  (written before S2b) yields no vectors.
 - The journal rule (`settle_journal`; the table is in `working_copy.py`'s
   module docstring) runs when a working copy starts or resumes, at the start
   of a seal and after its record, against the newest root. An entry whose
@@ -254,7 +269,7 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   and carries its `search/`; on a product's first edition `create_schema`
   creates the `statcat` schema and tables.
 - `put`, `put_concept` and `add_lineage` upsert rows in `statcat` tables. `add_language_alternates` inserts rows into `statcat.language_alternate` and keeps a pair already recorded. `bulk_load()` raises `wal_autocheckpoint` to 1GB; on exit of the outermost block it resets it to 16MB and runs `CHECKPOINT`. `transaction()` commits on clean exit and rolls back on exception.
-- `build_index()` writes LanceDB tables, `search/index.json` and, when a model is known, `search/embeddings.json`; it calls the embedding model in batches (256 by default, `STATCAT_EMBED_BATCH_SIZE` overrides).
+- `build_index()` writes LanceDB tables, `search/index.json` and, when a model is known, `search/embeddings.json`; it calls the embedding model in batches (256 by default, `STATCAT_EMBED_BATCH_SIZE` overrides) for the texts whose `text_sha256` has no stored vector, and logs the reused and encoded counts at INFO.
 - `WorkingCopy.seal` rebuilds `search/`, drops carried tables, writes the
   journal entry and `manifest.json` through `sdmxlib.edition.seal`, commits
   an Inventory version, and deletes the journal entry. `discard` deletes the
@@ -274,4 +289,7 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 - The Inventory writer: `tests/test_inventory_writer.py` (unit) and
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`
-  and `tests/test_concurrent_seal.py`. Views: `tests/test_edition_view.py`.
+  and `tests/test_concurrent_seal.py`; the batched seal in
+  `tests/test_catalog_model.py::TestBatchSeal`. Views:
+  `tests/test_edition_view.py`. Embedding reuse:
+  `tests/test_embedding_reuse.py`.
