@@ -3,13 +3,13 @@
 ## Overview
 
 `statcatlib.sources` holds the connectors that write external catalogs into a
-`Catalog`. Two sources exist:
+product's `WorkingCopy`, its one unsealed edition. Two sources exist:
 
 - `sdmx.py` ingests an SDMX registry. It writes the structural artefacts into
-  sdmxlib's `sdmx` schema through `Catalog.registry`, then stores one
+  sdmxlib's `sdmx` schema through `WorkingCopy.registry`, then stores one
   `AggregateDataset` per dataflow. Each dataset links to its dataflow through
   `sdmx_dataflow_urn` and copies no codes, codelists or DSDs. `ingest_data`
-  also materialises one dataflow's observations into the bundle's DuckLake.
+  also materialises one dataflow's observations into the edition's DuckLake.
 - `ckan.py` ingests a CKAN portal (open.canada.ca, data.gov) through the CKAN
   Action API v3 and stores one `OpenDataset` per CKAN package.
 
@@ -20,9 +20,10 @@ The package's `__init__.py` re-exports the six ingest functions, and
 
 Exported from `statcatlib.sources` (and from `statcatlib`):
 
-- `ingest_sdmx(store, registry) -> list[AggregateDataset]` calls
-  `store.registry.ingest(registry)`, then `prepare_sdmx(registry)`, then
-  `store.put(datasets)` inside `store.bulk_load()`.
+- `ingest_sdmx(store: WorkingCopy, registry) -> list[AggregateDataset]`
+  calls `require_working_copy`, then `store.registry.ingest(registry)`, then
+  `prepare_sdmx(registry)`, then `store.put(datasets)` inside
+  `store.bulk_load()`.
 - `ingest_sdmx_registry(store, registry, *, publisher=None, themes=None)`
   does the same as `ingest_sdmx` and applies the `publisher` and `themes`
   overrides to every dataset.
@@ -40,11 +41,13 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
   `dimension_names` holds each dimension's resolved concept name, or the
   dimension id under `zxx` when the concept is unresolved or the resolved
   object has no `name` (GH-94).
-- `ingest_data(store, reg, identifier, *, measure_dim=None) -> str` fetches
-  observations from `reg.obs(flow_urn).frame()` in the long layout, writes
-  them with `store.data.write_observations` to
-  `lake.<agency>.df_<id>_<version>` (lowercase, dots in the version become
-  `_`), registers an `sdmxlib.DataflowBinding.from_dsd` for that table, sets
+- `ingest_data(store: WorkingCopy, reg, identifier, *, measure_dim=None) -> str`
+  reads the dataset through `store.view().get` and the DSD through
+  `store.registry.dsd`, fetches observations from `reg.obs(flow_urn).frame()`
+  in the long layout, writes them with `store.registry.write_observations`
+  to `<agency>.df_<id>_<version>` in the edition's lake (lowercase, dots in
+  the version become `_`; a re-run replaces the table), adds an
+  `sdmxlib.DataflowBinding.from_dsd` for that table to `store.registry`, sets
   `AggregateDataset.measure_dim`, stores the dataset again, and returns
   `"<schema>.<table>"`. An identifier ending in `(latest)` resolves to the
   highest stored version by a descending string sort on `dataset.identifier`.
@@ -53,8 +56,8 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
   - Raises `ValueError` when the dataset has no `sdmx_dataflow_urn`, the
     identifier is not `AGENCY:ID(VERSION)`, the DSD is not stored, or
     `measure_dim` is not a DSD dimension.
-- `ingest_ckan(store, base_url, *, organization=None, subject=None, limit=100) -> list[OpenDataset]`
-  fetches up to `limit` packages with `CkanClient.package_search`, maps each
+- `ingest_ckan(store: WorkingCopy, base_url, *, organization=None, subject=None, limit=100) -> list[OpenDataset]`
+  calls `require_working_copy`, then fetches up to `limit` packages with `CkanClient.package_search`, maps each
   with `_ckan_package_to_dataset`, and calls `store.put(datasets)`. It then
   records the portal's `CkanClient.alternate_languages()` with
   `store.add_language_alternates(..., source=base_url)`. When the schema lists
@@ -64,6 +67,11 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
   label of its own (GH-83).
 
 Public in their modules, not re-exported by the package:
+
+- `sdmx.require_working_copy(store, call) -> WorkingCopy` returns *store*
+  when it is a `WorkingCopy`, and otherwise raises `TypeError` naming *call*
+  and `Catalog.create(path, exist_ok=True).product(id).working_copy()`.
+  `ckan.py` imports it from `sdmx.py`.
 
 - `sdmx.ObservationSource` is a `Protocol` with one method,
   `obs(flow: SdmxUrn[Dataflow], /) -> ObsQuery`. `sdmxlib.RestRegistry` and
@@ -90,10 +98,18 @@ Internal helpers that tests import directly:
   the package has no string `id`. Every other field falls back to a default;
   an organization with neither slug nor UUID gives no publisher (GH-94).
   `regions` is the `geographic_region` scheme that `_parse_spatial` maps
-  codes through; other region text is stored under `und`.
+  codes through; other region text is stored under `und`. Each entry of the
+  package's `language` field passes through `_tag`, the normalisation text
+  keys get, so `OpenDataset.language` spells a tag as every multilingual
+  field does; a malformed entry is dropped and duplicates are removed, first
+  kept (GH-102).
 
 ## Invariants
 
+- Every ingest function writes into a `WorkingCopy` only. `ingest_sdmx`,
+  `ingest_sdmx_registry`, `ingest_data` and `ingest_ckan` pass their *store*
+  through `require_working_copy`, so an `EditionView` raises `TypeError`
+  before anything is written. A sealed edition is never written.
 - An `AggregateDataset` links to sdmxlib's tables through
   `sdmx_dataflow_urn` only. Structural queries JOIN through that URN at query
   time, so ingest copies no codes, codelists or DSD components into the
@@ -104,9 +120,10 @@ Internal helpers that tests import directly:
 - Catalog identifiers for SDMX datasets have the form `AGENCY:ID(VERSION)`.
   `ingest_data` parses this form with `_IDENTIFIER_RE` and derives the lake
   schema and table names from it.
-- `ingest_data` requires a prior `ingest_sdmx` for the same dataflow, so the
-  catalog record and the DSD are stored, and a folder-mode `Catalog`, where
-  `open()` ATTACHes the DuckLake as `lake`.
+- `ingest_data` requires a prior `ingest_sdmx` into the same working copy,
+  so the catalog record and the DSD are stored. statcatlib attaches no lake
+  of its own: the observations go into the edition's DuckLake through the
+  working copy's registry.
 - `ingest_data` stores the long layout (one row per observation, one column
   per DSD component). The `DataflowBinding` maps each component to a
   same-named column, and a pivoted table cannot be read through it (GH-29).
@@ -139,22 +156,23 @@ Internal helpers that tests import directly:
 
 ## Side Effects
 
-- `ingest_sdmx` and `ingest_sdmx_registry` write sdmxlib's `sdmx` schema
-  through `store.registry.ingest()` and upsert rows in the `statcat` schema
+- `ingest_sdmx` and `ingest_sdmx_registry` write the edition's `sdmx` schema
+  through `store.registry.ingest()` and upsert rows in its `statcat` schema
   through `store.put()`. Their `bulk_load()` block raises DuckDB's
   `wal_autocheckpoint` to 1 GB and runs one `CHECKPOINT` on exit.
 - `ingest_data` makes network calls through `reg.obs(...)` when `reg` is a
-  `RestRegistry`, writes or replaces a table in the DuckLake (`lake` schema),
-  adds a `DataflowBinding` to the co-located `LocalRegistry`, and upserts the
-  dataset row.
+  `RestRegistry`, writes or replaces a table in the edition's DuckLake
+  through `store.registry.write_observations`, adds a `DataflowBinding` to
+  the working copy's `LocalRegistry`, and upserts the dataset row.
 - `ingest_ckan` and `CkanClient` make HTTP GET requests to
   `<base_url>/api/3/action/package_search`. `CkanClient._get` raises
   `httpx.HTTPStatusError` on an HTTP error, `TypeError` when the body is not a
   JSON object, and `RuntimeError` when CKAN reports `success: false`.
   `ingest_ckan` upserts its datasets with `store.put()` outside a
   `bulk_load()` block.
-- None of these functions rebuild the search index. Run
-  `Catalog.build_index()` after ingest, and publish a bundle after that.
+- None of these functions rebuild the search index. `WorkingCopy.seal`
+  rebuilds it from the edition's rows; call `wc.build_index()` after ingest
+  to search through `wc.view()` before the seal.
 
 ## Verification
 

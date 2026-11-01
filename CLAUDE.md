@@ -47,10 +47,12 @@ src/
     │   ├── licence.py       # LicenceDocument
     │   ├── skos.py          # Concept, ConceptRef, ConceptScheme
     │   └── types.py         # Shared types, InternationalString re-export
-    ├── store/          # DuckDB-backed query engine
+    ├── store/          # DuckDB-backed query and write engine over one edition
     │   ├── __init__.py
-    │   ├── store.py         # Catalog
-    │   ├── schema.py        # DDL: catalog namespace, MAP columns
+    │   ├── store.py         # _Store (private engine), EditionView, QueryBuilder
+    │   ├── working_copy.py  # WorkingCopy, Edition, the journal rule, the seal
+    │   ├── inventory.py     # InventoryWriter: catalog.json, inventory/, CURRENT
+    │   ├── schema.py        # DDL: statcat namespace, MAP columns, use_statcat
     │   ├── lance.py         # LanceDB search index (BM25 + vector)
     │   ├── scopes.py        # Scope-based graph traversal
     │   ├── row.py           # Row — dict returned by .select() projections
@@ -62,10 +64,12 @@ src/
     │   └── ckan.py          # CkanClient, ingest_ckan()
     ├── cli/            # The `statcat` command (Typer): build-index
     │   └── __init__.py
+    ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
+    ├── checks.py       # Seal checks: SealCheck, conf_status
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
     ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog
-    ├── testing.py      # synthetic_catalog() — unsealed statcat editions of any shape
+    ├── testing.py      # temporary_catalog(); synthetic_catalog() -> a sealed Edition
     ├── urn.py          # Convenience URN builders for SDMX artefacts
     └── __init__.py     # Public API re-exports
 ```
@@ -88,40 +92,80 @@ src/
 
 ### Query surface
 
-The `Catalog` is a single concrete class backed by DuckDB. No ABC, no
-separate implementations. DuckDB supports both in-memory and persistent storage:
+A `Catalog` (`catalog.py`) is a directory of products, each a chain of
+immutable editions. Two class methods return one, and the constructor raises
+`TypeError` naming them:
 
 ```python
-cat = Catalog()                    # in-memory (DuckDB :memory:)
-cat = Catalog("catalog_folder")    # persistent folder-based
+cat = Catalog.create("catalog_dir", exist_ok=True)  # writable; creates or reopens
+cat = Catalog.open("catalog_dir")                   # read-only; writes nothing
 ```
 
-**Construction is cheap and does not open the database.** `Catalog(uri)` only
-stashes the URI and configuration; the DuckDB connection opens on `.open()`
-or on entering a `with` block. Querying an unopened catalog raises
-`RuntimeError`. Always use it as a context manager:
+`statcatlib.testing.temporary_catalog()` creates a writable catalog in a
+temporary directory, in place of statcatlib 0.11's `Catalog(":memory:")`.
+
+A product's working copy, its one unsealed edition, takes the writes, and an
+`EditionView` serves the reads:
 
 ```python
-with Catalog("catalog_folder") as cat:
-    cat.query(AggregateDataset).limit(5).collect()
+with Catalog.create("catalog_dir", exist_ok=True) as cat:
+    wc = cat.product("lfs").working_copy()
+    ingest_sdmx(wc, registry)
+    wc.seal()
+
+with Catalog.open("catalog_dir") as cat:
+    view = cat.product("lfs").view()
+    view.query(AggregateDataset).limit(5).collect()
 ```
 
-`Catalog(path).open()` is open-or-create: it creates the catalog folder if it
-does not exist and opens it otherwise. Use `Catalog.from_connection(conn)` to
-wrap an existing DuckDB connection (e.g. one shared with sdmxlib).
+- `Catalog.product(id)` returns a `Product`; the id names a directory, so it
+  holds only letters, digits, `.`, `_` and `-`. `Catalog.products()` lists
+  the products with a live edition, and `Catalog.refresh()` re-reads the
+  Inventory. `Catalog.close()` closes every view the catalog returned.
+- `Product.view(*, embedding_model=None, query_prefix="")` returns an
+  `EditionView` over the live edition as of the last `refresh()`. The view
+  stays on that edition; a process that follows the live edition calls
+  `view()` again. A product with no live edition raises
+  `NoLiveEditionError`.
+- `Product.working_copy(*, lifecycle="revisable", resume=False,
+  embedding_model=None, document_prefix="", query_prefix="")` returns a
+  `WorkingCopy`. On a catalog from `open` it raises `RuntimeError`. A
+  product with an unsealed edition raises `WorkingCopyExistsError` unless
+  `resume=True`, and one recorded with another lifecycle raises
+  `InventoryRuleError(rule="lifecycle")`.
+- `WorkingCopy` holds the write methods: `put`, `put_concept`,
+  `add_lineage`, `add_language_alternates`, `bulk_load`, `transaction` and
+  `build_index`. `wc.registry` is the edition's writable
+  `sdmxlib.LocalRegistry`: structures through `ingest`, observations through
+  `write_observations`. `wc.view()` reads the working copy's own writes.
+  `seal(checks=())` returns an `Edition`, `close()` leaves the edition
+  unsealed for `working_copy(resume=True)`, and `discard()` deletes it. After
+  a seal or a discard, every method on the working copy and on its views
+  raises `WorkingCopyClosedError`.
+- `EditionView` holds the read methods and no write method: the four query
+  operations below, the label helpers, the scopes, the index properties and
+  `registry`, sdmxlib's read surface (`get`, `query`, `obs`).
+- `Catalog` names the replacement of a moved query method:
+  `cat.query(...)` raises `AttributeError` naming
+  `cat.product(id).view().query`. `Catalog.search` and `Catalog.facets`
+  raise `NotImplementedError`; search and facets run on one product's view.
 
-Four query operations:
+`WorkingCopy` and `EditionView` both delegate to one private class, `_Store`
+in `store/store.py` (design decision P8).
+
+Four query operations on `EditionView`:
 
 1. `get(cls, id)` → direct lookup by identifier (generic, narrows return type)
 2. `query(cls, **filters)` → structured query, returns `QueryBuilder` for
    chaining (generic, narrows return type)
-3. `search(text)` → BM25 search via LanceDB (requires folder-mode with `statcatlib[search]`)
+3. `search(text)` → BM25 search via LanceDB (requires `statcatlib[search]`
+   and an index in the edition's `search/`)
 4. `facets(*fields)` → aggregation counts per field value (not generic,
-   counts across all datasets)
+   counts across all the edition's datasets)
 
 `search()` and `facets()` are intentionally not generic — searching and
-counting should span the whole catalog. Use `query(AggregateDataset)` when
-you need type-narrowed results.
+counting span the whole edition. Use `query(AggregateDataset)` when you need
+type-narrowed results.
 
 `QueryBuilder` supports chaining: `.filter()`, `.from_ids()`, `.search()`,
 `.hybrid_search()`, `.include()`, `.full()`, `.sort_by()`, `.limit()`,
@@ -193,8 +237,8 @@ MAP column filters in `statcatlib.query`:
 - Convenience functions: `has_spatial(label, lang=)`, `has_keyword(kw, lang=)`,
   `title_contains(text, lang=)`, `description_contains(text, lang=)`.
 
-Scope-based traversal supports `CodelistsScope` (via `store.codelists`
-property) parallel to `ThemesScope` (`store.themes`). Both support
+Scope-based traversal supports `CodelistsScope` (via `view.codelists`
+property) parallel to `ThemesScope` (`view.themes`). Both support
 `.enrich()` with `sc.each("datasets")` expressions. `CodelistScope` also
 has `.label(lang)` for quick name lookup via `sdmx.localized_text`.
 
@@ -216,12 +260,12 @@ methods fall back to the code ID when the language has no entry.
 **Lazy graph traversal** — `DatasetScope.upstream()`, `.downstream()`, and
 `.related(edge)` return `QueryBuilder[BaseDataset]` (not `list[BaseDataset]`).
 They collect the matching IDs via SQL, then call
-`self._store.query(BaseDataset).from_ids(identifiers)`. Callers chain
+`self._store.query(BaseDataset).from_ids(identifiers)` on the `_Store`. Callers chain
 `.filter()`, `.include()`, `.sort_by()` etc. before calling a terminal.
 
-### Storage — shared DuckDB database
+### Storage — one DuckDB database per edition
 
-One DuckDB file, two schema owners:
+Each edition's `metadata.duckdb` holds two schema owners:
 
 - **`statcat` schema** — catalog star schema (`store/schema.py`): `dataset`,
   `agent`, `contact`, `frequency`, `licence`, `standard`, `concept_scheme`,
@@ -255,53 +299,99 @@ One DuckDB file, two schema owners:
   An absent reference is `NULL`, not `''` — never compare against the
   empty string here.
 
-  sdmxlib treats this schema as a cache and migrates it by dropping it.
-  Here it is half the catalog, so `Catalog.open()` and `from_connection()`
-  refuse with `IncompatibleCatalogError` when the stored `sdmx._meta`
-  version differs from sdmxlib's and `sdmx.artefact` holds rows
-  (`_refuse_sdmx_schema_rebuild` in `store/store.py`). An sdmxlib that bumps
-  its store schema therefore means rebuilding every catalog. Since 0.71
-  sdmxlib refuses too (`sl.StoreSchemaError`, sdmxlib GH-57); the guard
-  stays because it runs first and names the catalog, not the cache.
+  sdmxlib refuses an edition on another store schema with
+  `sdmxlib.StoreSchemaError`: `LocalRegistry.edition` on `Product.view`'s
+  path, and `LocalRegistry.build` on `Product.working_copy`'s. statcatlib
+  runs no `sdmx` guard of its own. An sdmxlib that bumps its store schema
+  therefore means rebuilding every catalog.
 
-  The `statcat` schema has the same guard (`_refuse_statcat_schema_mismatch`,
-  GH-39): `statcat._meta` records `schema.SCHEMA_VERSION` when the schema is
-  created, and an open refuses any other value before running DDL. Bumping
-  `SCHEMA_VERSION` therefore also means rebuilding every catalog.
+  The `statcat` schema has its own guard (`_refuse_statcat_schema_mismatch`,
+  GH-39), which `_Store._over` runs, so `Product.view` and
+  `Product.working_copy` both run it. `statcat._meta` records
+  `schema.SCHEMA_VERSION` when the schema is created in a product's first
+  edition; later editions copy it with `metadata.duckdb`. The guard refuses
+  any other value, or none, with `IncompatibleCatalogError`, and an edition
+  with no `statcat` schema raises `RuntimeError`. Bumping `SCHEMA_VERSION`
+  therefore also means rebuilding every catalog.
 
-**Edition contract** — sdmxlib owns an edition's `manifest.json`
-(`sdmxlib.edition`, sdmxlib GH-250): an `edition_id` per sealed edition,
-which caches key on, and digests per file. statcatlib adds a `statcat`
-extension section (dataset count, search layout) built by
-`catalog_section(cat)` and passed to `sdmxlib.edition.seal`, and
-`check_catalog`, which runs as the `statcat` extension of
-`sdmxlib.edition.check_edition`. Seal **after** `build_index()`, with the
-catalog and its registry closed: any later write to the edition fails the
-files check. So nothing on the open or search path may write to an edition —
-the FTS index is reused as found, never rebuilt by a query (GH-3). Phase 2a
-S1 removed `publish_bundle`, `check_bundle`, `open_bundle` and the data-path
-policies; S2 adds the edition writer (`docs/design/phase-2a-catalog-editions.md`).
+**Names inside one engine** — a `Catalog` attaches every edition it views to
+one `sdmxlib.EditionEngine`. `_Store._cursor()` runs
+`USE "<catalog_name>".statcat` on each per-thread cursor
+(`schema.use_statcat`), so unqualified and two-part names (`statcat.dataset`,
+`sdmx.code`) resolve inside that edition's catalog. Every
+`information_schema` query filters by `current_database()`. New SQL goes
+through `_cursor()`, never through a raw connection.
+
+**Edition contract** — sdmxlib owns the documents: `catalog.json`, `CURRENT`
+and the Inventory's roots and leaves (`sdmxlib.inventory`), and each
+edition's `manifest.json` (`sdmxlib.edition`). statcatlib writes the
+Inventory and seals editions:
+
+- **The Inventory writer.** `InventoryWriter` (`store/inventory.py`) is the
+  only code that writes `catalog.json`, `inventory/` and `CURRENT`. It
+  creates each file exclusively: a staged file, fsync, `os.link` to the name,
+  unlink, fsync the directory. It replaces `CURRENT` only with a higher
+  `seq`. `commit(change, *, kind, reason)` re-reads the head and re-applies
+  `change` after each lost race, and raises `InventoryContentionError` after
+  `MAX_RACES` (8). sdmxlib's refusals become `InventoryRuleError`, and a
+  `fast-forward` refusal becomes `NonFastForwardError`. `Catalog.create`
+  refuses a filesystem without hard links.
+- **Seal steps.** `WorkingCopy.seal(checks=())` settles the journal; runs
+  the checks against `wc.view()` (a finding raises `SealCheckError` and
+  leaves the working copy open); raises `NonFastForwardError` when its base
+  is no longer the live edition; rebuilds the search index from the
+  edition's rows and drops the carried tables; computes the `statcat`
+  section with `catalog_section(store)`; closes the store and registry;
+  calls `sdmxlib.edition.seal`, which writes the journal entry and then the
+  manifest; records the edition in one Inventory commit, live when the
+  catalog's embargo is off; and clears the journal entry.
+- **The journal rule.** `settle_journal` (`store/working_copy.py`; its
+  module docstring has the table) runs when a working copy starts or
+  resumes, at the start of a seal and after its record. Against the newest
+  root it clears an entry whose edition the root names or tombstones, or
+  whose edition has no manifest; it records a sealed, unrecorded edition and
+  clears the entry; it clears the entry of a refused record with a WARNING;
+  and it keeps the entry on `InventoryContentionError`. An unreadable entry
+  raises `JournalError`.
+- **One seal per edition.** A product has one working copy at a time, and
+  each working copy seals once into one edition; the batched
+  `Catalog.seal` arrives in S2b. Nothing writes to a sealed edition: a
+  `_Store` over one is not writable, every write method (`add_lineage`
+  included) raises `RuntimeError` through `_require_writable`, and the FTS
+  index is reused as found, never rebuilt by a query (GH-3).
+- **Section format 3.** The manifest's `statcat` section
+  (`bundle.STATCAT_SECTION_FORMAT`) holds `format`, `kind`,
+  `statcatlib_version`, `datasets` and `search`. `kind` is `"data"`;
+  `"structure"` is reserved for Phase 3, and `check_catalog` refuses a
+  structure edition that binds a dataflow to observations. `check_catalog`
+  runs as the `statcat` extension of `sdmxlib.edition.check_edition`.
+
+`docs/catalog-format.md` specifies the layout and the section, and
+`docs/design/phase-2a-catalog-editions.md` is the design.
 
 **Annotation overlays and search** — `build_index()` reads
 `SEARCH_ANNOTATION_TYPES` (`statcat:searchExclude`, `statcat:searchContext`,
 `skos:altLabel`) and records their `annotation_fingerprint` in
-`search/index.json` (`Catalog.index_annotations`; `statcat` section format
-2). An overlay folded into the store changes the fingerprint: `open()`
-**warns** and `check_catalog` reports a finding, until `build_index()` is run.
-Never rebuild automatically and never make the open fail — a decision
-recorded on GH-3. Serve-time overlays are flagged statically by
+`search/index.json` (`EditionView.index_annotations`; the section's
+`search.annotations`). An overlay folded into the store changes the
+fingerprint: `Product.view()` and `Product.working_copy()` **warn** and
+`check_catalog` reports a finding, until `build_index()` is run. Never
+rebuild automatically and never make the open fail — a decision recorded on
+GH-3. Serve-time overlays are flagged statically by
 `overlay_affects_search`.
 
-statcatlib creates its own tables via `store/schema.py:create_schema(conn)` which
-creates the `statcat` schema and returns a cursor with
-`search_path='statcat'`. sdmxlib's `LocalRegistry` (reachable as `cat.registry`)
-handles its own `sdmx` schema. Both write to the same connection. statcatlib's SQL
-JOINs freely across both sets of tables.
+`WorkingCopy` runs `schema.create_schema(conn, catalog_name)` on a product's
+first edition. It creates the `statcat` schema in that edition's catalog and
+returns a cursor pointed at it. sdmxlib's registry (`wc.registry`, or
+`view.registry` for reads) handles the `sdmx` schema on the same engine.
+statcatlib attaches no lake of its own: observations live in the edition's
+DuckLake, written through `wc.registry.write_observations`. statcatlib's SQL
+JOINs freely across both schemas.
 
 **Search** — LanceDB (optional, `statcatlib[search]`) provides BM25 full-text
 search via Tantivy and optional vector search via ANN index. All search
-functionality lives in `store/lance.py`. Stores the LanceDB dataset at
-`{catalog_path}/search/`. Search text is enriched with theme labels and
+functionality lives in `store/lance.py`. Each edition holds its own index in
+`<edition_dir>/search/`. Search text is enriched with theme labels and
 dimension names (not just title/description/keywords). `build_index()`
 uses batch encoding (256 texts per `encode()` call).
 
@@ -323,28 +413,29 @@ language's stemmer. Query-side stopwords are per-language too: applied
 as one merged set, French `son`/`ton`/`sur` were stripped from English
 queries where they are ordinary words.
 
-**Index layout and rebuilds** — tables are generation-suffixed
-(`search_fr__000003`) and reached through a `{catalog_path}/search/index.json`
-manifest. A rebuild writes a whole new generation, then commits by
-replacing the manifest in one atomic move, so a crash mid-rebuild leaves
-the previous index whole and serving rather than half-swapped
-(`discard_orphans()` reclaims the abandoned tables). The manifest records
-each language's stemmer and row count, surfaced as `Catalog.index_layout`
-— the thing to check after a build, and populated for BM25-only catalogs,
-which write no `embeddings.json` at all.
+**Index layout and rebuilds** — tables are named by the edition that wrote
+them, `search_<lang>__<edition_id without hyphens>` (`search_fr__019a2b...`),
+with `<lang>` spelled as `sdmxlib.tag_alias` spells it. They are reached
+through `<edition_dir>/search/index.json`, which also records the
+`edition_id`. A working copy carries its previous edition's index
+(`LocalRegistry.build(previous=)`). A rebuild (`LanceIndex.add_bulk`) drops
+orphaned tables, writes the edition's tables, then commits by replacing the
+manifest in one atomic move, so a failure mid-rebuild leaves the carried
+index whole and serving. The seal then drops every table another edition
+wrote (`LanceIndex.drop_carried`), so a sealed index holds its own edition's
+tables only, and none for an edition with no rows. A `LanceIndex` over a
+sealed edition is opened with no `edition_id` and raises `RuntimeError` on
+any write. The manifest records each language's stemmer and row count,
+surfaced as `EditionView.index_layout` — the thing to check after a build,
+and populated for BM25-only indexes, which write no `embeddings.json` at all.
 
-`index.json` records `lance._MANIFEST_VERSION`. Bump it only when an existing
-field changes meaning or shape; a new field does not bump it. `Catalog.open()`
-refuses a manifest version above this build's with `IncompatibleCatalogError`
-(`_refuse_unreadable_index`, GH-40). That refusal is stricter than GH-3's
+`index.json` records `lance._MANIFEST_VERSION`, which is 3. Bump it only when
+an existing field changes meaning or shape; a new field does not bump it.
+`_Store._over` refuses every other version, and a manifest with none, with
+`IncompatibleCatalogError` (`_refuse_unreadable_index`, GH-40). Version 2
+and older exist only in layouts statcatlib 0.12 refuses, and a higher
+version needs a newer statcatlib. That refusal is stricter than GH-3's
 warn-and-serve rule, which covers stale indexes in a format this build reads.
-
-pinaxlib is statcatlib's former name. Indexes built before pinaxlib v5.23.0
-(a single `search` table, everything stemmed as English) are still served,
-with a warning, until `build_index()` rebuilds them. The reverse does not hold: **pinaxlib older than v5.23.0
-reading a newer index finds no table it recognises and returns zero hits
-silently**, so the library must be deployed before any bundle built with
-it.
 
 **Multilingual columns** — All multilingual text fields use
 `MAP(VARCHAR, VARCHAR)`. Any language is queryable at any time via `title['en']`
@@ -352,31 +443,40 @@ subscript syntax. No upfront language configuration needed.
 
 ### SDMX ingest
 
-Ingest is the operation that materializes a remote SDMX registry into the
-shared DuckDB. The function lives in `sources/sdmx.py`:
+Ingest is the operation that materializes a remote SDMX registry into a
+working copy's edition. The function lives in `sources/sdmx.py`:
 
 ```python
 from statcatlib.sources.sdmx import ingest_sdmx
 
-ingest_sdmx(store, registry)   # writes sdmxlib tables + catalog Dataset rows
+ingest_sdmx(wc, registry)   # writes sdmxlib tables + catalog Dataset rows
 ```
 
 Under the hood:
-1. Call `store.registry.ingest(registry)` — `registry` is a property returning
-   the co-located `sdmxlib.LocalRegistry`; this writes all SDMX artifacts into
+1. `require_working_copy` raises `TypeError`, naming `working_copy()`, for
+   anything but a `WorkingCopy`, such as an `EditionView`.
+2. Call `wc.registry.ingest(registry)` — `wc.registry` is the edition's
+   writable `sdmxlib.LocalRegistry`; this writes all SDMX artifacts into
    sdmxlib's `sdmx` schema tables.
-2. For each dataflow, create an `AggregateDataset` with `sdmx_dataflow_urn`
-   linking to the stored dataflow row, then `store.put(datasets)` inside a
-   `with store.bulk_load():` block.
+3. For each dataflow, create an `AggregateDataset` with `sdmx_dataflow_urn`
+   linking to the stored dataflow row, then `wc.put(datasets)` inside a
+   `with wc.bulk_load():` block.
+
+`ingest_data(wc, reg, identifier)` writes one dataflow's observations through
+`wc.registry.write_observations` into the edition's DuckLake.
 
 Where statcatlib uses sdmxlib:
 
 - `model/` imports only `InternationalString`, a pure value type.
 - `sources/sdmx.py` uses the SDMX model types to build catalog records
   during ingest.
-- `store/`, `query.py` and `urn.py` use the registry (`LocalRegistry`), the
-  query DSL (`sl.q`), URNs and the storage schema version.
-- `bundle.py` and `testing.py` build on `sdmxlib.edition` and
+- `store/`, `query.py` and `urn.py` use the registries (`LocalRegistry`,
+  `EditionRegistry`), the query DSL (`sl.q`), URNs and the storage schema
+  version.
+- `catalog.py`, `store/inventory.py` and `store/working_copy.py` build on
+  `sdmxlib.inventory` (the Inventory's documents and rules) and
+  `sdmxlib.edition` (build, seal, journal, discard).
+- `bundle.py`, `checks.py` and `testing.py` build on `sdmxlib.edition` and
   `sdmxlib.testing`.
 
 ## Writing style
@@ -481,7 +581,7 @@ stating it.
 - **Storage**: `duckdb`
 - **Search**: `lancedb` (optional, BM25 FTS via Tantivy + ANN vector index)
 - **HTTP**: `httpx`
-- **SDMX dependency**: `sdmxlib` (ingest, store, query and bundles; the domain model takes only `InternationalString`).
+- **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
   caps each suite dependency below its next minor (`sdmxlib>=0.80.0,<0.81`),
   and the PR that adopts a new minor raises the cap (GH-67).
