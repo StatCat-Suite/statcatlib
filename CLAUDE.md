@@ -345,6 +345,13 @@ Inventory and seals editions:
   calls `sdmxlib.edition.seal`, which writes the journal entry and then the
   manifest; records the edition in one Inventory commit, live when the
   catalog's embargo is off; and clears the journal entry.
+- **The batched seal.** `Catalog.seal(working_copies, *, checks=())` runs
+  those steps for one working copy per product in three passes: every
+  pre-check (journal, checks, fast-forward) before any sdmxlib seal, then
+  each seal, then one Inventory commit that leaves out each product sdmxlib's
+  rules refuse. It returns `SealOutcomes(sealed, refused)`, keyed by product
+  id. A crash during a batch can leave its products recorded across several
+  versions, each by its product's next `working_copy()`.
 - **The journal rule.** `settle_journal` (`store/working_copy.py`; its
   module docstring has the table) runs when a working copy starts or
   resumes, at the start of a seal and after its record. Against the newest
@@ -354,8 +361,7 @@ Inventory and seals editions:
   and it keeps the entry on `InventoryContentionError`. An unreadable entry
   raises `JournalError`.
 - **One seal per edition.** A product has one working copy at a time, and
-  each working copy seals once into one edition; the batched
-  `Catalog.seal` arrives in S2b. Nothing writes to a sealed edition: a
+  each working copy seals once into one edition. Nothing writes to a sealed edition: a
   `_Store` over one is not writable, every write method (`add_lineage`
   included) raises `RuntimeError` through `_require_writable`, and the FTS
   index is reused as found, never rebuilt by a query (GH-3).
@@ -394,6 +400,14 @@ functionality lives in `store/lance.py`. Each edition holds its own index in
 `<edition_dir>/search/`. Search text is enriched with theme labels and
 dimension names (not just title/description/keywords). `build_index()`
 uses batch encoding (256 texts per `encode()` call).
+
+**Embedding reuse** — each embedded search row records `text_sha256`
+(`lance.text_sha256`: the SHA-256 of `[model, document_prefix, text]` as a
+JSON array). `build_index` reads the stored vectors
+(`LanceIndex.carried_vectors`) before `add_bulk` replaces the tables, and
+encodes only the texts whose hash has no vector, so a seal with unchanged
+text calls `encode` zero times (RFC D21). The model name is `model_name`, or
+the carried `embeddings.json`'s; without either nothing is reused.
 
 **One table per language** — the search index is not one table but one
 per language, each with its own Tantivy tokenizer: French text stemmed

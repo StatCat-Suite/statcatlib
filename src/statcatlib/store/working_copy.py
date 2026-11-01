@@ -281,6 +281,14 @@ def settle_journal(writer: InventoryWriter, product_dir: Path, product_id: str, 
 
 
 @frozen
+class _Sealed:
+    """An edition sealed by sdmxlib and not yet recorded, with the store schema its manifest names."""
+
+    edition: Edition
+    schema_version: str
+
+
+@frozen
 class _Parts:
     """What `WorkingCopy._start` hands its constructor."""
 
@@ -584,6 +592,13 @@ class WorkingCopy:
         of the last call here (the defaults when there was none), so the
         sealed index always holds the sealed rows.
 
+        A text whose `text_sha256` (model name, document prefix, text)
+        matches a stored vector takes that vector, so only new or changed
+        texts reach the encoder, and a seal with unchanged text encodes
+        nothing. Pass *model_name* whenever the model changes: it is part of
+        the hash, and without it the carried ``embeddings.json``'s name
+        stays.
+
         Args:
             embedding_model: The encoder; the working copy's when ``None``.
             progress: Called with ``(current, total)`` while texts are encoded.
@@ -607,7 +622,9 @@ class WorkingCopy:
             reference_metadataflow_urns: Index only sets of these structures.
             document_prefix: Prepended to every document before embedding.
             query_prefix: Prepended to every query before embedding.
-            model_name: The model id recorded in ``embeddings.json``.
+            model_name: The model id recorded in ``embeddings.json`` and
+                hashed into each row's ``text_sha256``; the carried one when
+                ``None``.
 
         Returns:
             The number of datasets indexed.
@@ -682,13 +699,6 @@ class WorkingCopy:
             if search_dir is not None and search_dir.is_dir():
                 shutil.rmtree(search_dir)
             return
-        carried = store.embedding_metadata
-        if carried is not None and store._embedding_model is not None:
-            log.info(
-                "%s: the seal re-encodes every text; the carried index was built with %s",
-                self._product_id,
-                carried.model,
-            )
         if self._rebuild_index is not None:
             self._rebuild_index()
         else:
@@ -703,7 +713,8 @@ class WorkingCopy:
         no longer live; rebuild the search index; compute the ``statcat``
         section; close; seal with sdmxlib (journal entry, then manifest);
         record the edition, ``live`` when the catalog's embargo is off; settle
-        the journal entry.
+        the journal entry. `Catalog.seal` runs the same steps for several
+        working copies and records them in one Inventory version.
 
         Args:
             checks: Seal checks (`statcatlib.checks.SealCheck`), run against
@@ -714,17 +725,48 @@ class WorkingCopy:
             The edition.
 
         Raises:
-            SealCheckError: A check found something.
-            NonFastForwardError: The edition's base is no longer the live
-                edition. Raised before the manifest is written, or after it
-                when a rollback lands during the seal; then the sealed edition
-                stays on disk unrecorded.
-            ManifestError: sdmxlib refused the edition, such as for a coded
-                value outside its codelist, before writing the journal entry.
-                The working copy is closed; ``working_copy(resume=True)``
-                reopens it.
+            InventoryRuleError: sdmxlib's rules refused the record after the
+                manifest was written, such as `NonFastForwardError` when a
+                rollback lands during the seal; the sealed edition stays on
+                disk unrecorded.
+            InventoryContentionError: The record lost too many races; the
+                product's next ``working_copy()`` records the edition.
+
+        Before anything is written, a check's finding raises `SealCheckError`
+        and a base that is no longer the live edition raises
+        `NonFastForwardError`; both leave the working copy open. A
+        `ManifestError` means sdmxlib refused the edition, such as for a coded
+        value outside its codelist, before writing the journal entry; the
+        working copy is closed, and ``working_copy(resume=True)`` reopens it.
         """
-        store = self._live()
+        self._precheck(checks)
+        sealed = self._seal_edition()
+        try:
+            self._writer.commit(
+                lambda full: Change(leaves={self._product_id: self._next_leaf(full, sealed)}),
+                kind="seal",
+                reason=f"seal {self._edition_id}",
+            )
+        except InventoryRuleError as exc:
+            self._unrecorded(exc)
+            raise
+        except InventoryContentionError as exc:
+            msg = f"{exc}; the edition {self._edition_id} is recorded at the next working_copy()"
+            raise InventoryContentionError(msg) from exc
+        self._recorded()
+        return sealed.edition
+
+    def _precheck(self, checks: Iterable[Callable[[EditionView], Iterable[Finding]]]) -> None:
+        """Seal steps 0 to 2: settle the journal, run *checks*, and refuse a base that is no longer live.
+
+        Args:
+            checks: The seal checks, run against `view`.
+
+        Raises:
+            SealCheckError: A check found something.
+            NonFastForwardError: The base is no longer the live edition.
+        """
+        self._live()
         settle_journal(self._writer, self._product_dir, self._product_id, self._lifecycle)
         findings = [finding for check in checks for finding in check(self.view())]
         if findings:
@@ -736,6 +778,18 @@ class WorkingCopy:
                 f"{live}. Discard it with discard(), then start one from the live edition with working_copy()."
             )
             raise NonFastForwardError(msg, rule="fast-forward", product=self._product_id, edition=self._edition_id)
+
+    def _seal_edition(self) -> _Sealed:
+        """Seal steps 3 to 5: rebuild the search index, compute the section, close, and seal with sdmxlib.
+
+        Returns:
+            The sealed edition, not yet recorded.
+
+        Raises:
+            ManifestError: sdmxlib refused the edition; the working copy is
+                closed, and ``working_copy(resume=True)`` reopens it.
+        """
+        store = self._live()
         self._search(store)
         section = catalog_section(store)
         edition_dir = self._registry.edition_dir
@@ -754,56 +808,66 @@ class WorkingCopy:
                 "working_copy(resume=True)"
             )
             raise
-        sha = manifest_sha256(edition_dir)
-        self._record(manifest.schema_version, sha)
-        return Edition(
-            edition_id=manifest.edition_id, product_id=self._product_id, previous=manifest.previous, manifest_sha256=sha
+        edition = Edition(
+            edition_id=manifest.edition_id,
+            product_id=self._product_id,
+            previous=manifest.previous,
+            manifest_sha256=manifest_sha256(edition_dir),
         )
+        return _Sealed(edition=edition, schema_version=manifest.schema_version)
 
-    def _record(self, schema_version: str, sha: str) -> None:
-        """Seal step 6: commit the record, then settle the journal entry by the journal rule."""
+    def _next_leaf(self, full: FullInventory | None, sealed: _Sealed) -> Leaf:
+        """Seal step 6's record: the product's next leaf in *full*, with *sealed* recorded.
+
+        Args:
+            full: The Inventory version the record lands on, or ``None``
+                before the first.
+            sealed: The edition `_seal_edition` sealed.
+
+        Returns:
+            The product's next leaf.
+
+        Raises:
+            InventoryRuleError: sdmxlib's rules refuse the record, such as a
+                base that is no longer live (`NonFastForwardError`).
+        """
         product_id, edition_id = self._product_id, self._edition_id
-
-        def change(full: FullInventory | None) -> Change:
-            leaf = full.leaf(product_id) if full is not None and product_id in full.products() else None
-            retired = {t.edition_id for t in full.retired if t.product_id == product_id} if full else set()
-            try:
-                nxt = record(
-                    leaf,
-                    product_id=product_id,
-                    kind=_KIND,
-                    lifecycle=self._lifecycle,
-                    edition_id=edition_id,
-                    previous=self._previous,
-                    manifest_sha256=sha,
-                    schema_version=schema_version,
-                    embargo=full.embargo if full is not None else False,
-                    now=datetime.now(UTC),
-                    retired=retired,
-                )
-            except TransitionError as exc:
-                raise InventoryRuleError.wrapping(exc, product=product_id, edition=edition_id) from exc
-            return Change(leaves={product_id: nxt})
-
+        leaf = full.leaf(product_id) if full is not None and product_id in full.products() else None
+        retired = {t.edition_id for t in full.retired if t.product_id == product_id} if full else set()
         try:
-            self._writer.commit(change, kind="seal", reason=f"seal {edition_id}")
-        except InventoryRuleError as exc:
-            # Refused after the manifest: the edition stays sealed and
-            # unrecorded, and its journal entry is cleared so no repair ever
-            # records it (the journal rule).
-            _edition.clear_journal(self._product_dir, edition_id)
-            log.warning(
-                "%s: the sealed edition %s was not recorded (%s); it stays on disk unrecorded, and "
-                "`statcat doctor` reports it",
-                product_id,
-                edition_id,
-                exc,
+            return record(
+                leaf,
+                product_id=product_id,
+                kind=_KIND,
+                lifecycle=self._lifecycle,
+                edition_id=edition_id,
+                previous=self._previous,
+                manifest_sha256=sealed.edition.manifest_sha256,
+                schema_version=sealed.schema_version,
+                embargo=full.embargo if full is not None else False,
+                now=datetime.now(UTC),
+                retired=retired,
             )
-            raise
-        except InventoryContentionError as exc:
-            msg = f"{exc}; the edition {edition_id} is recorded at the next working_copy()"
-            raise InventoryContentionError(msg) from exc
-        _edition.clear_journal(self._product_dir, edition_id)
+        except TransitionError as exc:
+            raise InventoryRuleError.wrapping(exc, product=product_id, edition=edition_id) from exc
+
+    def _recorded(self) -> None:
+        """After the record: clear the edition's journal entry."""
+        _edition.clear_journal(self._product_dir, self._edition_id)
+
+    def _unrecorded(self, exc: InventoryRuleError) -> None:
+        """After a refused record: clear the journal entry, so no repair records it, and log a WARNING.
+
+        The edition stays sealed and unrecorded on disk.
+        """
+        _edition.clear_journal(self._product_dir, self._edition_id)
+        log.warning(
+            "%s: the sealed edition %s was not recorded (%s); it stays on disk unrecorded, and "
+            "`statcat doctor` reports it",
+            self._product_id,
+            self._edition_id,
+            exc,
+        )
 
 
 def _build(

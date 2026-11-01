@@ -40,7 +40,7 @@ from statcatlib.sources import (
     prepare_sdmx,
 )
 from statcatlib import checks, query, urn
-from statcatlib.catalog import Catalog, Edition, NoLiveEditionError, Product
+from statcatlib.catalog import Catalog, Edition, NoLiveEditionError, Product, SealOutcomes
 from statcatlib.expr import (
     AliasedExpr,
     CountExpr,
@@ -170,6 +170,7 @@ __all__ = [
     "Row",
     "SchemeScope",
     "SealCheckError",
+    "SealOutcomes",
     "SearchResult",
     "SpatialCoverage",
     "Standard",

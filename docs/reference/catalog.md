@@ -11,6 +11,8 @@ the same surface with examples.
 
 ::: statcatlib.Edition
 
+::: statcatlib.SealOutcomes
+
 ::: statcatlib.WorkingCopy
 
 ::: statcatlib.EditionView
