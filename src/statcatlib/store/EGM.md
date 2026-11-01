@@ -27,8 +27,8 @@ modules; `statcatlib/__init__.py` re-exports `NotLoadedError` and
 
 ### `store.py`
 
-- `Catalog(uri=":memory:", *, data_path=, azure_credentials=, embedding_model=, document_prefix=, query_prefix=, read_only=False)`
-  - Lifecycle: `open()`, `close()`, context manager, `Catalog.from_connection(conn)`.
+- `Catalog(uri=":memory:", *, embedding_model=, document_prefix=, query_prefix=, read_only=False)`
+  - Lifecycle: `open()`, `close()`, context manager, `Catalog.from_connection(conn)`. `from_connection`'s private `search_dir=` gives a catalog over an edition builder's connection a `search/` directory, so `build_index` works on it.
   - Properties: `uri`, `connection`, `cursor`, `registry`, `data`, `bundle_dir`, `index_layout`, `index_annotations`, `embedding_metadata`, `embedding_model_name`, `document_prefix`, `query_prefix`.
   - Writes: `put(obj)` for a dataset, `ConceptScheme`, or a sequence of either (a publisher or creator without an `id`, or a contact point with no email, URL, phone or name, raises `ValueError` before the dataset's first write; GH-94); `put_concept()`; `add_lineage()`; `add_language_alternates(pairs, *, source)`; `bulk_load()`; `transaction()`; `build_index(...) -> int`; `attach_embedding_model()`.
   - Reads: `get(cls, id)`, `query(cls, **filters) -> QueryBuilder`, `search(text, *, kinds=, lang=, ...) -> SearchResult[Hit]`, `facets(*fields)`, `get_concept_scheme()`, `get_concept()`, `agent_labels()`, `concept_labels()`, `spatial_labels()`, `code_map()`, `codelist_for()`, `get_structure()`, `metadata_for()`, `metadata_report()`, `metadata_targets()`, `check_index_compatible()`, `language_alternates() -> list[Row]`.
@@ -80,9 +80,10 @@ modules; `statcatlib/__init__.py` re-exports `NotLoadedError` and
 - DuckDB cursors are not thread-safe. The `_c` property gives each thread its own cursor with `search_path = 'statcat'`, held in a `threading.local`.
 - `schema.first_row(conn.execute(...).fetchall())` reads a single row without leaving a DuckDB 2 result pending; a pending `fetchone()` result makes the relation API (`conn.sql`, `conn.table`) raise `ResourceInUseException` (GH-43). `store.py` still has 19 `.fetchone()` calls. Use `first_row` for new single-row reads.
 - `read_only=True` issues no DDL and no `mkdir` and attaches DuckLake `READ_ONLY`. `put`, `put_concept`, `bulk_load` and `build_index` raise `RuntimeError` through `_require_writable`. `add_lineage` has no such check, and `data.write_observations` fails with DuckDB's own error from the `READ_ONLY` attach. `read_only` is rejected with `:memory:` or with an `embedding_model`.
-- `embedding_model` requires folder mode; `data_path` is rejected for `:memory:`.
+- `embedding_model` requires folder mode. A folder catalog attaches its lake with `DATA_PATH '<uri>/parquet/'`, and `READ_ONLY` when `read_only=True`.
 - Structural queries read sdmxlib's tables by JOIN, and this package keeps no copy of codes or hierarchies. The filter SQL, including hierarchy descent over `hierarchy_applicability`, is built in `../query.py`; `store.py` compiles it through `_QueryContext`. An absent `sdmx` reference is `NULL`, never `''`.
 - `include()` accepts only names in `VALID_INCLUDE_RELS` and raises `ValueError` otherwise. Unloaded fields hold a per-field cached sentinel whose `__bool__` is `False` and whose attribute, iteration, `len` or index access raises `NotLoadedError`. A NULL foreign key yields `None` regardless of `include()`. `get()` always loads every relationship.
+- Every public `lang` parameter and `.lang()` setter passes its tag through `sdmxlib.normalize_tag` once on entry; a malformed tag raises `sdmxlib.InvalidTagError`. Internal helpers trust the value.
 - Entity terminals raise `ValueError` while `select()` or `scalars()` is active. `select()` accepts `_SELECTABLE_COLUMNS` plus the MAP columns `title` and `description`, which need `lang`.
 - SQL values are parameterized; clause structure is built from lists of strings.
 - Search uses one LanceDB table per language, each with its own Snowball stemmer and stopwords. Languages without a stemmer are indexed unstemmed. Queries on per-language tables carry no `lang` filter. A legacy single-table index (pre-pinaxlib v5.23.0) is served through a `_LanguageIndex` with `filter_lang=True`, which adds `lang = ...` to each query.

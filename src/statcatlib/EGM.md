@@ -4,12 +4,12 @@
 
 `statcatlib` is the package root. `__init__.py` re-exports the public API of
 `model`, `sources` and `store`, `NotLoadedError` and `is_unloaded` from the
-store's sentinel module, and part of `bundle` and `expr` (listed below). It
+store's sentinel module, and part of `expr` (listed below). It
 exposes `query` and `urn` as submodules (`sc.query`, `sc.urn`). The
-top-level modules hold the parts that sit across subpackages: portable bundles
-(`bundle.py`), composable query filters (`query.py`), traversal expressions
-(`expr.py`), SDMX URN builders (`urn.py`) and synthetic test bundles
-(`testing.py`).
+top-level modules hold the parts that sit across subpackages: the `statcat`
+section of an sdmxlib edition manifest (`bundle.py`), composable query filters
+(`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`)
+and synthetic test editions (`testing.py`).
 
 ## Interface
 
@@ -26,34 +26,14 @@ top-level modules hold the parts that sit across subpackages: portable bundles
 
 ### `bundle.py`
 
-Re-exported from `statcatlib`:
+Imported from `statcatlib.bundle`; nothing here is re-exported from
+`statcatlib`:
 
-- `open_bundle(bundle_uri, *, data=Auto(), access_mode=...,
-  azure_credentials=None)`: opens a bundle (the `meta.duckdb` +
-  `lake.ducklake` + `parquet/` triple) and resolves the DuckLake `data_path`
-  stamp under the `data` policy.
-- `Embedded`, `Colocated`, `At`, `Auto`: data-path policies. `Embedded` honours
-  the stamp and never writes. `Colocated` points the stamp at
-  `<bundle>/parquet/`. `At(path, *, persist=False)` attaches with
-  `OVERRIDE_DATA_PATH` for that open only, and rewrites the stamp only with
-  `persist=True` on a writable open. `Auto` chooses from the stamp.
-- `inspect_bundle(source) -> BundleInfo`: read-only diagnosis of the stamp
-  (`target`, `will_write`, `verdict`).
-- `read_current_data_path(source)`, `normalize_lake_data_path(lake_path,
-  target_data_path, *, scratch_dir=None, force=False) -> Path`: read and
-  rewrite the stamp.
-- `BundleDataPathError(RuntimeError)`: an unresolvable stamp or a refused
-  remote-to-local rewrite.
-
-Imported from `statcatlib.bundle`:
-
-- `DataPolicy`: the union type of the four policies.
-- `publish_bundle(path, *, bundle_id, producer, product=None,
-  extensions=None, provenance=None) -> Manifest`: writes sdmxlib's
-  `bundle.manifest.json` with the `statcat` section.
-- `catalog_section(path)`: builds the `statcat` manifest section.
-- `check_catalog(root, manifest, reg)`, `check_bundle(path, references=True) ->
-  Report`: sdmxlib's bundle checks plus the catalog checks.
+- `catalog_section(cat) -> dict`: builds the `statcat` manifest section from an
+  open `Catalog`, for `sdmxlib.edition.seal(..., extensions={"statcat": ...})`.
+- `check_catalog(root, manifest, reg, profile) -> list[Finding]`: the
+  `statcat` check, with sdmxlib 0.80's `Check` signature, run as an extension
+  of `sdmxlib.edition.check_edition`.
 - `overlay_affects_search(overlay, types)`: lists overlay entries that change
   search results.
 - `STATCAT_SECTION = "statcat"`, `STATCAT_SECTION_FORMAT = 2`.
@@ -91,9 +71,11 @@ Imported from `statcatlib.bundle`:
 
 ### `testing.py`
 
-- `synthetic_catalog(path, shape, *, seed=0, index=True,
-  bundle_id="synthetic") -> Manifest`: builds a reproducible published statcat
-  bundle.
+- `synthetic_catalog(path, shape, *, seed=0, index=True) -> SyntheticCatalog`:
+  builds a reproducible unsealed statcat edition over
+  `sdmxlib.testing.synthetic_edition(..., seal=False)`. The record holds the
+  open catalog (`cat`), its builder registry (`reg`) and `edition_dir`. The
+  caller closes `cat`, then `reg`, and then seals.
 
 ## Invariants
 
@@ -114,37 +96,18 @@ Imported from `statcatlib.bundle`:
   pairs relation. Where no HierarchyAssociation applies, it falls back to the
   codelist's parent chain in `sdmx.code.ancestor_ids`; that fallback is the one
   hierarchy rule statcatlib owns. Descent is strict unless `include_self=True`.
-- `publish_bundle` runs last, after `Catalog.build_index()`. The manifest
-  records each file's sha256, so a later write fails `check_bundle`.
-  Republishing mints a new token. `publish_bundle` raises `ValueError` when
-  `extensions` already holds a `statcat` section or when the search index
-  predates per-language tables.
-- `open_bundle` passes no `DATA_PATH` to `ATTACH` when it honours the stamp.
-  `Auto` rewrites only a local stamp that does not resolve, and only when
-  `<bundle>/parquet` exists or the lake holds no data files; otherwise it
-  raises `BundleDataPathError`. A remote-to-local rewrite needs `force=True`.
-- `normalize_lake_data_path` reads first: a matching stamp takes no lock and
-  issues no `UPDATE`.
-- A `read_only` open never writes the stamp, so parallel read-only workers on
-  an unmoved bundle are safe.
-- A stale stamp fails at the first observation read, after `ATTACH` succeeds.
-  `inspect_bundle` detects it in advance.
+- Seal an edition last, after `Catalog.build_index()` and `catalog_section`,
+  with the catalog and its registry closed. The manifest records each file's
+  digests, so a later write fails `check_edition`'s files check.
+- `MapCondition`, `MapFilter` and `has_spatial` pass their language tag
+  through `sdmxlib.normalize_tag`.
 - `Expr` nodes are frozen attrs objects and run no SQL themselves.
 
 ## Side Effects
 
-- Stamp rewrites (`normalize_lake_data_path`, `Colocated`, `At` with
-  `persist=True`, `Auto` on a moved bundle) take the lake write lock and `UPDATE`
-  `ducklake_metadata.data_path`.
-- On a read-only mount with `scratch_dir`, the lake file is copied into
-  `scratch_dir` and the copy is rewritten.
-- `publish_bundle` writes `bundle.manifest.json`.
-- `synthetic_catalog` writes a full bundle: sdmxlib's synthetic bundle, the
-  catalog, the search index when `index=True`, and the manifest.
-- `read_current_data_path` and `inspect_bundle` open read-only DuckDB
-  connections.
-- These modules make no network calls; remote schemes (`s3`, `gs`, `http`, …)
-  are classified as strings only.
+- `synthetic_catalog` writes an unsealed edition: sdmxlib's synthetic edition,
+  the catalog, and the search index when `index=True`. It writes no manifest.
+- These modules make no network calls.
 
 ## Verification
 

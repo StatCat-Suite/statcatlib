@@ -60,12 +60,12 @@ src/
     │   ├── __init__.py
     │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
-    ├── cli/            # The `statcat` command (Typer): build-index, bundle check/explain/rebind/attach-cmd
+    ├── cli/            # The `statcat` command (Typer): build-index
     │   └── __init__.py
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
-    ├── bundle.py       # Portable bundles — data_path policies; publish_bundle, check_bundle
-    ├── testing.py      # synthetic_catalog() — published statcat bundles of any shape
+    ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog
+    ├── testing.py      # synthetic_catalog() — unsealed statcat editions of any shape
     ├── urn.py          # Convenience URN builders for SDMX artefacts
     └── __init__.py     # Public API re-exports
 ```
@@ -231,7 +231,7 @@ One DuckDB file, two schema owners:
   `quality_annotation`, `provenance`, `variable`, `feature_type`, `author`,
   `dimension_name`, `catalog_theme_taxonomy`, `lineage`, `language_alternate`,
   `_meta`
-- **`sdmx` schema** — SDMX structural tables owned by sdmxlib (schema 2.48).
+- **`sdmx` schema** — SDMX structural tables owned by sdmxlib (schema 2.52).
   Catalogue spine (`artefact`, `localized_text`, `annotation`,
   `annotation_text`, `artefact_ref`, `fetch_scope`); item tables (`code`,
   `concept`, `category`, `agency`, `organisation_contact`, `data_provider`,
@@ -269,22 +269,25 @@ One DuckDB file, two schema owners:
   created, and an open refuses any other value before running DDL. Bumping
   `SCHEMA_VERSION` therefore also means rebuilding every catalog.
 
-**Bundle contract** — sdmxlib owns `bundle.manifest.json`
-(`sdmxlib.bundle`, sdmxlib GH-56): a `token` per publication, which caches
-key on, and a sha256 per file. statcatlib adds a `statcat` extension
-section (dataset count, search layout) via `publish_bundle`, and
-`check_bundle` = sdmxlib's checks + `check_catalog` (`statcat bundle
-check`). Publish **after** `build_index()`: any later write to the
-directory fails the files check. So nothing on the open or search path may
-write to a bundle — the FTS index is reused as found, never rebuilt by a
-query (GH-3).
+**Edition contract** — sdmxlib owns an edition's `manifest.json`
+(`sdmxlib.edition`, sdmxlib GH-250): an `edition_id` per sealed edition,
+which caches key on, and digests per file. statcatlib adds a `statcat`
+extension section (dataset count, search layout) built by
+`catalog_section(cat)` and passed to `sdmxlib.edition.seal`, and
+`check_catalog`, which runs as the `statcat` extension of
+`sdmxlib.edition.check_edition`. Seal **after** `build_index()`, with the
+catalog and its registry closed: any later write to the edition fails the
+files check. So nothing on the open or search path may write to an edition —
+the FTS index is reused as found, never rebuilt by a query (GH-3). Phase 2a
+S1 removed `publish_bundle`, `check_bundle`, `open_bundle` and the data-path
+policies; S2 adds the edition writer (`docs/design/phase-2a-catalog-editions.md`).
 
 **Annotation overlays and search** — `build_index()` reads
 `SEARCH_ANNOTATION_TYPES` (`statcat:searchExclude`, `statcat:searchContext`,
 `skos:altLabel`) and records their `annotation_fingerprint` in
 `search/index.json` (`Catalog.index_annotations`; `statcat` section format
 2). An overlay folded into the store changes the fingerprint: `open()`
-**warns** and `check_bundle` reports a finding, until `build_index()` is run.
+**warns** and `check_catalog` reports a finding, until `build_index()` is run.
 Never rebuild automatically and never make the open fail — a decision
 recorded on GH-3. Serve-time overlays are flagged statically by
 `overlay_affects_search`.
@@ -373,7 +376,7 @@ Where statcatlib uses sdmxlib:
   during ingest.
 - `store/`, `query.py` and `urn.py` use the registry (`LocalRegistry`), the
   query DSL (`sl.q`), URNs and the storage schema version.
-- `bundle.py` and `testing.py` build on `sdmxlib.bundle` and
+- `bundle.py` and `testing.py` build on `sdmxlib.edition` and
   `sdmxlib.testing`.
 
 ## Writing style
@@ -480,7 +483,7 @@ stating it.
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query and bundles; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
-  caps each suite dependency below its next minor (`sdmxlib>=0.72.0,<0.73`),
+  caps each suite dependency below its next minor (`sdmxlib>=0.80.0,<0.81`),
   and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.
