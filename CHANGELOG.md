@@ -2,6 +2,81 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-11-02
+
+A catalog is now a directory of products, each a chain of immutable editions,
+with an Inventory that records which edition of each product is live.
+`Catalog`, `Product`, `WorkingCopy` and `EditionView` replace the single
+`Catalog` store, `CatalogAdmin` changes what is live, and `statcat
+verify-catalog`, `statcat doctor` and `statcat prune` check, report on and
+trim a catalog. statcatlib now requires sdmxlib `>=0.81.0,<0.82`.
+
+**Upgrading:** statcatlib 0.12 refuses every 0.11 catalog and 0.72 bundle,
+and there is no migrator: rebuild each catalog by re-ingesting it. Serve a
+0.12 catalog with sdmxlib-rest 0.9.0 or later. The
+[upgrading guide](https://statcat-suite.github.io/statcatlib/upgrading/)
+maps every removed name to its replacement.
+
+### Breaking Changes
+
+- **catalog**: Replace `Catalog` with `Catalog`, `Product`, `WorkingCopy` and
+  `EditionView`; a working copy is written and sealed into an edition, and
+  `Catalog.open` is read-only (GH-102)
+- Adopt sdmxlib 0.80 and delete the bundle API and the data-path code
+  (GH-101); require sdmxlib 0.81 (GH-104)
+- Stop using English as an identifier: a publisher or creator needs an id,
+  and contact ids change (GH-94)
+- **ckan**: Keep every language tag and drop invented English (GH-84)
+
+### Features
+
+- **catalog**: Write the Inventory, and seal one product or several in one
+  Inventory version (GH-102, GH-103)
+- **admin**: Add `CatalogAdmin` with `rollback`, `release`, `cancel`,
+  `set_embargo`, `describe` and `prune`, and `Catalog.description`
+  (GH-104, GH-105)
+- **cli**: Add `statcat verify-catalog`, `statcat doctor` and `statcat prune`
+  (GH-105)
+- **search**: Reuse a carried vector whose text hash matches, when
+  `build_index` is given `model_name` (GH-103)
+- **cli**: Add `statcat build-index --lifecycle` (GH-102)
+
+### Bug Fixes
+
+- **search**: Record the annotation fingerprint for an edition with no rows
+  (GH-105)
+- **search**: Name the carried embedding model when a seal re-encodes
+  (GH-102)
+- **store**: Check the statcat schema before DDL on a resumed first edition
+  (GH-102)
+- **search**: Drop orphaned language tables in `build_index` and report them
+  in `check_catalog` (GH-41)
+- **store**: Refuse a catalog whose statcat schema is another version (GH-39)
+- **search**: Refuse a search index whose manifest version this build does
+  not read (GH-40)
+- **store**: Leave no unfinished result on the shared connection (GH-43)
+- **query**: Add `lang` to `QueryBuilder.search` and `hybrid_search` (GH-60)
+- **query**: Rank only filtered datasets in `QueryBuilder` search (GH-59)
+- **query**: Validate `distribution()` and `has_service()` keys (GH-71)
+- **store**: Bind every value in bulk bridge inserts (GH-89)
+- **ckan**: Store `geographic_region` codes as concept identifiers (GH-83)
+- **search**: Drop GitLab issue numbers from three warnings (GH-28)
+
+### Documentation
+
+- Add the upgrading guide, the catalog format specification
+  (`catalog-format.md`), and pages for `CatalogAdmin`, the tools and how
+  search works.
+- Add the RFCs for products, editions and the Inventory and for language
+  tags, and the Phase 2a design (GH-96).
+- Adopt the suite site block, generate the API reference (GH-56), add EGM
+  contracts for the package tree, and drop issue references and history
+  from docstrings and comments (GH-28).
+
+### Miscellaneous
+
+- **lint**: Turn off SLF001 suite-wide (GH-67)
+
 ## [0.11.0] - 2026-10-23
 
 Fixes `ingest_data`, whose observations could not be read back. Up to 0.10.1

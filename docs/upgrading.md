@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## 0.12.0 (unreleased): catalogs of products and editions, on sdmxlib 0.81
+## 0.12.0: catalogs of products and editions, on sdmxlib 0.81
 
 statcatlib requires `sdmxlib>=0.81.0,<0.82`. sdmxlib's
 [upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists
@@ -140,6 +140,27 @@ arguments: an `EditionRegistry` and the `check_edition` profile.
 
 A deployment that keeps observations on object storage through a remote
 `data_path` stays on statcatlib 0.11 until Phase 4 brings remote editions.
+
+### Records need an identifier, and no text is invented in English
+
+- `put()` raises `ValueError` for a publisher or creator without an id,
+  where it used to hash the English (else French) name. SDMX ingest passes
+  the agency id and CKAN ingest the organization slug; a CKAN organization
+  with neither slug nor UUID now gives no publisher.
+- A contact point is identified by its email, else its URL, else its phone,
+  else every (tag, text) pair of its name, so contact ids change. A contact
+  point with none of these raises `ValueError`.
+- A dimension without a concept name is labelled by its id under `zxx`, and
+  SDMX ingest labels an unnamed agency and an unresolved concept the same
+  way, where it wrote the id as `en` (and `fr`).
+- CKAN ingest stores each language under the tag the portal sends,
+  including open.canada.ca's `en-t-fr` and `fr-t-en`, which it dropped.
+  `fallback_en` is removed, so a package with no English title no longer
+  gets its id as one. Untagged text is stored under `und`, and codes stored
+  as text (subject slugs, frequency codes) under `zxx`.
+- `ingest_ckan` records the language pairs a portal's schema declares
+  (`CkanClient.alternate_languages()`); read them with
+  `EditionView.language_alternates()`.
 
 ### Language tags are lowercase and checked
 
