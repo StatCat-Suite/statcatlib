@@ -150,8 +150,18 @@ class TestReadPath:
         document["producer_fields"] = {"tampered": True}
         manifest.write_text(json.dumps(document))
         catalog.refresh()
-        with pytest.raises(IncompatibleCatalogError, match=rf"{edition.edition_id}.*statcat verify-catalog"):
+        with pytest.raises(IncompatibleCatalogError, match=rf"{edition.edition_id}.*statcat verify-catalog") as info:
             catalog.product("p").view()
+        assert isinstance(info.value.__cause__, sl.ManifestError)
+        assert edition.manifest_sha256 in str(info.value)
+
+    def test_a_missing_manifest_is_refused(self, tmp_path: Path, catalog: sc.Catalog) -> None:
+        edition = catalog.product("p").working_copy().seal()
+        (tmp_path / "catalog" / "products" / "p" / edition.edition_id / "manifest.json").unlink()
+        catalog.refresh()
+        with pytest.raises(IncompatibleCatalogError, match=rf"{edition.edition_id}.*statcat verify-catalog") as info:
+            catalog.product("p").view()
+        assert isinstance(info.value.__cause__, sl.ManifestError)
 
     def test_editions_returns_previous(self, catalog: sc.Catalog) -> None:
         first = catalog.product("p").working_copy().seal()

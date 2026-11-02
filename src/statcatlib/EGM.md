@@ -275,9 +275,11 @@ read.
   lands on: a rollback whose `if_live` is no longer live, a release that is
   no longer a fast-forward, and a seal record computed before the embargo was
   turned on are each refused or recomputed.
-- `Product.view` hashes the live edition's `manifest.json` and raises
-  `IncompatibleCatalogError` when it differs from the `manifest_sha256` the
-  Inventory records. Every view a `Catalog` returns shares one
+- `Product.view` passes the Inventory's `manifest_sha256` to
+  `sdmxlib.LocalRegistry.edition`, which hashes the bytes of
+  `manifest.json` it parses. A missing, malformed or different manifest
+  raises sdmxlib's `ManifestError`, which `view` re-raises as
+  `IncompatibleCatalogError` naming `statcat verify-catalog`, chained. Every view a `Catalog` returns shares one
   `sdmxlib.EditionEngine`, and `Catalog.close` closes them all.
 - A seal check only reads: `seal` runs every check against `wc.view()`
   before writing anything, and any finding raises `SealCheckError`.
@@ -300,7 +302,7 @@ read.
   at INFO, and writes and removes a `.statcat-link-probe.*` file and its hard
   link.
 - `Product.view` attaches the edition to the catalog's engine
-  (`LocalRegistry.edition`). `Product.working_copy` writes as
+  (`LocalRegistry.edition(path, engine=, manifest_sha256=)`). `Product.working_copy` writes as
   `store/EGM.md` describes.
 - `synthetic_catalog` writes a whole catalog: `catalog.json`, sdmxlib's
   synthetic edition, the catalog rows, the search index when lancedb is
