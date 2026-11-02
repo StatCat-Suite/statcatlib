@@ -1,9 +1,11 @@
 """statcatlib command-line interface.
 
-Top-level entry point installed as the ``statcat`` console script. Today's
-single command is `build_index`, which builds the search index of a
-product's working copy. The CLI is intentionally thin — all real work lives
-in `statcatlib.WorkingCopy.build_index`.
+Top-level entry point installed as the ``statcat`` console script. It has
+three commands: `build_index`, which builds the search index of a product's
+working copy; `verify_catalog`, which checks a catalog's integrity; and
+`doctor`, which reports on a catalog for support. The CLI is intentionally
+thin — the work lives in `statcatlib.WorkingCopy.build_index` and
+`statcatlib.diagnostics`.
 
 Requires the ``[search]`` extra (typer + sentence-transformers + lancedb).
 """
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -34,6 +37,7 @@ from rich.progress import (
 )
 
 import statcatlib as sc
+from statcatlib import diagnostics
 from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES
 
 if TYPE_CHECKING:
@@ -110,7 +114,7 @@ def _main() -> None:
     that command and the command name becomes implicit — so
     ``statcat build-index <catalog> <product>`` would parse ``build-index``
     as the CATALOG argument. This empty callback keeps the subcommand seam
-    in place even while ``build-index`` is the only command.
+    in place whatever the number of commands.
     """
 
 
@@ -432,6 +436,68 @@ def build_index(
         f"[bold green]Done[/] — [green]{n:,}[/] datasets indexed ([{dim_str}], {elapsed:.1f}s) "
         f"in the working copy {edition} of {product}"
     )
+
+
+def _say(line: str, style: str | None = None) -> None:
+    """Print *line* as plain text: no markup, no highlighting, never wrapped, so a path stays whole."""
+    console.print(escape(line), style=style, soft_wrap=True, highlight=False)
+
+
+@app.command("verify-catalog")
+def verify_catalog(
+    path: Path = typer.Argument(..., help="Path to a statcatlib catalog (the directory holding catalog.json)."),
+) -> None:
+    """Check a catalog's integrity: its Inventory and every edition it records.
+
+    It reads the newest valid Inventory version and checks every leaf, every
+    manifest's SHA-256, and every file each manifest lists, the shared
+    ``data/`` files included (`statcatlib.diagnostics.verify_catalog`). It
+    writes nothing. It exits 0 when everything checks, 1 on any finding, each
+    printed with the file it names, and 2 when the catalog cannot be read.
+    """
+    try:
+        report = diagnostics.verify_catalog(path)
+    except diagnostics.CatalogUnreadableError as exc:
+        _say(f"Cannot read the catalog: {exc}", style="red")
+        raise typer.Exit(code=2) from None
+    if report.seq is None:
+        _say(f"{report.root} has no Inventory version yet; there is nothing to verify.")
+        return
+    for finding in report.findings:
+        _say(f"FAIL {finding}", style="red")
+    summary = (
+        f"Inventory version {report.seq}: {len(report.editions)} edition(s) checked, "
+        f"{len(report.findings)} problem(s) found."
+    )
+    if report.findings:
+        _say(summary, style="red")
+        raise typer.Exit(code=1)
+    _say(summary, style="green")
+
+
+@app.command("doctor")
+def doctor(
+    path: Path = typer.Argument(..., help="Path to a statcatlib catalog (the directory holding catalog.json)."),
+) -> None:
+    """Report on a catalog for support. It writes nothing.
+
+    The report covers a synced-folder path, the layout, ``catalog.json``,
+    ``CURRENT`` against the newest valid root, root and leaf validation,
+    unsealed editions with their start times, seal journal entries, sealed
+    editions no Inventory version names, and files a writer staged in
+    ``inventory/`` and left behind (`statcatlib.diagnostics.doctor`). It exits
+    0 when it reports no warning and 1 when it reports one.
+    """
+    report = diagnostics.doctor(path)
+    for item in report.items:
+        if item.level == "warning":
+            _say(f"WARNING {item}", style="yellow")
+        else:
+            _say(f"ok {item}")
+    if report.warnings:
+        _say(f"{len(report.warnings)} warning(s).", style="yellow")
+        raise typer.Exit(code=1)
+    _say("No warnings.", style="green")
 
 
 def main() -> None:

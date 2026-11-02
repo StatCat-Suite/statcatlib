@@ -13,7 +13,9 @@ sentinel module; and part of `expr` (listed below). It exposes `checks`,
 `query` and `urn` as submodules (`sc.checks`, `sc.query`, `sc.urn`). The
 top-level modules hold the parts that sit across subpackages: the catalog of
 products (`catalog.py`), seal checks (`checks.py`), the `statcat` section of
-an sdmxlib edition manifest (`bundle.py`), composable query filters
+an sdmxlib edition manifest (`bundle.py`), the integrity and support
+checks behind `statcat verify-catalog` and `statcat doctor`
+(`diagnostics.py`), composable query filters
 (`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`)
 and test catalogs (`testing.py`).
 
@@ -103,6 +105,32 @@ The module keeps its 0.11 name and describes editions. Imported from
   change search results.
 - `STATCAT_SECTION = "statcat"`, `STATCAT_SECTION_FORMAT = 3`,
   `PRODUCT_KINDS = ("data", "structure")`. Phase 2a seals `data` only.
+
+### `diagnostics.py`
+
+Imported from `statcatlib.diagnostics`; nothing here is re-exported from
+`statcatlib`. The `statcat` commands in `cli/` call it. Both functions only
+read.
+
+- `verify_catalog(path) -> VerifyReport`: reads `FullInventory`; reports each
+  root the read protocol skipped (`full.skipped`), each leaf that fails its
+  hash or `validate_leaf`, and for every leaf entry a `manifest.json` whose
+  SHA-256 differs from the entry's, then runs
+  `check_edition(at="publish", extensions={"statcat": check_catalog})`.
+  `VerifyReport` has `root`, `seq` (`None` before the first version),
+  `editions` and `findings` (`VerifyFinding(file, detail)`, the file a path
+  from the catalog directory) and `ok`. A path that is no directory, a legacy
+  layout, a missing or malformed `catalog.json`, or no valid root raise
+  `CatalogUnreadableError`.
+- `doctor(path) -> DoctorReport`: `layout` (`catalog`, `legacy`, `unknown`)
+  and `items`, each a `DoctorItem(topic, level, detail)` with level `info` or
+  `warning`; `warnings` and `about(topic)` filter them. Topics: `synced
+  folder`, `layout`, `catalog.json`, `CURRENT`, `inventory`, `working copy`
+  (`list_editions`), `journal` (empty entries included), `unrecorded edition`
+  (sealed, and neither named nor tombstoned by the newest version) and
+  `leftover file` (`*.tmp` in `inventory/` and `.*.tmp` in the root).
+- `synced_folder(path) -> str | None`: the sync client whose folder name
+  appears in the path or its resolved form.
 
 ### `query.py`
 
@@ -199,6 +227,8 @@ The module keeps its 0.11 name and describes editions. Imported from
   synthetic edition, the catalog rows, the search index when lancedb is
   installed, the manifest and Inventory version 1. `temporary_catalog`
   deletes its directory on exit.
+- `diagnostics.verify_catalog` opens each edition in a DuckDB engine of
+  `check_edition`'s own; neither it nor `diagnostics.doctor` writes a file.
 - These modules make no network calls.
 
 ## Verification

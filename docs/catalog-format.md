@@ -351,6 +351,7 @@ type, title and value, and each localised text's owner, position, language
 and text. Rows are hashed with MD5 and summed, so the digest does not depend
 on row order. A reader MUST treat it as opaque and compare it only for
 equality with a fingerprint statcatlib computes over the same store.
+An edition with no rows to index records it too, under an index with no languages.
 
 When the store's fingerprint differs from the recorded one, an annotation
 overlay has been folded into the store since the index was built (sdmxlib

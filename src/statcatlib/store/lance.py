@@ -1350,7 +1350,8 @@ class LanceIndex:
                 rows, which is correct whenever at least one is embedded.
             annotations: The annotations *rows* were built from. Recorded in
                 the same manifest write that commits the new tables, so
-                the two cannot disagree after a crash.
+                the two cannot disagree after a crash. With no *rows*, no
+                table is built and the manifest records them alone.
 
         Raises:
             Exception: Whatever the underlying build raised. Every table
@@ -1359,6 +1360,11 @@ class LanceIndex:
                 tables whole rather than a half-written set.
         """
         if not rows:
+            # No tables to build, but the annotations are still recorded: an
+            # edition with no rows seals with a fingerprint like any other.
+            if annotations is not None:
+                self._annotations = annotations
+                self._write_manifest(self._langs)
             return
         edition_id = self._writer()
         # Reclaim what an earlier rebuild left behind (GH-41), so the sealed

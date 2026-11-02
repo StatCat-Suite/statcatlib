@@ -62,10 +62,11 @@ src/
     │   ├── __init__.py
     │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
-    ├── cli/            # The `statcat` command (Typer): build-index
+    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
     ├── checks.py       # Seal checks: SealCheck, conf_status
+    ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
     ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog
