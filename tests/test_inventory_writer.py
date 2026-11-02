@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import sdmxlib.storage
 from sdmxlib.inventory import (
     CURRENT_NAME,
     FullInventory,
@@ -94,6 +95,24 @@ class TestExclusiveCreate:
     def test_no_staged_file_is_left(self, writer: InventoryWriter) -> None:
         writer.try_commit(None, {"a": _leaf(None, "a", 1)}, kind="seal", reason="first")
         assert not [name for name in _files(writer.root) if name.endswith(".tmp")]
+
+    def test_each_document_is_created_by_sdmxlib(
+        self, writer: InventoryWriter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """catalog.json, each leaf and each root go through `sdmxlib.storage.create_exclusive` (GH-115)."""
+        created: list[str] = []
+        real = inventory_module.create_exclusive
+
+        def spy(path: Path, data: bytes) -> None:
+            created.append(path.relative_to(writer.root).as_posix())
+            real(path, data)
+
+        monkeypatch.setattr(inventory_module, "create_exclusive", spy)
+        (writer.root / "catalog.json").unlink()
+        writer.write_catalog_json()
+        root = writer.try_commit(None, {"a": _leaf(None, "a", 1)}, kind="seal", reason="first")
+        assert real is sdmxlib.storage.create_exclusive
+        assert created == ["catalog.json", root.products["a"].leaf, root_path(1)]
 
     def test_a_kill_before_the_link_leaves_no_root(
         self, writer: InventoryWriter, monkeypatch: pytest.MonkeyPatch

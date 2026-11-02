@@ -24,6 +24,7 @@ from sdmxlib.inventory import FullInventory, LeafEntry, local_fetch, record, rol
 from sdmxlib.storage.schema import SCHEMA_VERSION
 
 import statcatlib as sc
+from statcatlib.store import inventory as inventory_module
 from statcatlib.store.inventory import Change, InventoryWriter
 from statcatlib.store.working_copy import record_journalled
 from tests.conftest import concept_of
@@ -69,7 +70,7 @@ def _after(target: Callable[..., Any], *, when: Callable[..., bool] = lambda *a,
     return killed
 
 
-def _is_root(_self: object, path: Path, _data: bytes) -> bool:
+def _is_root(path: Path, _data: bytes) -> bool:
     return path.parent.name == "inventory"
 
 
@@ -84,7 +85,7 @@ _STEPS: dict[str, Callable[[pytest.MonkeyPatch], None]] = {
     "after the manifest": lambda mp: mp.setattr("sdmxlib.edition.seal", _after(sdmxlib.edition.seal)),
     "after the leaves": lambda mp: mp.setattr(InventoryWriter, "_write_leaf", _after(InventoryWriter._write_leaf)),
     "after the root": lambda mp: mp.setattr(
-        InventoryWriter, "_create_exclusive", _after(InventoryWriter._create_exclusive, when=_is_root)
+        inventory_module, "create_exclusive", _after(inventory_module.create_exclusive, when=_is_root)
     ),
     "after CURRENT": lambda mp: mp.setattr(
         InventoryWriter, "_advance_current", _after(InventoryWriter._advance_current)
