@@ -65,6 +65,7 @@ src/
     ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
+    ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe
     ├── checks.py       # Seal checks: SealCheck, conf_status
     ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
@@ -366,6 +367,16 @@ Inventory and seals editions:
   `_Store` over one is not writable, every write method (`add_lineage`
   included) raises `RuntimeError` through `_require_writable`, and the FTS
   index is reused as found, never rebuilt by a query (GH-3).
+- **CatalogAdmin.** `CatalogAdmin.open(path)` (`admin.py`) makes the
+  operational changes: `rollback`, `release`, `cancel`, `set_embargo(*, on,
+  reason)` and `describe`. Each requires `reason`, applies one of
+  `sdmxlib.inventory`'s rules inside `InventoryWriter.commit`, so a lost race
+  re-evaluates it against the new head, and returns the version's `seq`.
+  Rules run on the local clock (design decision P1). `editions(product)`
+  lists every state. No attribute of `Catalog`, `Product` or `EditionView`
+  returns one. `describe` writes `{format_version: "3", description}` into
+  the root's `extensions.statcat` (`bundle.description_to_json`), every later
+  version carries it, and `Catalog.description` reads it.
 - **Section format 3.** The manifest's `statcat` section
   (`bundle.STATCAT_SECTION_FORMAT`) holds `format`, `kind`,
   `statcatlib_version`, `datasets` and `search`. `kind` is `"data"`;
@@ -600,7 +611,7 @@ stating it.
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
-  caps each suite dependency below its next minor (`sdmxlib>=0.80.0,<0.81`),
+  caps each suite dependency below its next minor (`sdmxlib>=0.81.0,<0.82`),
   and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.

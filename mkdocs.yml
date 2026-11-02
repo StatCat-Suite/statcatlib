@@ -114,6 +114,7 @@ nav:
     - Sources: reference/sources.md
     - Bundles: reference/bundle.md
     - Checks: reference/checks.md
+    - Catalog Administration: reference/admin.md
     - Diagnostics: reference/diagnostics.md
     - URNs: reference/urn.md
     - Testing: reference/testing.md

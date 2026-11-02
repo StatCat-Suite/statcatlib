@@ -5,12 +5,15 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## 0.12.0 (unreleased): catalogs of products and editions, on sdmxlib 0.80
+## 0.12.0 (unreleased): catalogs of products and editions, on sdmxlib 0.81
 
-statcatlib requires `sdmxlib>=0.80.0,<0.81`. sdmxlib's
+statcatlib requires `sdmxlib>=0.81.0,<0.82`. sdmxlib's
 [upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists
-its own breaking changes from 0.73 to 0.80; the ones below are those a
-statcatlib user sees.
+its own breaking changes from 0.73 to 0.81; the ones below are those a
+statcatlib user sees. sdmxlib 0.81 adds the Inventory event kind `describe`,
+which `CatalogAdmin.describe` writes. sdmxlib 0.80 and older readers skip a
+`describe` version and stay on the version before it, so upgrade every
+reader of a catalog before you describe it; sdmxlib-rest reads it from 0.9.0.
 
 A catalog is now a directory of products, each a chain of immutable
 editions, with an Inventory that records which edition of each product is
@@ -62,7 +65,7 @@ refuse a directory holding a 0.11 catalog (a root-level `meta.duckdb`), a
 | `STATCAT_SECTION_FORMAT` 2 | 3, which adds `kind`; `check_catalog` refuses format 2 |
 | `search/index.json` version 2, tables `search_<lang>__<generation>` | version 3, tables `search_<lang>__<edition_id without hyphens>`; version 2 is refused |
 
-New names: `Catalog`, `Product`, `Edition`, `EditionView`, `WorkingCopy`,
+New names: `Catalog`, `CatalogAdmin`, `Product`, `Edition`, `EditionView`, `WorkingCopy`,
 the module `statcatlib.checks` (seal checks, such as `checks.conf_status()`),
 and the errors `NoLiveEditionError`, `WorkingCopyExistsError`,
 `WorkingCopyClosedError`, `SealCheckError`, `JournalError`,
@@ -96,6 +99,23 @@ Two new commands only read a catalog
 - `statcat doctor CATALOG` reports a synced-folder path, unsealed editions,
   seal journal entries, sealed editions no Inventory version names, and files
   a writer left in `inventory/`. It writes nothing.
+
+### Rollback, embargo and the catalog description
+
+`CatalogAdmin.open(path)` makes the operational changes to a catalog
+([Catalog administration](api/admin.md)). Each takes a `reason` and writes
+one Inventory version:
+
+- `rollback(product, reason=...)` withdraws the live edition and makes the
+  edition it superseded live again. `Product.rollback` raises
+  `AttributeError` naming it.
+- `set_embargo(on=True, reason=...)` makes later seals record their editions
+  `embargoed`; `release(product, edition, reason=...)` makes one live, and
+  `cancel(product, edition, reason=...)` withdraws it. `release` uses the
+  local clock.
+- `describe(description, reason=...)` records a `CatalogDescription`'s
+  catalog-level fields, which `Catalog.description` returns.
+- `editions(product)` lists every edition in every state.
 
 ### The bundle API and the data-path policies are removed
 

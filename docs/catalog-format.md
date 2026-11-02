@@ -67,7 +67,25 @@ Storage identity enforces embargo from Phase 4, when catalogs move to object
 storage. Each Inventory version records its actor as `<os user>@<hostname>`,
 taken from the process and unauthenticated.
 
-### 1.2 Supported locations
+### 1.2 The Inventory root's `statcat` section
+
+An Inventory root's `extensions` MAY hold a `statcat` section, the catalog's
+description. `CatalogAdmin.describe` writes it in a version whose
+`event.kind` is `describe`, a kind sdmxlib 0.81 added; an older reader skips
+that root and stays on the version before it. Every later version carries
+the section unchanged. Its fields:
+
+| Field | Value |
+| --- | --- |
+| `format_version` | `"3"` |
+| `description` | The catalog-level fields of a `CatalogDescription`: `identifier`, `title`, `description`, `publisher` (`name`, `id`, `type`, `homepage`), `homepage`, `language`, `licence` (`id`, `label`, `uri`), `theme_taxonomy` (each `uri`, `label`), `issued` and `modified`. Multilingual text is an object of language tag to text, and an instant an ISO 8601 string. |
+
+A reader MUST ignore a key it does not know, in the section and in
+`description`, so a later field does not stop it. The description never holds
+datasets, services or records: those come from the live editions.
+`Catalog.description` reads the section of the version the catalog holds.
+
+### 1.3 Supported locations
 
 A catalog lives on a local disk with hard links, such as APFS, ext4 or NTFS.
 `Catalog.create` refuses a filesystem without hard links, such as exFAT,
@@ -77,7 +95,7 @@ Google Drive) or on network shares: a sync client can deliver a root without
 its leaves, or two versions of one file, and the exclusive create relies on
 a local filesystem's link semantics.
 
-### 1.3 Legacy layouts
+### 1.4 Legacy layouts
 
 `Catalog.open` and `Catalog.create` refuse a directory that holds a
 root-level `meta.duckdb` (a statcatlib 0.11 catalog), a
@@ -245,7 +263,7 @@ whose `version` is not the one it reads, or that records none, since it
 would serve that index wrongly. statcatlib raises `IncompatibleCatalogError`
 from `Product.view` and `Product.working_copy`, naming the version and the
 statcatlib release in `written_by`. Indexes of version 2 or lower exist only
-in layouts statcatlib 0.12 refuses (§1.3).
+in layouts statcatlib 0.12 refuses (§1.4).
 
 ### 4.2 Tables and languages
 
@@ -419,7 +437,8 @@ against the one the Inventory records, and refuses a mismatch with
 4. `wc.seal(checks=[...])` runs the checks, refuses a base that is no longer
    live, rebuilds the index, computes the `statcat` section, seals with
    sdmxlib (journal entry, then manifest), and records the edition: `live`
-   with embargo off.
+   with embargo off, `embargoed` with it on. `CatalogAdmin.release` makes an
+   embargoed edition live.
 5. Run `check_edition` on the result.
 
 `statcatlib.testing.synthetic_catalog(path, shape, seed=...)` runs these
