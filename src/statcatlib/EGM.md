@@ -100,8 +100,7 @@ The module keeps its 0.11 name and describes editions. Imported from
   `statcat` check, with sdmxlib 0.80's `Check` signature, run as an extension
   of `sdmxlib.edition.check_edition`. It refuses a section format other than
   3, a `kind` outside `PRODUCT_KINDS`, and a `structure` edition whose
-  manifest binds a dataflow. It skips the annotation-fingerprint check for an
-  index with no languages, which the seal of an edition with no rows writes.
+  manifest binds a dataflow.
 - `overlay_affects_search(overlay, types=None)`: lists overlay entries that
   change search results.
 - `STATCAT_SECTION = "statcat"`, `STATCAT_SECTION_FORMAT = 3`,
