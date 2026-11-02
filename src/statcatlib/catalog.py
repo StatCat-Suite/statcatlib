@@ -39,7 +39,7 @@ from sdmxlib.inventory import CATALOG_NAME, LiveEdition, LiveInventory, decode_r
 from statcatlib.bundle import description_from_root
 from statcatlib.store.inventory import Change, InventoryContentionError, InventoryRuleError, InventoryWriter
 from statcatlib.store.store import VIEW_ATTRIBUTES, EditionView, IncompatibleCatalogError, _Store
-from statcatlib.store.working_copy import Edition, SealCheckError, WorkingCopy, manifest_sha256
+from statcatlib.store.working_copy import Edition, SealCheckError, WorkingCopy
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -618,10 +618,11 @@ class Product:
     def view(self, *, embedding_model: EmbeddingModel | None = None, query_prefix: str = "") -> EditionView:
         """A read-only view of the product's live edition, as of the catalog's last `Catalog.refresh`.
 
-        It checks the edition's ``manifest.json`` against the SHA-256 the
-        Inventory records, then attaches the edition to the catalog's engine
-        (``LocalRegistry.edition``), which checks the manifest's store schema.
-        The view stays on this edition after a refresh or a rollback.
+        It attaches the edition to the catalog's engine with
+        ``LocalRegistry.edition``, which reads ``manifest.json`` once, checks
+        its SHA-256 against the one the Inventory records, and checks its
+        store schema. The view stays on this edition after a refresh or a
+        rollback.
 
         Args:
             embedding_model: The encoder the index was built with, for vector
@@ -633,27 +634,26 @@ class Product:
             The view.
 
         Raises:
-            IncompatibleCatalogError: The edition's ``manifest.json`` is not
-                the one the Inventory recorded. Its ``statcat`` schema at
+            IncompatibleCatalogError: The edition's ``manifest.json`` is
+                missing, unreadable, or not the one the Inventory recorded
+                (sdmxlib's `ManifestError`, chained). Its ``statcat`` schema at
                 another version, or a search index this build does not read,
                 raise it too, and a product with no live edition raises
                 `NoLiveEditionError`.
         """
         live = self._head()
         edition_dir = self._dir / live.edition_id
-        try:
-            found = manifest_sha256(edition_dir)
-        except FileNotFoundError:
-            found = "missing"
-        if found != live.manifest_sha256:
-            msg = (
-                f"{self._product_id}'s live edition {live.edition_id} has a manifest.json ({found}) that is not "
-                f"the one the Inventory recorded ({live.manifest_sha256}); run `statcat verify-catalog` on "
-                f"{self._catalog._root}"
-            )
-            raise IncompatibleCatalogError(msg)
         cat = self._catalog
-        registry = sdmxlib.LocalRegistry.edition(edition_dir, engine=cat._engine_for_views())
+        try:
+            registry = sdmxlib.LocalRegistry.edition(
+                edition_dir, engine=cat._engine_for_views(), manifest_sha256=live.manifest_sha256
+            )
+        except ManifestError as exc:
+            msg = (
+                f"{self._product_id}'s live edition {live.edition_id} does not hold the manifest.json the Inventory "
+                f"recorded ({exc}); run `statcat verify-catalog` on {cat._root}"
+            )
+            raise IncompatibleCatalogError(msg) from exc
         opened = False
         try:
             store = _Store._over(

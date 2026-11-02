@@ -238,10 +238,11 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `ManifestError` from `sdmxlib.edition.seal` comes before the journal entry;
   the working copy stays closed, and `working_copy(resume=True)` reopens it.
 - `InventoryWriter` is the only code that writes `catalog.json`,
-  `inventory/` and `CURRENT`. It creates each file in five steps (staged
-  file, fsync, `os.link` to the name, unlink the staged file, fsync the
-  directory), so a name never holds half a file and of two writers exactly
-  one creates a root; a leaf that exists already counts as written, since
+  `inventory/` and `CURRENT`. It creates each file with sdmxlib's
+  `sdmxlib.storage.create_exclusive` (staged file, fsync, `os.link` to the
+  name, unlink the staged file, fsync the directory), so a name never holds
+  half a file and of two writers exactly one creates a root: the loser's
+  `FileExistsError` becomes `InventoryConflictError`; a leaf that exists already counts as written, since
   its name is the hash of its bytes. It writes leaves, then the root, then
   `CURRENT`, and replaces `CURRENT` only with a higher `seq` in the same
   `restore_epoch`. `commit` re-reads the head and calls *change* again after
@@ -276,9 +277,10 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   unsealed edition directory.
 - `settle_journal` can commit an Inventory version and deletes journal
   entries.
-- `InventoryWriter` writes `catalog.json`, leaves under `inventory/leaves/`,
-  roots under `inventory/`, and `CURRENT`, each through a staged
-  `.<name>.<pid>.<uuid>.tmp` file, and fsyncs files and directories.
+- `InventoryWriter` writes `catalog.json`, leaves under `inventory/leaves/`
+  and roots under `inventory/` through `sdmxlib.storage.create_exclusive`,
+  and `CURRENT` through its own staged `.<name>.<pid>.<uuid>.tmp` file and
+  rename; each file and directory is fsynced.
 - `discard_orphans()` drops LanceDB tables the manifest does not name.
 - Emits `warnings.warn` for a quantised (stale) vector index and for changed search annotations, and logs a WARNING for an edition the journal rule cannot record.
 

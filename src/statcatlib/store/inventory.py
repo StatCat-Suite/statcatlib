@@ -5,9 +5,10 @@ transition rules (`sdmxlib.inventory`). statcatlib writes them, and this module
 is the only code that writes ``catalog.json``, ``inventory/`` and ``CURRENT``.
 It adds three things to sdmxlib's helpers:
 
-- **exclusive create**: a file is staged, fsynced, hard-linked to its name and
-  the directory fsynced, so a name never holds half a file, and two writers
-  never both create one root;
+- **exclusive create**: each document is written by
+  `sdmxlib.storage.create_exclusive`, which stages the file, fsyncs it,
+  hard-links it to its name and fsyncs the directory, so a name never holds
+  half a file, and two writers never both create one root;
 - **the ``CURRENT`` advance**: ``CURRENT`` is replaced only by a higher
   ``seq``, so a slow writer never moves it back;
 - **the retry loop**: `InventoryWriter.commit` re-reads the head and re-applies
@@ -53,12 +54,13 @@ from sdmxlib.inventory import (
     sha256_hex,
     validate_root,
 )
+from sdmxlib.storage import create_exclusive
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from sdmxlib.inventory._rules import Rule
-    from sdmxlib.storage._manifest import JsonValue
+    from sdmxlib.inventory import Rule
+    from sdmxlib.storage import JsonValue
 
 __all__ = [
     "MAX_RACES",
@@ -237,32 +239,12 @@ class InventoryWriter:
 
     # -- writing ---------------------------------------------------------
 
-    def _create_exclusive(self, path: Path, data: bytes) -> None:
-        """Create *path* holding *data*, complete before it is visible.
-
-        Five steps: write a staged file named ``.<name>.<pid>.<uuid>.tmp``,
-        fsync it, ``os.link`` it to *path*, unlink the staged file, and fsync
-        the directory. The link raises `FileExistsError` when *path* exists,
-        so of two writers exactly one creates it.
-
-        Args:
-            path: The file to create.
-            data: Its bytes.
-        """
-        staged = _stage(path, data)
-        try:
-            os.link(staged, path)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                staged.unlink()
-        _fsync_dir(path.parent)
-
     def _write_leaf(self, path: Path, data: bytes) -> None:
         """Create a leaf. One already there is the same leaf: its name is the hash of its bytes."""
         if path.exists():
             return
         with contextlib.suppress(FileExistsError):
-            self._create_exclusive(path, data)
+            create_exclusive(path, data)
 
     def _advance_current(self, root: Root, data: bytes) -> None:
         """Point ``CURRENT`` at *root*, unless it already names a version at least as new.
@@ -296,7 +278,7 @@ class InventoryWriter:
         document = CatalogDocument(
             format_version=CATALOG_FORMAT, catalog_id=catalog_id or str(uuid.uuid7()), restore_epoch=0
         )
-        self._create_exclusive(self._root / CATALOG_NAME, encode(document))
+        create_exclusive(self._root / CATALOG_NAME, encode(document))
         return document
 
     def try_commit(
@@ -350,7 +332,7 @@ class InventoryWriter:
         validate_root(root)
         data = encode(root)
         try:
-            self._create_exclusive(self._root / root_path(root.seq), data)
+            create_exclusive(self._root / root_path(root.seq), data)
         except FileExistsError as exc:
             msg = f"another writer created Inventory version {root.seq} first"
             raise InventoryConflictError(msg) from exc

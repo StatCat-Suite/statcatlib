@@ -331,8 +331,9 @@ Inventory and seals editions:
 
 - **The Inventory writer.** `InventoryWriter` (`store/inventory.py`) is the
   only code that writes `catalog.json`, `inventory/` and `CURRENT`. It
-  creates each file exclusively: a staged file, fsync, `os.link` to the name,
-  unlink, fsync the directory. It replaces `CURRENT` only with a higher
+  creates `catalog.json`, each leaf and each root with
+  `sdmxlib.storage.create_exclusive`: a staged file, fsync, `os.link` to the
+  name, unlink, fsync the directory. It replaces `CURRENT` only with a higher
   `seq`. `commit(change, *, kind, reason)` re-reads the head and re-applies
   `change` after each lost race, and raises `InventoryContentionError` after
   `MAX_RACES` (8). sdmxlib's refusals become `InventoryRuleError`, and a
@@ -617,7 +618,7 @@ stating it.
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
-  caps each suite dependency below its next minor (`sdmxlib>=0.81.0,<0.82`),
+  caps each suite dependency below its next minor (`sdmxlib>=0.82.0,<0.83`),
   and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.
