@@ -10,20 +10,20 @@ lists every change.
 statcatlib requires `sdmxlib>=0.81.0,<0.82`. sdmxlib's
 [upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists
 its own breaking changes from 0.73 to 0.81; the ones below are those a
-statcatlib user sees. sdmxlib 0.81 adds the Inventory event kind `describe`,
-which `CatalogAdmin.describe` writes. sdmxlib 0.80 and older readers skip a
-`describe` version and stay on the version before it, so upgrade every
-reader of a catalog before you describe it; sdmxlib-rest reads it from 0.9.0.
+statcatlib user sees.
+
+Serve a 0.12 catalog with sdmxlib-rest 0.9.0 or later, which reads editions
+and requires sdmxlib 0.81. Earlier sdmxlib-rest releases cannot read it.
+sdmxlib 0.81 adds the Inventory event kind `describe`, which
+`CatalogAdmin.describe` writes; sdmxlib 0.80 and older readers skip a
+`describe` version and stay on the version before it, so upgrade every other
+reader of a catalog to sdmxlib 0.81 before you describe it.
 
 A catalog is now a directory of products, each a chain of immutable
 editions, with an Inventory that records which edition of each product is
 live ([Catalog format](catalog-format.md)). statcatlib 0.12 refuses every
 0.11 catalog and 0.72 bundle, and there is no migrator: rebuild each catalog
 by re-ingesting it.
-
-The sdmxlib-rest release deployed today cannot read the catalogs statcatlib
-0.12 writes. It reads them once sdmxlib-rest GH-81 ships; until then, keep a
-catalog that sdmxlib-rest serves on statcatlib 0.11.
 
 ### Rebuild every catalog by re-ingesting
 
