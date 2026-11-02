@@ -650,7 +650,8 @@ covers every product, and §5 has no transition from a tombstone. So:
 - `CatalogAdmin.reinstate(product, edition, reason)` verifies the manifest and
   every listed file. It writes one forward Inventory version with a `restore`
   event, entering the edition as `superseded`, so making it live takes a
-  separate rollback (D28).
+  separate rollback (D28). `reinstate` moves to Phase 4 (the design's
+  decision P6, GH-98).
 - Restoring a product is: copy the bytes, reinstate, roll back.
 - A restored Inventory version is never made current. Its contents come back
   only through `reinstate`.
@@ -704,7 +705,8 @@ keeps its bytes in the Catalog, the backups and the CDN. So:
 **A corrupt or wrong Inventory version.** Readers skip an invalid root and
 alert. `CatalogAdmin.correct(from_seq=, reason=)` writes the next version from
 a known-good one, with an audit entry. Exclusive create means a bad version is
-only ever fixed by writing a new one.
+only ever fixed by writing a new one. `correct` moves to Phase 4 (the
+design's decision P6, GH-98).
 
 **Access control is a convention until identities are separated.**
 - Container RBAC can't stop the upload identity from writing `inventory/`, so
@@ -738,7 +740,8 @@ only ever fixed by writing a new one.
 - `statcat doctor` is read-only. It reports the layout, chain validity, the
   WorkingCopy, the journal and a synced-folder warning, and produces a support
   bundle.
-- A local prune comes in 2a (D32).
+- A local prune comes in 2a (D32), narrowed to one window by the design's
+  decision P7.
 - An upgrade refusal names the re-ingest steps.
 
 **Not covered yet:** rotating workload identities, CDN certificates and
@@ -765,10 +768,19 @@ appendix in the design document.
     guided errors.
   * The statcat extension carrying `CatalogDescription`, and statcat section
     format 3 with `kind: "data"`.
+  * The local prune of decision 32, as the design's decision P7 narrows it:
+    `CatalogAdmin.prune` with one `older_than` window and a dry run by
+    default, which skips a product with a WorkingCopy or a journal entry and
+    keeps every root, leaf and tombstone. The retention inequality check
+    goes with the server prune.
   * `docs/upgrading.md`.
 * **Out-of-scope non-goals:**
   * Blob storage writes, `pending/`, the release job, `release_due`,
-    `EmbargoReader`, prune and the pods' reader (Phases 4 to 6).
+    `EmbargoReader`, the server prune with its retention inequality check,
+    and the pods' reader (Phases 4 to 6).
+  * `CatalogAdmin.correct` and `CatalogAdmin.reinstate`, which move to
+    Phase 4 (the design's decision P6, GH-98). The `restore` and `correct`
+    event kinds still freeze in 2a.
   * Cross-product search and facets.
   * Moving `metadata.duckdb` into DuckLake, which needs measurements to
     reopen.
@@ -895,7 +907,8 @@ Format consequences for the sdmxlib spec PR (§11):
 - The root's `retired` tombstones are kept at least as long as backups.
 - The layout gains a place for the seal journal.
 
-All of these freeze in 2a. Phase 2a also gains `reinstate`, `correct`, prune,
-`verify-catalog` and `statcat doctor`.
+All of these freeze in 2a. Phase 2a also gains the narrow prune (P7),
+`verify-catalog` and `statcat doctor`. `reinstate` and `correct` move to
+Phase 4 (the design's decision P6, GH-98).
 
 Open for the owner: none.

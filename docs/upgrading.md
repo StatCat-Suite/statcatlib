@@ -100,7 +100,7 @@ Two new commands only read a catalog
   seal journal entries, sealed editions no Inventory version names, and files
   a writer left in `inventory/`. It writes nothing.
 
-### Rollback, embargo and the catalog description
+### Rollback, embargo, the catalog description and prune
 
 `CatalogAdmin.open(path)` makes the operational changes to a catalog
 ([Catalog administration](api/admin.md)). Each takes a `reason` and writes
@@ -116,6 +116,12 @@ one Inventory version:
 - `describe(description, reason=...)` records a `CatalogDescription`'s
   catalog-level fields, which `Catalog.description` returns.
 - `editions(product)` lists every edition in every state.
+- `prune(older_than=timedelta(days=30), reason=...)` retires superseded and
+  withdrawn editions older than the window, deletes the directories of
+  editions tombstoned for longer, and deletes `data/` files no manifest
+  lists. It skips a product with a working copy or a seal journal entry. It
+  is a dry run unless `dry_run=False`; `statcat prune CATALOG --older-than
+  DAYS --reason TEXT --apply` runs it from the command line.
 
 ### The bundle API and the data-path policies are removed
 

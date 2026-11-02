@@ -2,8 +2,9 @@
 
 `CatalogAdmin` makes the operational changes to a catalog's Inventory: it
 rolls a product back, releases or cancels an embargoed edition, turns the
-embargo on and off, and records the catalog's description. Two `statcat`
-commands check a catalog and report on it, and only read.
+embargo on and off, records the catalog's description, and prunes old
+editions. Two `statcat` commands check a catalog and report on it, and only
+read; `statcat prune` runs the prune.
 
 ## The operational object
 
@@ -34,6 +35,7 @@ change would have landed on.
 | `cancel(product, edition, *, reason)` | An embargoed edition `withdrawn` | `withdraw` |
 | `set_embargo(*, on, reason)` | The catalog's embargo setting | `embargo-change` |
 | `describe(description, *, reason)` | The catalog's description | `describe` |
+| `prune(*, older_than, reason, dry_run=True)` | Old `superseded` and `withdrawn` editions retired; see [Pruning old editions](#pruning-old-editions) | `retire` |
 
 `admin.editions(product)` lists the product's editions in every state, each
 an `EditionEntry` with its `state`, `previous`, `state_changed_at` and
@@ -137,6 +139,64 @@ editions, and the description never stores them.
 
 `statcatlib.bundle.description_to_json` and `description_from_json` convert
 the fields; `description_from_json` ignores keys it does not know.
+
+## Pruning old editions
+
+Every seal leaves the edition it supersedes on disk, so a laptop catalog
+grows with each republish. `prune` reclaims that space with one window:
+
+```python
+from datetime import timedelta
+
+report = admin.prune(older_than=timedelta(days=30), reason="reclaim disk")  # a dry run
+report.retired, report.deleted_dirs, report.deleted_files, report.skipped_products
+
+admin.prune(older_than=timedelta(days=30), reason="reclaim disk", dry_run=False)
+```
+
+It runs three steps:
+
+1. It retires each `superseded` and `withdrawn` edition that took its state
+   more than `older_than` ago, in one Inventory version with `event.kind`
+   `retire`. The Inventory keeps a tombstone for each, and
+   `admin.editions(product)` no longer lists them.
+2. It deletes the directory of each edition tombstoned more than `older_than`
+   ago. An edition retired in step 1 keeps its directory until a later run
+   finds its tombstone older than the window.
+3. It deletes each file under a product's `data/` that no `manifest.json` on
+   disk under the product lists and whose modification time is more than
+   `older_than` ago.
+
+Prune never touches a product with a working copy or a seal journal entry:
+it reports each in `skipped_products` with the reason, and retires and
+deletes nothing of it. Seal or `discard()` the working copy, or let the
+product's next `working_copy()` settle the journal, and run prune again.
+A live or embargoed edition is never retired, and prune deletes only the
+directories of tombstoned editions, so it never deletes a live, embargoed
+or unrecorded edition. It deletes no Inventory root or leaf, and tombstones
+never expire.
+
+`dry_run=True` is the default: the report lists what a real run would
+retire and delete, and nothing changes. A real run logs every deleted path
+at INFO on the `statcatlib.admin` logger. A deletion that fails, such as on
+Windows while another process has the edition open, is recorded in
+`report.failed` with its error, and the run continues; the next run tries
+the path again. `report.seq` is the version the `retire` step wrote, or
+`None` when it retired nothing. `older_than` must be positive, and a dry run
+needs a `reason` too.
+
+The same prune runs from the command line, a dry run unless `--apply` is
+given, with the window in days:
+
+```bash
+statcat prune ~/stats --older-than 30 --reason "reclaim disk"
+statcat prune ~/stats --older-than 30 --reason "reclaim disk" --apply
+```
+
+It prints one line per skipped product, retired edition, deleted path and
+failed deletion, then a summary. It exits 1 when the catalog cannot be
+opened or a deletion failed, and 2 when an option is missing, `--reason`
+included.
 
 ## Checking catalogs from the command line
 
