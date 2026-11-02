@@ -62,10 +62,10 @@ src/
     │   ├── __init__.py
     │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
-    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor
+    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
-    ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe
+    ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, prune
     ├── checks.py       # Seal checks: SealCheck, conf_status
     ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
@@ -377,6 +377,12 @@ Inventory and seals editions:
   returns one. `describe` writes `{format_version: "3", description}` into
   the root's `extensions.statcat` (`bundle.description_to_json`), every later
   version carries it, and `Catalog.description` reads it.
+  `prune(*, older_than, reason, dry_run=True)` is the narrow laptop prune
+  (P7): it retires old superseded and withdrawn editions in one `retire`
+  version, deletes the directories of editions tombstoned longer than the
+  window and the `data/` files no on-disk manifest lists, skips a product
+  with a working copy or a journal entry, and deletes no root, leaf or
+  tombstone. It returns a `PruneReport`.
 - **Section format 3.** The manifest's `statcat` section
   (`bundle.STATCAT_SECTION_FORMAT`) holds `format`, `kind`,
   `statcatlib_version`, `datasets` and `search`. `kind` is `"data"`;

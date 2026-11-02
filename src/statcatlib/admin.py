@@ -12,22 +12,32 @@ explicitly with `CatalogAdmin.open` and is never returned by an attribute of
 | `CatalogAdmin.cancel` | `sdmxlib.inventory.cancel` | ``withdraw`` |
 | `CatalogAdmin.set_embargo` | the root's ``embargo`` | ``embargo-change`` |
 | `CatalogAdmin.describe` | the root's ``extensions.statcat`` | ``describe`` |
+| `CatalogAdmin.prune` | `sdmxlib.inventory.retire` | ``retire`` |
 
 Each of them requires a ``reason`` and writes one Inventory version through
 `InventoryWriter.commit`, which re-applies the rule to the new head after a
 lost race. `CatalogAdmin.editions` only reads. A rule is evaluated with this
 machine's clock (design decision P1), so a laptop with a skewed clock records
 skewed times.
+
+`CatalogAdmin.prune` is the narrow laptop prune of design decision P7 (Phase
+2a S4). It also deletes files: the directories of editions tombstoned longer
+than its window, and ``data/`` files no manifest on disk lists. It never
+touches a product with a working copy or a seal journal entry, and deletes no
+Inventory root or leaf.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import logging
+import shutil
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 from attrs import frozen
-from sdmxlib.inventory import CATALOG_NAME, TransitionError, cancel, head, release, rollback
+from sdmxlib.edition import ManifestError, edition_files, list_editions, read_manifest
+from sdmxlib.inventory import CATALOG_NAME, TransitionError, cancel, head, release, retire, rollback
 from sdmxlib.storage.schema import SCHEMA_VERSION
 
 from statcatlib.bundle import ROOT_SECTION_FORMAT, STATCAT_SECTION, description_to_json
@@ -35,13 +45,15 @@ from statcatlib.catalog import _refuse_legacy_layout
 from statcatlib.store.inventory import Change, InventoryRuleError, InventoryWriter, NonFastForwardError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection, Iterable
 
-    from sdmxlib.inventory import EventKind, FullInventory, Leaf, State
+    from sdmxlib.inventory import EventKind, FullInventory, Leaf, State, Tombstone
 
     from statcatlib.model.catalog import CatalogDescription
 
-__all__ = ["CatalogAdmin", "EditionEntry"]
+__all__ = ["CatalogAdmin", "EditionEntry", "PruneReport"]
+
+log = logging.getLogger(__name__)
 
 
 @frozen
@@ -69,6 +81,89 @@ class EditionEntry:
     release_at: datetime | None
 
 
+@frozen
+class PruneReport:
+    """What `CatalogAdmin.prune` retired and deleted, or would have in a dry run.
+
+    Every path is ``/``-separated, from the catalog directory.
+
+    Attributes:
+        retired: Each edition retired, as ``<product>/<edition_id>``.
+        deleted_dirs: Each tombstoned edition's directory deleted, as
+            ``products/<product>/<edition_id>``.
+        deleted_files: Each ``data/`` file deleted, as
+            ``products/<product>/data/...``.
+        skipped_products: Each product left untouched, with the reason: a
+            working copy, a seal journal entry, or a manifest that cannot be
+            read.
+        failed: Each path whose deletion failed, with the error. The next
+            run tries it again.
+        root: The catalog directory.
+        dry_run: Whether this is a dry run, which retired and deleted nothing.
+        seq: The Inventory version the ``retire`` commit wrote, or ``None``
+            when nothing was retired or the run was dry.
+    """
+
+    retired: tuple[str, ...]
+    deleted_dirs: tuple[str, ...]
+    deleted_files: tuple[str, ...]
+    skipped_products: dict[str, str]
+    failed: dict[str, str]
+    root: Path
+    dry_run: bool
+    seq: int | None
+
+
+class _NothingToRetireError(Exception):
+    """The head holds no edition to retire, so the ``retire`` commit writes no version."""
+
+
+def _busy(product_dir: Path, tombstoned: Collection[str]) -> str | None:
+    """Why prune must leave the product alone, or ``None``.
+
+    A product is busy while it has an unsealed edition (a working copy) or a
+    seal journal entry, or when an edition's manifest cannot be read. An
+    edition directory without a manifest whose id is tombstoned is a
+    directory an earlier prune began to delete, never a working copy.
+
+    Args:
+        product_dir: The product's directory.
+        tombstoned: The product's tombstoned edition ids.
+
+    Returns:
+        The reason, or ``None``.
+    """
+    try:
+        found = list_editions(product_dir)
+    except ManifestError as exc:
+        return f"an edition's manifest cannot be read: {exc}"
+    for info in found:
+        if not info.sealed and info.edition_id not in tombstoned:
+            return f"working copy {info.edition_id} is open; seal or discard it first"
+    journal = product_dir / "journal"
+    if journal.is_dir() and any(journal.glob("*.json")):
+        return "it has a seal journal entry; its next working_copy() settles it"
+    return None
+
+
+def _retirable(full: FullInventory | None, cutoff: datetime, skipped: Collection[str]) -> dict[str, list[str]]:
+    """The superseded and withdrawn editions that entered their state before *cutoff*, by product."""
+    if full is None:
+        return {}
+    found: dict[str, list[str]] = {}
+    for product_id in full.products():
+        if product_id in skipped:
+            continue
+        ids = [
+            e.edition_id
+            for e in full.entries(product_id)
+            if e.state in {"superseded", "withdrawn"} and e.state_changed_at < cutoff
+        ]
+        if ids:
+            found[product_id] = ids
+    return found
+
+
 def _require_reason(reason: str) -> str:
     if not reason.strip():
         msg = "an operational change needs a reason; the Inventory version records it as event.reason"
@@ -85,10 +180,11 @@ def _leaf(full: FullInventory | None, product_id: str) -> Leaf:
 
 
 class CatalogAdmin:
-    """Operational changes to a catalog's Inventory: rollback, release, cancel, embargo and description.
+    """Operational changes to a catalog's Inventory: rollback, release, cancel, embargo, description and prune.
 
-    Open one with `open`. Every method but `editions`, `products` and
-    `embargo` writes one Inventory version and returns its number.
+    Open one with `open`. Every method but `editions`, `products`,
+    `embargo` and `prune` writes one Inventory version and returns its
+    number; `prune` writes at most one and returns a `PruneReport`.
     """
 
     _writer: InventoryWriter
@@ -379,3 +475,248 @@ class CatalogAdmin:
             return Change(leaves={}, extensions=extensions)
 
         return self._writer.commit(change, kind="describe", reason=reason).seq
+
+    # -- prune -----------------------------------------------------------
+
+    def prune(self, *, older_than: timedelta, reason: str, dry_run: bool = True) -> PruneReport:
+        """Retire old editions and delete the files no edition needs (design decision P7).
+
+        It takes one window, *older_than*, and runs three steps:
+
+        1. It retires the ``superseded`` and ``withdrawn`` editions whose
+           ``state_changed_at`` is older than the window, in one Inventory
+           version (``event.kind`` ``retire``), re-applied to the new head
+           after a lost race.
+        2. It deletes the directory of each edition tombstoned for longer
+           than the window.
+        3. It deletes a file under a product's ``data/`` when no
+           ``manifest.json`` on disk under the product lists it and its
+           mtime is older than the window.
+
+        A product with a working copy or a seal journal entry is skipped in
+        all three steps and reported in `PruneReport.skipped_products`, and
+        so is one with an edition whose manifest cannot be read. Prune
+        deletes no Inventory root or leaf, never expires a tombstone, and
+        never deletes an edition the Inventory does not tombstone, so a
+        live, embargoed or unrecorded edition stays. An edition retired in
+        step 1 keeps its directory until a run after its tombstone has aged
+        past the window.
+
+        With ``dry_run=True``, the default, it retires and deletes nothing
+        and reports what a real run would do. A real run logs every deleted
+        path at INFO. A deletion that fails is recorded in
+        `PruneReport.failed`, logged at WARNING, and the run continues; the
+        path is tried again on the next run.
+
+        Args:
+            older_than: The window, a positive `timedelta`.
+            reason: Why, recorded as the ``retire`` version's ``event.reason``.
+                A dry run requires one too.
+            dry_run: Report only, the default; ``False`` retires and deletes.
+
+        Returns:
+            The report.
+
+        Raises:
+            ValueError: *older_than* is not positive, or *reason* is blank.
+
+        A retirement sdmxlib's rule refuses raises `InventoryRuleError`, and
+        `InventoryContentionError` follows `MAX_RACES` lost races; neither
+        deletes anything.
+        """
+        _require_reason(reason)
+        if older_than <= timedelta(0):
+            msg = f"prune needs a positive window; got older_than={older_than!r}"
+            raise ValueError(msg)
+        root = self._writer.root
+        cutoff = datetime.now(UTC) - older_than
+        full = self._writer.full()
+        stones = () if full is None else full.root.retired
+        product_dirs = {p.name: p for p in sorted((root / "products").glob("*")) if p.is_dir()}
+        skipped: dict[str, str] = {}
+        recorded: list[str] = [] if full is None else full.products()
+        for product_id in sorted({*product_dirs, *recorded}):
+            tombstoned = {t.edition_id for t in stones if t.product_id == product_id}
+            why = _busy(root / "products" / product_id, tombstoned)
+            if why is not None:
+                skipped[product_id] = why
+
+        retired, seq, stones = self._prune_retire(full, cutoff, skipped, reason=reason, dry_run=dry_run)
+        failed: dict[str, str] = {}
+        deleted_dirs = _prune_dirs(root, stones, cutoff, skipped, dry_run=dry_run, failed=failed)
+
+        deleted_files: list[str] = []
+        gone = set(deleted_dirs)
+        for product_id, product_dir in product_dirs.items():
+            if product_id in skipped:
+                continue
+            tombstoned = {t.edition_id for t in stones if t.product_id == product_id}
+            why = _busy(product_dir, tombstoned)
+            if why is not None:
+                skipped[product_id] = why
+                continue
+            try:
+                deleted_files += self._prune_data(product_dir, cutoff, gone, dry_run=dry_run, failed=failed)
+            except ManifestError as exc:
+                skipped[product_id] = f"an edition's manifest cannot be read: {exc}"
+
+        return PruneReport(
+            retired=tuple(retired),
+            deleted_dirs=tuple(deleted_dirs),
+            deleted_files=tuple(deleted_files),
+            skipped_products=dict(sorted(skipped.items())),
+            failed=failed,
+            root=root,
+            dry_run=dry_run,
+            seq=seq,
+        )
+
+    def _prune_retire(
+        self,
+        full: FullInventory | None,
+        cutoff: datetime,
+        skipped: Collection[str],
+        *,
+        reason: str,
+        dry_run: bool,
+    ) -> tuple[list[str], int | None, tuple[Tombstone, ...]]:
+        """Prune's step 1: retire the old superseded and withdrawn editions in one ``retire`` version.
+
+        Args:
+            full: The head read when prune started, or ``None``.
+            cutoff: The window's start; older entries retire.
+            skipped: The products prune leaves alone.
+            reason: The version's ``event.reason``.
+            dry_run: Plan against *full* and write nothing.
+
+        Returns:
+            The editions retired, as ``<product>/<edition_id>``; the version
+            written, or ``None``; and the tombstones of the head prune's
+            later steps read.
+        """
+        stones: tuple[Tombstone, ...] = () if full is None else full.root.retired
+        if dry_run:
+            planned = _retirable(full, cutoff, skipped)
+            return [f"{p}/{e}" for p, ids in planned.items() for e in ids], None, stones
+        retired: list[str] = []
+
+        def change(head_now: FullInventory | None) -> Change:
+            planned = _retirable(head_now, cutoff, skipped)
+            if head_now is None or not planned:
+                raise _NothingToRetireError
+            now = datetime.now(UTC)
+            leaves: dict[str, Leaf] = {}
+            kept = list(head_now.root.retired)
+            for product_id, ids in planned.items():
+                try:
+                    leaves[product_id], new = retire(head_now.leaf(product_id), ids, now=now)
+                except TransitionError as exc:
+                    raise InventoryRuleError.wrapping(exc, product=product_id, edition=ids[0]) from exc
+                kept += new
+            retired[:] = [f"{p}/{e}" for p, ids in planned.items() for e in ids]
+            return Change(leaves=leaves, retired=tuple(kept))
+
+        try:
+            written = self._writer.commit(change, kind="retire", reason=reason)
+        except _NothingToRetireError:
+            return [], None, stones
+        return retired, written.seq, written.retired
+
+    def _prune_data(
+        self, product_dir: Path, cutoff: datetime, gone: Collection[str], *, dry_run: bool, failed: dict[str, str]
+    ) -> list[str]:
+        """Prune's step 3 for one product: delete its old ``data/`` files that no manifest on disk lists.
+
+        Args:
+            product_dir: The product's directory, which is not busy.
+            cutoff: The window's start; older files go.
+            gone: The edition directories step 2 deleted, or would delete in
+                a dry run, as ``products/<product>/<edition_id>``; their
+                manifests protect nothing.
+            dry_run: Report only.
+            failed: Where a failed deletion is recorded.
+
+        Returns:
+            The files deleted, as ``products/<product>/data/...``.
+
+        A manifest that cannot be read raises `ManifestError` before any
+        file is deleted.
+        """
+        data_dir = product_dir / "data"
+        if not data_dir.is_dir():
+            return []
+        root = self._writer.root
+        listed: set[str] = set()
+        for info in list_editions(product_dir):
+            edition_dir = product_dir / info.edition_id
+            if info.sealed and edition_dir.relative_to(root).as_posix() not in gone:
+                listed |= {p for p in edition_files(read_manifest(edition_dir)) if p.startswith("data/")}
+        deleted: list[str] = []
+        oldest = cutoff.timestamp()
+        for file in sorted(data_dir.rglob("*")):
+            if not file.is_file() or file.relative_to(product_dir).as_posix() in listed:
+                continue
+            if file.stat().st_mtime >= oldest:
+                continue
+            rel = file.relative_to(root).as_posix()
+            if _delete(file, rel, Path.unlink, dry_run=dry_run, failed=failed):
+                deleted.append(rel)
+        return deleted
+
+
+def _prune_dirs(
+    root: Path,
+    stones: Iterable[Tombstone],
+    cutoff: datetime,
+    skipped: Collection[str],
+    *,
+    dry_run: bool,
+    failed: dict[str, str],
+) -> list[str]:
+    """Prune's step 2: delete the directory of each edition tombstoned before *cutoff*.
+
+    Args:
+        root: The catalog directory.
+        stones: The head's tombstones.
+        cutoff: The window's start; older tombstones' directories go.
+        skipped: The products prune leaves alone.
+        dry_run: Report only.
+        failed: Where a failed deletion is recorded.
+
+    Returns:
+        The directories deleted, as ``products/<product>/<edition_id>``.
+    """
+    deleted: list[str] = []
+    for stone in stones:
+        edition_dir = root / "products" / stone.product_id / stone.edition_id
+        if stone.retired_at >= cutoff or stone.product_id in skipped or not edition_dir.is_dir():
+            continue
+        rel = edition_dir.relative_to(root).as_posix()
+        if _delete(edition_dir, rel, shutil.rmtree, dry_run=dry_run, failed=failed):
+            deleted.append(rel)
+    return deleted
+
+
+def _delete(path: Path, rel: str, remove: Callable[[Path], object], *, dry_run: bool, failed: dict[str, str]) -> bool:
+    """Delete *path* with *remove*, unless *dry_run*; a failure goes into *failed* and returns ``False``.
+
+    Args:
+        path: The file or directory.
+        rel: Its path from the catalog directory, for the report and the log.
+        remove: `shutil.rmtree` for a directory, `Path.unlink` for a file.
+        dry_run: Delete nothing and report it as deleted.
+        failed: Where a failure is recorded, *rel* to the error.
+
+    Returns:
+        Whether it was deleted, or would be in a dry run.
+    """
+    if dry_run:
+        return True
+    try:
+        remove(path)
+    except OSError as exc:
+        failed[rel] = str(exc)
+        log.warning("prune could not delete %s: %s; the next prune tries it again", path, exc)
+        return False
+    log.info("prune deleted %s", path)
+    return True

@@ -9,15 +9,15 @@ catalog directory, and calls one library function. The work itself lives in
 `statcatlib.WorkingCopy.build_index` (`../store/working_copy.py`), which
 delegates to the private `_Store.build_index` (`../store/store.py`), and in
 `statcatlib.diagnostics` (`../diagnostics.py`) for `verify-catalog` and
-`doctor`.
+`doctor`, and in `statcatlib.CatalogAdmin.prune` (`../admin.py`) for `prune`.
 
 The CLI needs the `search` extra (`uv add 'statcatlib[search]'`, or
 `pip install 'statcatlib[search]'`), which supplies `typer`, `rich`,
 `lancedb` and `sentence-transformers`. Importing the module without `typer`
 and `rich` fails.
 
-The console script is `statcat`, with three commands: `build-index`,
-`verify-catalog` and `doctor`.
+The console script is `statcat`, with four commands: `build-index`,
+`verify-catalog`, `doctor` and `prune`.
 
 ## Interface
 
@@ -34,6 +34,7 @@ Commands:
 | `statcat build-index CATALOG PRODUCT` | `build_index` | `sc.Catalog.create(catalog, exist_ok=True).product(product).working_copy(resume=True).build_index(...)` | `catalog.json` is missing, the product has no unsealed edition, or `sentence_transformers` cannot be imported |
 | `statcat verify-catalog PATH` | `verify_catalog` | `diagnostics.verify_catalog(path)` | any finding, each printed as `FAIL <file>: <detail>`; exit 2 on `CatalogUnreadableError` |
 | `statcat doctor PATH` | `doctor` | `diagnostics.doctor(path)` | the report holds a warning |
+| `statcat prune PATH --older-than DAYS --reason TEXT [--apply]` | `prune` | `sc.CatalogAdmin.open(path).prune(older_than=timedelta(days=DAYS), reason=TEXT, dry_run=not apply)` | `catalog.json` is missing, the catalog cannot be opened, the retire commit is refused, or a deletion failed (each printed as `FAIL <path>: <error>`) |
 
 `build-index` options and their `WorkingCopy.build_index` keyword:
 
@@ -110,7 +111,9 @@ Private helpers that tests and later commands rely on:
 
 ## Side Effects
 
-- `verify-catalog` and `doctor` write nothing.
+- `verify-catalog` and `doctor` write nothing. `prune` without `--apply`
+  writes nothing; with `--apply` it writes one Inventory version (kind
+  `retire`) and deletes edition directories and `data/` files.
 
 - `build-index` writes the working copy's `search/` directory: the
   edition's tables, `search/index.json`, and `search/embeddings.json`. It
@@ -129,7 +132,8 @@ Private helpers that tests and later commands rely on:
 - All commands print to stdout. A command failure exits 1 (the cases in the
   table above). Usage errors exit 2 through Click: a `CATALOG` path that is
   missing or not a directory, `--batch-size` or `--max-codes-per-codelist`
-  below 1 (`min=1`), and a `typer.BadParameter` from the option parsers.
+  below 1 (`min=1`), `prune` without `--older-than` or `--reason` or with
+  `--older-than` below 1, and a `typer.BadParameter` from the option parsers.
 
 ## Verification
 

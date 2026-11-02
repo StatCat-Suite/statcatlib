@@ -1,11 +1,12 @@
 """statcatlib command-line interface.
 
 Top-level entry point installed as the ``statcat`` console script. It has
-three commands: `build_index`, which builds the search index of a product's
-working copy; `verify_catalog`, which checks a catalog's integrity; and
-`doctor`, which reports on a catalog for support. The CLI is intentionally
-thin — the work lives in `statcatlib.WorkingCopy.build_index` and
-`statcatlib.diagnostics`.
+four commands: `build_index`, which builds the search index of a product's
+working copy; `verify_catalog`, which checks a catalog's integrity; `doctor`,
+which reports on a catalog for support; and `prune`, which retires old
+editions and deletes the files no edition needs. The CLI is intentionally
+thin — the work lives in `statcatlib.WorkingCopy.build_index`,
+`statcatlib.diagnostics` and `statcatlib.CatalogAdmin.prune`.
 
 Requires the ``[search]`` extra (typer + sentence-transformers + lancedb).
 """
@@ -18,6 +19,7 @@ import os
 import sys
 import time
 import warnings
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,7 +40,7 @@ from rich.progress import (
 
 import statcatlib as sc
 from statcatlib import diagnostics
-from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES
+from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES, IncompatibleCatalogError
 
 if TYPE_CHECKING:
     from sdmxlib.edition import Lifecycle
@@ -498,6 +500,65 @@ def doctor(
         _say(f"{len(report.warnings)} warning(s).", style="yellow")
         raise typer.Exit(code=1)
     _say("No warnings.", style="green")
+
+
+@app.command("prune")
+def prune(
+    path: Path = typer.Argument(..., help="Path to a statcatlib catalog (the directory holding catalog.json)."),
+    older_than: int = typer.Option(
+        ..., "--older-than", min=1, metavar="DAYS", help="The window, in days: prune what is older."
+    ),
+    reason: str = typer.Option(..., "--reason", help="Why; the retire version records it as event.reason."),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Retire and delete. Without it, prune only reports.",
+    ),
+) -> None:
+    """Retire editions superseded or withdrawn before the window, and delete the files no edition needs.
+
+    It runs `statcatlib.CatalogAdmin.prune` with ``older_than`` *DAYS* days:
+    it retires those editions in one Inventory version, deletes the
+    directories of editions tombstoned for longer than the window, and
+    deletes ``data/`` files that no manifest lists and that are older than
+    the window. It skips every product with a working copy or a seal journal
+    entry, and deletes no Inventory root or leaf. Without ``--apply`` it
+    prints what it would do and changes nothing. It exits 1 when the catalog
+    cannot be opened or a deletion fails; the next run tries a failed
+    deletion again.
+    """
+    _require_catalog(path)
+    try:
+        admin = sc.CatalogAdmin.open(path)
+        report = admin.prune(older_than=timedelta(days=older_than), reason=reason, dry_run=not apply)
+    except (IncompatibleCatalogError, sc.InventoryRuleError, sc.InventoryContentionError, ValueError) as exc:
+        _say(f"Cannot prune the catalog: {exc}", style="red")
+        raise typer.Exit(code=1) from None
+    for product_id, why in report.skipped_products.items():
+        _say(f"skip {product_id}: {why}", style="yellow")
+    for edition in report.retired:
+        _say(f"retire {edition}")
+    for rel in (*report.deleted_dirs, *report.deleted_files):
+        _say(f"delete {rel}")
+    for rel, error in report.failed.items():
+        _say(f"FAIL {rel}: {error}", style="red")
+    n_retired, n_dirs, n_files = len(report.retired), len(report.deleted_dirs), len(report.deleted_files)
+    if report.dry_run:
+        _say(
+            f"With --apply, prune retires {n_retired} edition(s), deletes {n_dirs} edition directories and "
+            f"{n_files} data file(s), and skips {len(report.skipped_products)} product(s). "
+            "This dry run changed nothing.",
+            style="green",
+        )
+        return
+    done = (
+        f"Prune retired {n_retired} edition(s), deleted {n_dirs} edition directories and {n_files} data file(s), "
+        f"and skipped {len(report.skipped_products)} product(s)."
+    )
+    if report.failed:
+        _say(f"{done} {len(report.failed)} deletion(s) failed; the next run tries them again.", style="red")
+        raise typer.Exit(code=1)
+    _say(done, style="green")
 
 
 def main() -> None:

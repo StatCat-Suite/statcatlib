@@ -83,8 +83,8 @@ and test catalogs (`testing.py`).
 
 ### `admin.py`
 
-`CatalogAdmin` is exported from `statcatlib`; `EditionEntry` is imported from
-`statcatlib.admin`.
+`CatalogAdmin` is exported from `statcatlib`; `EditionEntry` and `PruneReport`
+are imported from `statcatlib.admin`.
 
 - `CatalogAdmin.open(path)`: refuses a legacy layout
   (`catalog._refuse_legacy_layout`) and a path with no `catalog.json`
@@ -112,6 +112,25 @@ and test catalogs (`testing.py`).
   leaf with `datetime.now(UTC)` (the local clock, design decision P1) and
   wraps a `TransitionError` with `InventoryRuleError.wrapping`. A product the
   head does not record raises `InventoryRuleError(rule="unknown")`.
+- `prune(*, older_than, reason, dry_run=True) -> PruneReport` (design
+  decision P7): refuses a blank *reason* or a window that is not positive
+  (`ValueError`). It skips every product `_busy` names (an unsealed edition
+  whose id is not tombstoned, a `journal/*.json` file, or an unreadable
+  manifest), then runs three steps. `_prune_retire` retires superseded and
+  withdrawn entries whose `state_changed_at` is before the cutoff with
+  sdmxlib's `retire`, in one `InventoryWriter.commit` of kind `retire`
+  (`Change(leaves=..., retired=head tombstones + new)`), re-planned against
+  each head and skipped when nothing qualifies. `_prune_dirs` deletes
+  `products/<p>/<edition_id>` for each tombstone whose `retired_at` is
+  before the cutoff. `_prune_data` deletes each `data/` file no on-disk
+  manifest lists (`sdmxlib.edition.edition_files`) whose mtime is before the
+  cutoff. `_delete` records an `OSError` in `failed` and continues. A dry run
+  plans the same steps against the head and changes nothing. It deletes no
+  root, leaf or tombstone.
+- `PruneReport`: a frozen attrs value with `retired` (`<product>/<edition>`),
+  `deleted_dirs`, `deleted_files` (paths from the catalog directory),
+  `skipped_products` and `failed` (dicts to the reason or error), `root`,
+  `dry_run` and `seq` (the `retire` version, or `None`).
 - `EditionEntry`: a frozen attrs value with `edition_id`, `product_id`,
   `previous`, `state`, `manifest_sha256`, `schema_version`,
   `state_changed_at` and `release_at`.
@@ -267,6 +286,10 @@ read.
   none. A refusal in one product never stops another's. A crash during the
   batch leaves each sealed, unrecorded edition's journal entry, so its
   product's next `working_copy()` records it, in a version of its own.
+- `CatalogAdmin.prune` never retires or deletes anything of a product with
+  an unsealed edition or a seal journal entry, deletes only the directories
+  of tombstoned editions, and deletes no Inventory root, leaf or tombstone.
+  A dry run, the default, changes nothing.
 - `MapCondition`, `MapFilter` and `has_spatial` pass their language tag
   through `sdmxlib.normalize_tag`.
 - `Expr` nodes are frozen attrs objects and run no SQL themselves.
@@ -284,7 +307,10 @@ read.
   installed, the manifest and Inventory version 1. `temporary_catalog`
   deletes its directory on exit.
 - Each `CatalogAdmin` change writes one Inventory version (a root, and for a
-  product change one leaf) and `CURRENT`.
+  product change one leaf) and `CURRENT`. `prune(dry_run=False)` writes at
+  most one, of kind `retire`, deletes edition directories and `data/` files,
+  and logs each deleted path at INFO and each failed deletion at WARNING on
+  the `statcatlib.admin` logger.
 - `diagnostics.verify_catalog` opens each edition in a DuckDB engine of
   `check_edition`'s own; neither it nor `diagnostics.doctor` writes a file.
 - These modules make no network calls.
