@@ -3,7 +3,7 @@
 ## Overview
 
 `statcatlib` is the package root. `__init__.py` re-exports the public API of
-`model`, `sources` and `store`; `Catalog`, `Product`, `Edition`,
+`model`, `sources` and `store`; `CatalogAdmin` from `admin.py`; `Catalog`, `Product`, `Edition`,
 `SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
 `InventoryContentionError`, `InventoryRuleError` and `NonFastForwardError`
 from `store/inventory.py`, and `WorkingCopyExistsError`,
@@ -12,7 +12,8 @@ from `store/inventory.py`, and `WorkingCopyExistsError`,
 sentinel module; and part of `expr` (listed below). It exposes `checks`,
 `query` and `urn` as submodules (`sc.checks`, `sc.query`, `sc.urn`). The
 top-level modules hold the parts that sit across subpackages: the catalog of
-products (`catalog.py`), seal checks (`checks.py`), the `statcat` section of
+products (`catalog.py`), the operational changes to its Inventory
+(`admin.py`), seal checks (`checks.py`), the `statcat` section of
 an sdmxlib edition manifest (`bundle.py`), the integrity and support
 checks behind `statcat verify-catalog` and `statcat doctor`
 (`diagnostics.py`), composable query filters
@@ -45,6 +46,10 @@ and test catalogs (`testing.py`).
   - `Catalog.open(path)`: read-only. Raises `FileNotFoundError` when *path*
     has no `catalog.json`. A catalog with no Inventory version has no
     products.
+  - `description`: the `CatalogDescription` in the root's
+    `extensions.statcat` of the Inventory version the live view holds (as of
+    the last `refresh()`), read with `bundle.description_from_root`; `None`
+    when none was recorded.
   - `writable`, `catalog_id`, `refresh()`, `products()` (the products with a
     live edition, sorted), `product(product_id) -> Product` (`ValueError`
     unless the id matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`), `close()` and the
@@ -66,7 +71,7 @@ and test catalogs (`testing.py`).
   `previous` its manifest records; empty without one); `working_copy(*,
   lifecycle="revisable", resume=False, embedding_model=None,
   document_prefix="", query_prefix="") -> WorkingCopy`; `rollback()`, which
-  raises `AttributeError` naming `CatalogAdmin.rollback` (Phase 2a S3).
+  raises `AttributeError` naming `CatalogAdmin.rollback`.
   `Catalog.product` is the only constructor.
 - `NoLiveEditionError` (`LookupError`): `view()` on a product with no live
   edition.
@@ -75,6 +80,41 @@ and test catalogs (`testing.py`).
   error: `SealCheckError`, `NonFastForwardError` or another
   `InventoryRuleError`, `ManifestError`, or `InventoryContentionError`).
 - `Edition` is re-exported from `store/working_copy.py`.
+
+### `admin.py`
+
+`CatalogAdmin` is exported from `statcatlib`; `EditionEntry` is imported from
+`statcatlib.admin`.
+
+- `CatalogAdmin.open(path)`: refuses a legacy layout
+  (`catalog._refuse_legacy_layout`) and a path with no `catalog.json`
+  (`FileNotFoundError`), reads `catalog.json`, and holds an
+  `InventoryWriter`. It writes nothing until a change is made. Direct
+  construction raises `TypeError`.
+- Reads, each from a fresh `InventoryWriter.full()`: `embargo`,
+  `products()` (every recorded product, any state) and
+  `editions(product_id) -> list[EditionEntry]` (every entry the newest version
+  records, in id order; empty for an unrecorded product).
+- Changes, each requiring a non-blank `reason` (`ValueError` otherwise) and
+  writing one version through `InventoryWriter.commit`, returning its `seq`:
+  `rollback(product_id, *, to=None, if_live=None, reason)` (sdmxlib
+  `rollback` at sdmxlib's store `SCHEMA_VERSION`, `if_live` defaulting to the
+  head when the call starts; kind `rollback`), `release(product_id,
+  edition_id, *, reason)` (`release(explicit=True)`; a `fast-forward` refusal
+  becomes `NonFastForwardError` naming the edition, the live edition and the
+  fix; kind `release`), `cancel(product_id, edition_id, *, reason)` (kind
+  `withdraw`), `set_embargo(*, on, reason)` (`Change(embargo=on)`; kind
+  `embargo-change`) and `describe(description, *, reason)` (sets
+  `format_version` `"3"` and `description` in the root's `extensions.statcat`,
+  keeping its other keys; kind `describe`).
+- Product changes go through `_commit_product(product_id, edition_id, step,
+  *, kind, reason)`, which applies one of sdmxlib's pure rules to the head's
+  leaf with `datetime.now(UTC)` (the local clock, design decision P1) and
+  wraps a `TransitionError` with `InventoryRuleError.wrapping`. A product the
+  head does not record raises `InventoryRuleError(rule="unknown")`.
+- `EditionEntry`: a frozen attrs value with `edition_id`, `product_id`,
+  `previous`, `state`, `manifest_sha256`, `schema_version`,
+  `state_changed_at` and `release_at`.
 
 ### `checks.py`
 
@@ -103,6 +143,15 @@ The module keeps its 0.11 name and describes editions. Imported from
   manifest binds a dataflow.
 - `overlay_affects_search(overlay, types=None)`: lists overlay entries that
   change search results.
+- `description_to_json(description) -> dict[str, object]` and
+  `description_from_json(data) -> CatalogDescription`: the catalog-level
+  fields of a `CatalogDescription` (identifier, title, description,
+  publisher, homepage, language, licence, theme taxonomy, issued, modified)
+  as JSON. `description_from_json` ignores unknown keys and raises
+  `TypeError` on a field of the wrong JSON type.
+  `description_from_root(extensions)` reads `extensions.statcat.description`
+  of an Inventory root, or returns `None`.
+- `ROOT_SECTION_FORMAT = "3"`: the root section's `format_version`.
 - `STATCAT_SECTION = "statcat"`, `STATCAT_SECTION_FORMAT = 3`,
   `PRODUCT_KINDS = ("data", "structure")`. Phase 2a seals `data` only.
 
@@ -200,6 +249,13 @@ read.
   `check_edition`'s files check.
 - `Catalog.open` writes nothing. No `Catalog` or `Product` method takes or
   returns a path inside the catalog.
+- Only `CatalogAdmin` changes the Inventory, apart from a seal's record and
+  the journal repair. No attribute of `Catalog`, `Product` or `EditionView`
+  returns a `CatalogAdmin` or an embargoed, superseded or withdrawn edition.
+- Every `CatalogAdmin` rule is re-evaluated against the head each commit
+  lands on: a rollback whose `if_live` is no longer live, a release that is
+  no longer a fast-forward, and a seal record computed before the embargo was
+  turned on are each refused or recomputed.
 - `Product.view` hashes the live edition's `manifest.json` and raises
   `IncompatibleCatalogError` when it differs from the `manifest_sha256` the
   Inventory records. Every view a `Catalog` returns shares one
@@ -227,6 +283,8 @@ read.
   synthetic edition, the catalog rows, the search index when lancedb is
   installed, the manifest and Inventory version 1. `temporary_catalog`
   deletes its directory on exit.
+- Each `CatalogAdmin` change writes one Inventory version (a root, and for a
+  product change one leaf) and `CURRENT`.
 - `diagnostics.verify_catalog` opens each edition in a DuckDB engine of
   `check_edition`'s own; neither it nor `diagnostics.doctor` writes a file.
 - These modules make no network calls.

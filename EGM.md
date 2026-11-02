@@ -20,7 +20,7 @@ design decisions in full. This file indexes the code contracts.
 
 - `src`: [`./src/EGM.md`](./src/EGM.md) — src layout holding the one package.
   - `src/statcatlib`: [`./src/statcatlib/EGM.md`](./src/statcatlib/EGM.md) —
-    public API re-exports, `catalog.py`, `checks.py`, `bundle.py`,
+    public API re-exports, `catalog.py`, `admin.py`, `checks.py`, `bundle.py`,
     `query.py`, `expr.py`, `urn.py`, `testing.py`.
   - `src/statcatlib/model`: [`./src/statcatlib/model/EGM.md`](./src/statcatlib/model/EGM.md)
     — attrs domain model with no I/O.
@@ -57,7 +57,8 @@ design decisions in full. This file indexes the code contracts.
   rebuilding every catalog. A stale index in a readable format warns and
   keeps serving; nothing on the view or search path rebuilds it (GH-3).
 - `store/inventory.py`'s `InventoryWriter` is the only code that writes
-  `catalog.json`, `inventory/` and `CURRENT`.
+  `catalog.json`, `inventory/` and `CURRENT`. Apart from a seal's record and
+  the journal repair, only `CatalogAdmin` (`admin.py`) calls it.
 - A product has one unsealed edition at a time. `WorkingCopy.seal` rebuilds
   the search index, computes the `statcat` section with
   `bundle.catalog_section`, seals with `sdmxlib.edition.seal`, and records
@@ -70,8 +71,9 @@ design decisions in full. This file indexes the code contracts.
 
 ## Global Side Effects
 
-- `Catalog.create` writes `catalog.json`; each seal writes a leaf, an
-  Inventory root under `inventory/` and `CURRENT`.
+- `Catalog.create` writes `catalog.json`; each seal, and each `CatalogAdmin`
+  change, writes an Inventory root under `inventory/`, a leaf when a product
+  changes, and `CURRENT`.
 - One `metadata.duckdb` per edition under `products/<product>/<edition_id>/`,
   shared by the `statcat` and `sdmx` schemas; sdmxlib's DuckLake holds
   observations, its data files shared by the product's editions under

@@ -8,6 +8,11 @@ when `WorkingCopy.seal` seals, and `check_catalog`, which checks that the
 catalog and its search index are what that section says (GH-3). Run
 `check_catalog` as an extension of `sdmxlib.edition.check_edition`.
 
+It also holds the catalog description's JSON form: `description_to_json` and
+`description_from_json` convert a `CatalogDescription`'s catalog-level fields
+for the Inventory root's ``extensions.statcat``, which `CatalogAdmin.describe`
+writes and `Catalog.description` reads.
+
 The module keeps its name from the 0.11 bundle format; it describes editions.
 """
 
@@ -15,11 +20,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection, Mapping
+from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sdmxlib import InternationalString
 from sdmxlib.edition import MANIFEST_NAME, Finding, Manifest, Overlay, OverlayEntry
+
+from statcatlib.model.agents import Agent
+from statcatlib.model.catalog import CatalogDescription
+from statcatlib.model.licence import LicenceDocument
+from statcatlib.model.skos import ConceptSchemeRef
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -33,10 +45,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PRODUCT_KINDS",
+    "ROOT_SECTION_FORMAT",
     "STATCAT_SECTION",
     "STATCAT_SECTION_FORMAT",
     "catalog_section",
     "check_catalog",
+    "description_from_json",
+    "description_from_root",
+    "description_to_json",
     "overlay_affects_search",
 ]
 
@@ -313,3 +329,174 @@ def overlay_affects_search(overlay: Overlay, types: Collection[str] | None = Non
 
     wanted = set(SEARCH_ANNOTATION_TYPES if types is None else types)
     return tuple(entry for entry in overlay.entries if entry.type in wanted)
+
+
+# -- the catalog description, in the Inventory root's ``extensions.statcat`` --
+
+#: The version of the root's ``extensions.statcat`` section that `CatalogAdmin.describe` writes.
+ROOT_SECTION_FORMAT = "3"
+
+
+def _text_map(value: object, key: str) -> InternationalString:
+    """A JSON object of language tag to text, as an `InternationalString`."""
+    if not isinstance(value, Mapping):
+        msg = f"the catalog description's {key} is {value!r}; it must be an object of language tag to text"
+        raise TypeError(msg)
+    return InternationalString.of({str(lang): str(text) for lang, text in value.items()})
+
+
+def _text_map_or_none(value: object, key: str) -> InternationalString | None:
+    return None if value is None else _text_map(value, key)
+
+
+def _str_or_none(value: object, key: str) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    msg = f"the catalog description's {key} is {value!r}; it must be a string"
+    raise TypeError(msg)
+
+
+def _required_str(data: Mapping[str, object], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str):
+        msg = f"the catalog description's {key} is {value!r}; it must be a string"
+        raise TypeError(msg)
+    return value
+
+
+def _object(value: object, key: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        msg = f"the catalog description's {key} is {value!r}; it must be an object"
+        raise TypeError(msg)
+    return {str(k): v for k, v in value.items()}
+
+
+def _objects(value: object, key: str) -> list[Mapping[str, object]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        msg = f"the catalog description's {key} is {value!r}; it must be a list"
+        raise TypeError(msg)
+    return [_object(item, key) for item in value]
+
+
+def _instant(value: object, key: str) -> datetime | None:
+    text = _str_or_none(value, key)
+    return None if text is None else datetime.fromisoformat(text)
+
+
+def _agent_from_json(data: Mapping[str, object]) -> Agent:
+    return Agent(
+        name=_text_map(data.get("name"), "publisher.name"),
+        id=_str_or_none(data.get("id"), "publisher.id"),
+        type=_str_or_none(data.get("type"), "publisher.type"),
+        homepage=_str_or_none(data.get("homepage"), "publisher.homepage"),
+    )
+
+
+def description_to_json(description: CatalogDescription) -> dict[str, object]:
+    """The catalog-level fields of *description*, as the JSON the Inventory root's ``extensions.statcat`` holds.
+
+    The fields are ``identifier``, ``title``, ``description``, ``publisher``,
+    ``homepage``, ``language``, ``licence``, ``theme_taxonomy``, ``issued`` and
+    ``modified``. Multilingual text becomes an object of language tag to text,
+    and an instant an ISO 8601 string. ``datasets``, ``services``, ``records``,
+    ``spatial_coverage`` and ``temporal_coverage`` are left out: the datasets
+    and services come from the live editions, and nothing stores them twice.
+
+    Args:
+        description: The description.
+
+    Returns:
+        A JSON object, which `description_from_json` reads back.
+    """
+    publisher = description.publisher
+    licence = description.licence
+    return {
+        "identifier": description.identifier,
+        "title": description.title.as_dict(),
+        "description": description.description.as_dict(),
+        "publisher": {
+            "name": publisher.name.as_dict(),
+            "id": publisher.id,
+            "type": publisher.type,
+            "homepage": publisher.homepage,
+        },
+        "homepage": description.homepage,
+        "language": list(description.language),
+        "licence": None
+        if licence is None
+        else {
+            "id": licence.id,
+            "label": None if licence.label is None else licence.label.as_dict(),
+            "uri": licence.uri,
+        },
+        "theme_taxonomy": [{"uri": ref.uri, "label": ref.label.as_dict()} for ref in description.theme_taxonomy],
+        "issued": None if description.issued is None else description.issued.isoformat(),
+        "modified": None if description.modified is None else description.modified.isoformat(),
+    }
+
+
+def description_from_json(data: Mapping[str, object]) -> CatalogDescription:
+    """The `CatalogDescription` that `description_to_json` wrote.
+
+    Keys it does not know are ignored, so a section a later statcatlib extends
+    still reads. The fields `description_to_json` leaves out take their
+    defaults.
+
+    Args:
+        data: The ``description`` object of the root's ``extensions.statcat``.
+
+    Returns:
+        The description.
+
+    Raises:
+        TypeError: A field has the wrong JSON type, or ``identifier``,
+            ``title``, ``description`` or ``publisher`` is missing.
+    """
+    licence = data.get("licence")
+    licence_doc = None
+    if licence is not None:
+        fields = _object(licence, "licence")
+        licence_doc = LicenceDocument(
+            id=_required_str(fields, "id"),
+            label=_text_map_or_none(fields.get("label"), "licence.label"),
+            uri=_str_or_none(fields.get("uri"), "licence.uri"),
+        )
+    language = data.get("language")
+    if language is not None and not isinstance(language, list):
+        msg = f"the catalog description's language is {language!r}; it must be a list of language tags"
+        raise TypeError(msg)
+    return CatalogDescription(
+        identifier=_required_str(data, "identifier"),
+        title=_text_map(data.get("title"), "title"),
+        description=_text_map(data.get("description"), "description"),
+        publisher=_agent_from_json(_object(data.get("publisher"), "publisher")),
+        homepage=_str_or_none(data.get("homepage"), "homepage"),
+        language=[str(tag) for tag in language or ()],
+        licence=licence_doc,
+        theme_taxonomy=[
+            ConceptSchemeRef(
+                uri=_required_str(ref, "uri"),
+                label=_text_map_or_none(ref.get("label"), "theme_taxonomy.label") or InternationalString(),
+            )
+            for ref in _objects(data.get("theme_taxonomy"), "theme_taxonomy")
+        ],
+        issued=_instant(data.get("issued"), "issued"),
+        modified=_instant(data.get("modified"), "modified"),
+    )
+
+
+def description_from_root(extensions: Mapping[str, Mapping[str, object]]) -> CatalogDescription | None:
+    """The catalog description an Inventory root's *extensions* hold, or ``None`` when it holds none.
+
+    Args:
+        extensions: The root's ``extensions``.
+
+    Returns:
+        The description in ``extensions.statcat.description``, read with
+        `description_from_json`.
+    """
+    section = extensions.get(STATCAT_SECTION)
+    found = None if section is None else section.get("description")
+    return None if found is None else description_from_json(_object(found, "section"))

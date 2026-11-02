@@ -40,6 +40,7 @@ from statcatlib.sources import (
     prepare_sdmx,
 )
 from statcatlib import checks, query, urn
+from statcatlib.admin import CatalogAdmin
 from statcatlib.catalog import Catalog, Edition, NoLiveEditionError, Product, SealOutcomes
 from statcatlib.expr import (
     AliasedExpr,
@@ -110,6 +111,7 @@ __all__ = [
     "AliasedExpr",
     "BaseDataset",
     "Catalog",
+    "CatalogAdmin",
     "CatalogDescription",
     "CatalogRecord",
     "CodeHit",

@@ -336,7 +336,8 @@ def _public_values(obj: object) -> list[tuple[str, object]]:
 class TestNoOperationalReach:
     """RFC D4, D13, D16: no attribute of Catalog, Product or EditionView reaches a CatalogAdmin or a non-live edition.
 
-    `CatalogAdmin` arrives in Phase 2a S3. Each public attribute's value, and
+    `tests/test_catalog_admin.py` runs the same check over a catalog that holds
+    embargoed editions. Each public attribute's value, and
     each public method's return annotation, is checked for it; the editions a
     public object lists are checked for any state but ``live``.
     """
