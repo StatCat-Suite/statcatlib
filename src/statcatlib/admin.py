@@ -332,12 +332,22 @@ class CatalogAdmin:
         Returns:
             The Inventory version written (``event.kind`` ``embargo-change``).
 
-        An empty *reason* raises `ValueError`.
+        Setting the embargo it already has raises `ValueError` naming the
+        current state and writes no version; the check runs against the head
+        the version would land on, and the embargo is off before the first
+        version. An empty *reason* raises `ValueError` too.
         """
         _require_reason(reason)
-        return self._writer.commit(
-            lambda _full: Change(leaves={}, embargo=on), kind="embargo-change", reason=reason
-        ).seq
+
+        def change(full: FullInventory | None) -> Change:
+            current = False if full is None else full.embargo
+            if current == on:
+                state = "on" if current else "off"
+                msg = f"the catalog's embargo is already {state}; set_embargo(on={on}) wrote no Inventory version"
+                raise ValueError(msg)
+            return Change(leaves={}, embargo=on)
+
+        return self._writer.commit(change, kind="embargo-change", reason=reason).seq
 
     def describe(self, description: CatalogDescription, *, reason: str) -> int:
         """Record the catalog's description in the Inventory root's ``extensions.statcat``.

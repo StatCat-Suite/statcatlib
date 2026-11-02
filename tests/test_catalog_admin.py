@@ -335,6 +335,27 @@ class TestEmbargoSetting:
         assert admin.set_embargo(on=False, reason="embargo off") == 3
         assert CatalogAdmin.open(root).embargo is False
 
+    @pytest.mark.parametrize("state", ["on", "off"])
+    def test_setting_the_embargo_it_already_has_is_refused(self, root: Path, state: str) -> None:
+        on = state == "on"
+        _seal(root, "a")
+        admin = CatalogAdmin.open(root)
+        if on:
+            admin.set_embargo(on=True, reason="embargo on")
+        seq = _newest(root).seq
+        with pytest.raises(ValueError, match=f"already {state}"):
+            admin.set_embargo(on=on, reason="again")
+        assert _newest(root).seq == seq
+        assert CatalogAdmin.open(root).embargo is on
+
+    def test_setting_the_embargo_before_the_first_version_off_is_refused(self, root: Path) -> None:
+        sc.Catalog.create(root).close()
+        admin = CatalogAdmin.open(root)
+        with pytest.raises(ValueError, match="already off"):
+            admin.set_embargo(on=False, reason="off")
+        assert admin.products() == []
+        assert not (root / "CURRENT").exists()
+
     def test_a_stale_automatic_release_after_embargo_is_turned_on_is_refused(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

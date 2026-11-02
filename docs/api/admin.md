@@ -81,6 +81,10 @@ admin.editions("14100287")  # the new edition, state "embargoed"
 admin.release("14100287", edition.edition_id, reason="08:30 release")
 ```
 
+`set_embargo` refuses to set the state the catalog already has: turning the
+embargo on when it is on, or off when it is off (as it is before the first
+version), raises `ValueError` naming the current state and writes no version.
+
 With embargo on, a seal records its edition `embargoed`. `Catalog.open`
 never shows an embargoed edition: `products()`, `product(id).editions()` and
 `product(id).view()` see live editions only, and a product whose only
