@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.1] - 2026-11-02
+
+### Refactoring
+
+- **store**: Create Inventory files with sdmxlib's create_exclusive (GH-115)
+  - A directory fsync that fails now raises after the file is created, where statcatlib's own helper ignored
+    the error. Mounts without fsync on a directory are tracked in StatCat-Suite/sdmxlib#343.
+- **catalog**: Check the manifest digest in LocalRegistry.edition (GH-115)
+  - `Product.view` reads `manifest.json` once; a missing, malformed or mismatched manifest still raises `IncompatibleCatalogError`.
+
+### Miscellaneous
+
+- **deps**: Require `sdmxlib>=0.82.0,<0.83` (GH-115).
+
 ## [0.12.0] - 2026-11-02
 
 A catalog is now a directory of products, each a chain of immutable editions,
