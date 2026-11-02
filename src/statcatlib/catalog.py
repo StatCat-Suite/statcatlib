@@ -34,8 +34,9 @@ from typing import TYPE_CHECKING, NoReturn, Self
 import sdmxlib
 from attrs import frozen
 from sdmxlib.edition import ManifestError, read_manifest
-from sdmxlib.inventory import CATALOG_NAME, LiveEdition, LiveInventory, local_fetch
+from sdmxlib.inventory import CATALOG_NAME, LiveEdition, LiveInventory, decode_root, local_fetch, root_path
 
+from statcatlib.bundle import description_from_root
 from statcatlib.store.inventory import Change, InventoryContentionError, InventoryRuleError, InventoryWriter
 from statcatlib.store.store import VIEW_ATTRIBUTES, EditionView, IncompatibleCatalogError, _Store
 from statcatlib.store.working_copy import Edition, SealCheckError, WorkingCopy, manifest_sha256
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from sdmxlib.edition import Finding, Lifecycle
     from sdmxlib.inventory import FullInventory
 
+    from statcatlib.model.catalog import CatalogDescription
     from statcatlib.store.store import EmbeddingModel
     from statcatlib.store.working_copy import _Sealed
 
@@ -398,6 +400,23 @@ class Catalog:
             self._live = LiveInventory(local_fetch(self._root))
         self._live.refresh()
 
+    @property
+    def description(self) -> CatalogDescription | None:
+        """The catalog's description, as of the last `refresh`; ``None`` when none was recorded.
+
+        ``CatalogAdmin.describe`` records it in the Inventory root's
+        ``extensions.statcat``, and every later version carries it. It holds
+        the catalog-level fields only; the datasets come from the products'
+        live editions.
+        """
+        self._require_open()
+        if self._live is None:
+            return None
+        raw = local_fetch(self._root)(root_path(self._live.seq))
+        if raw is None:
+            return None
+        return description_from_root(decode_root(raw).extensions)
+
     def products(self) -> list[str]:
         """The products with a live edition, sorted."""
         self._require_open()
@@ -720,8 +739,5 @@ class Product:
     def rollback(self, *args: object, **kwargs: object) -> NoReturn:
         """Rollback is an operational change: raises `AttributeError` naming ``CatalogAdmin.rollback``."""
         del args, kwargs
-        msg = (
-            f"a product has no rollback; use CatalogAdmin.open(path).rollback({self._product_id!r}, reason=...), "
-            "which arrives in statcatlib's Phase 2a S3"
-        )
+        msg = f"a product has no rollback; use CatalogAdmin.open(path).rollback({self._product_id!r}, reason=...)"
         raise AttributeError(msg)
