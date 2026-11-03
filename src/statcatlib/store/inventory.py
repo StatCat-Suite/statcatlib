@@ -13,7 +13,11 @@ It adds three things to sdmxlib's helpers:
   ``seq``, so a slow writer never moves it back;
 - **the retry loop**: `InventoryWriter.commit` re-reads the head and re-applies
   the change when another writer created the next version first, so every
-  rule is evaluated against the version it lands on.
+  rule is evaluated against the version it lands on;
+- **the cross-product rules** (`statcatlib.store.cross_product`, Phase 3):
+  `InventoryWriter.commit` refuses a version that breaks specification §6.5
+  item 4, 7 or 8 for an entry that becomes live or embargoed in it, with
+  `CrossProductRuleError`.
 """
 
 from __future__ import annotations
@@ -56,15 +60,20 @@ from sdmxlib.inventory import (
 )
 from sdmxlib.storage import create_exclusive
 
+from statcatlib.store import cross_product
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from sdmxlib.inventory import Rule
     from sdmxlib.storage import JsonValue
 
+    from statcatlib.store.cross_product import Artefacts, CrossRule
+
 __all__ = [
     "MAX_RACES",
     "Change",
+    "CrossProductRuleError",
     "InventoryConflictError",
     "InventoryContentionError",
     "InventoryRuleError",
@@ -96,17 +105,22 @@ class InventoryRuleError(Exception):
 
     Attributes:
         rule: The rule broken: one of sdmxlib's `Rule` values, ``"kind"``
-            also for a product reopened with another kind, or
-            ``"lifecycle"`` for a product reopened with another lifecycle.
+            also for a product reopened with another kind,
+            ``"lifecycle"`` for a product reopened with another lifecycle, or
+            a cross-product rule (`CrossProductRuleError`):
+            ``"full-artefacts"``, ``"structure-home"`` or
+            ``"publish-order"``.
         product: The product.
         edition: The edition, where one is concerned.
     """
 
-    rule: Rule | Literal["lifecycle"]
+    rule: Rule | Literal["lifecycle"] | CrossRule
     product: str
     edition: str | None
 
-    def __init__(self, message: str, *, rule: Rule | Literal["lifecycle"], product: str, edition: str | None) -> None:
+    def __init__(
+        self, message: str, *, rule: Rule | Literal["lifecycle"] | CrossRule, product: str, edition: str | None
+    ) -> None:
         """Say why, and name the rule, the product and the edition."""
         super().__init__(message)
         self.rule = rule
@@ -129,6 +143,61 @@ class NonFastForwardError(InventoryRuleError):
     The message names the edition, its base, the live edition, and the fix:
     discard the working copy, then start one from the live edition.
     """
+
+
+class CrossProductRuleError(InventoryRuleError):
+    """A version that breaks a cross-product rule, specification §6.5 item 4, 7 or 8.
+
+    `product` and `edition` name the incoming entry, the one that becomes
+    live or embargoed in the version. The message names the item, the URN,
+    the editions compared and the fix. `rule` is ``"full-artefacts"`` (item
+    4: a data edition's full artefact or partial matches no live or
+    embargoed edition of its structure home, a cut codelist has no home, or
+    a full artefact with no home differs from another data product's live
+    copy), ``"structure-home"`` (item 7: a second structure home among live
+    editions) or ``"publish-order"`` (item 8: a data edition entering live
+    before its structure edition).
+
+    Attributes:
+        item: The specification §6.5 item: 4, 7 or 8.
+        urn: The artefact concerned.
+        editions: ``(product, edition)`` pairs: the incoming entry first,
+            then each edition it was compared with.
+    """
+
+    item: Literal[4, 7, 8]
+    urn: str
+    editions: tuple[tuple[str, str], ...]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule: CrossRule,
+        item: Literal[4, 7, 8],
+        urn: str,
+        editions: Sequence[tuple[str, str]],
+        product: str,
+        edition: str | None,
+    ) -> None:
+        """Say why, and name the rule, the item, the URN and the editions compared."""
+        super().__init__(message, rule=rule, product=product, edition=edition)
+        self.item = item
+        self.urn = urn
+        self.editions = tuple(editions)
+
+    @classmethod
+    def of(cls, refusal: cross_product.Refusal) -> CrossProductRuleError:
+        """The error for *refusal*, from `statcatlib.store.cross_product.refusals`."""
+        return cls(
+            refusal.message,
+            rule=refusal.rule,
+            item=refusal.item,
+            urn=refusal.urn,
+            editions=refusal.editions,
+            product=refusal.product,
+            edition=refusal.edition,
+        )
 
 
 def producer() -> Producer:
@@ -201,18 +270,45 @@ class InventoryWriter:
     ``CURRENT`` in that order (spec §6.6).
     """
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, artefacts: Artefacts | None = None) -> None:
         """Write the catalog at *root*.
 
         Args:
             root: The catalog directory.
+            artefacts: How the cross-product rules read an edition's
+                artefacts; a `statcatlib.store.cross_product.ManifestArtefacts`
+                over *root* when ``None``.
         """
         self._root = Path(root)
+        self._artefacts: Artefacts = artefacts or cross_product.ManifestArtefacts(self._root)
 
     @property
     def root(self) -> Path:
         """The catalog directory."""
         return self._root
+
+    @property
+    def artefacts(self) -> Artefacts:
+        """The reader the cross-product rules read each edition's artefacts with."""
+        return self._artefacts
+
+    def refusals(
+        self, full: FullInventory | None, leaves: Mapping[str, Leaf], *, artefacts: Artefacts | None = None
+    ) -> dict[str, CrossProductRuleError]:
+        """The cross-product rules (`statcatlib.store.cross_product.refusals`) over the version *leaves* would write.
+
+        Args:
+            full: The head, or ``None`` before the first version.
+            leaves: The planned change's leaves.
+            artefacts: The reader; the writer's when ``None``.
+
+        Returns:
+            Each refused product's error, by product.
+
+        A manifest the reader cannot read raises `sdmxlib.edition.ManifestError`.
+        """
+        found = cross_product.refusals(full, leaves, artefacts or self._artefacts)
+        return {product_id: CrossProductRuleError.of(refusal) for product_id, refusal in found.items()}
 
     # -- reading ---------------------------------------------------------
 
@@ -340,13 +436,21 @@ class InventoryWriter:
         self._advance_current(root, data)
         return root
 
+    def _refuse(self, full: FullInventory | None, leaves: Mapping[str, Leaf]) -> None:
+        """Raise the first refused product's `CrossProductRuleError`, by product id, when the rules refuse *leaves*."""
+        found = self.refusals(full, leaves)
+        if found:
+            raise found[min(found)]
+
     def commit(self, change: Callable[[FullInventory | None], Change], *, kind: EventKind, reason: str) -> Root:
         """Commit one version, re-applying *change* to the new head after each lost race.
 
         *change* receives the head, or ``None`` before the first version, and
-        applies sdmxlib's pure rules to it, raising on a refusal. Every
-        precondition is evaluated again against each head it is given: the
-        fast-forward check, ``if_live`` and the embargo setting.
+        applies sdmxlib's pure rules to it, raising on a refusal. Then, when
+        the change makes an entry live or embargoed, the cross-product rules
+        run on the version (`refusals`). Every precondition is evaluated
+        again against each head it is given: the fast-forward check,
+        ``if_live``, the embargo setting and the cross-product rules.
 
         Args:
             change: Computes the version's change from the head.
@@ -358,10 +462,16 @@ class InventoryWriter:
 
         Raises:
             InventoryContentionError: `MAX_RACES` races were lost in a row.
+
+        A version that breaks a cross-product rule raises the first refused
+        product's `CrossProductRuleError`, by product id, and a manifest the
+        rules cannot read raises `sdmxlib.edition.ManifestError`; neither
+        writes anything.
         """
         for _ in range(MAX_RACES):
             full = self.full()
             planned = change(full)
+            self._refuse(full, planned.leaves)
             try:
                 root = self.try_commit(
                     None if full is None else full.root,

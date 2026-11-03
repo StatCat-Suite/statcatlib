@@ -42,8 +42,10 @@ from statcatlib.store.store import VIEW_ATTRIBUTES, EditionView, IncompatibleCat
 from statcatlib.store.working_copy import (
     Edition,
     EditionCheckError,
+    Planned,
     SealCheckError,
     WorkingCopy,
+    precheck_refusals,
     structure_editions,
 )
 
@@ -54,6 +56,7 @@ if TYPE_CHECKING:
     from sdmxlib.inventory import FullInventory, Kind, Leaf
 
     from statcatlib.model.catalog import CatalogDescription
+    from statcatlib.store.inventory import CrossProductRuleError
     from statcatlib.store.store import EmbeddingModel
     from statcatlib.store.working_copy import _Sealed
 
@@ -196,17 +199,19 @@ def _seal_each(
 ) -> list[_BatchSealed]:
     """`Catalog.seal`'s passes before the record: the structure pass, the structure-check pass, the data pass.
 
-    1. Structure: pre-check and seal each structure working copy.
+    1. Structure: pre-check each structure working copy, run the
+       cross-product pre-check on them together, and seal each that passed.
     2. Structure check: run the publish check of each sealed structure
        edition, given the batch's other structure editions in place of
        their products' recorded ones. An edition with a finding is dropped,
        and the pass repeats for the rest until a pass drops none, since a
        reference may have resolved only in a dropped edition.
-    3. Data: pre-check every data working copy, then seal each that passed,
-       then run the publish check of each data edition whose partials
-       record a ``partial_of``, given every structure product's live and
-       embargoed editions with the batch's structure editions in their
-       place.
+    3. Data: pre-check every data working copy, run the cross-product
+       pre-check on them together with the batch's structure editions, then
+       seal each that passed, then run the publish check of each data
+       edition whose partials record a ``partial_of``, given every structure
+       product's live and embargoed editions with the batch's structure
+       editions in their place.
 
     Args:
         writer: The catalog's Inventory writer.
@@ -218,26 +223,77 @@ def _seal_each(
         Each sealed edition that passed, not yet recorded: the structure
         editions first.
     """
-    structures = _seal_ready([wc for wc in batch if wc.kind == "structure"], checks, refused)
+    ids = frozenset(wc.product_id for wc in batch)
+    structures = _seal_ready(writer, [wc for wc in batch if wc.kind == "structure"], checks, refused, batch=ids)
     checked = _check_structures(writer, structures, refused)
-    data = _seal_ready([wc for wc in batch if wc.kind != "structure"], checks, refused)
+    fixed = _fixed(writer, checked)
+    data = _seal_ready(writer, [wc for wc in batch if wc.kind != "structure"], checks, refused, batch=ids, fixed=fixed)
     return [*checked, *_check_partials(writer, data, checked, refused)]
 
 
+def _fixed(writer: InventoryWriter, checked: list[_BatchSealed]) -> list[Planned]:
+    """The batch's checked structure editions as the data pass's cross-product pre-check is given them.
+
+    An edition whose record sdmxlib's rules refuse is left out; `_record_batch`
+    refuses it again, with each edition whose publish check was given it.
+    """
+    full = writer.full()
+    fixed: list[Planned] = []
+    for done in checked:
+        with contextlib.suppress(InventoryRuleError):
+            fixed.append(Planned(done.wc.product_id, done.wc.edition_id, done.wc._next_leaf(full, done.sealed)))
+    return fixed
+
+
+def _cross_ready(
+    writer: InventoryWriter, ready: list[WorkingCopy], refused: dict[str, Exception], fixed: list[Planned]
+) -> list[WorkingCopy]:
+    """The cross-product pre-check of one pass's working copies, together with *fixed*; the ones it accepts.
+
+    A refused working copy stays open, and goes to *refused*.
+    """
+    full = writer.full()
+    planned: dict[str, Planned] = {}
+    for wc in ready:
+        try:
+            planned[wc.product_id] = wc._planned(full)
+        except InventoryRuleError as exc:
+            refused[wc.product_id] = exc
+    checked = [
+        planned[wc.product_id]
+        for wc in ready
+        if wc.product_id in planned
+        and wc._may_be_refused(full, [*fixed, *(one for p, one in planned.items() if p != wc.product_id)])
+    ]
+    found: dict[str, CrossProductRuleError | ManifestError] = {}
+    if checked:
+        try:
+            found.update(precheck_refusals(writer, full, checked, fixed))
+        except ManifestError as exc:
+            found.update(dict.fromkeys((one.product_id for one in checked), exc))
+    refused.update(found)
+    return [wc for wc in ready if wc.product_id in planned and wc.product_id not in found]
+
+
 def _seal_ready(
+    writer: InventoryWriter,
     working_copies: list[WorkingCopy],
     checks: tuple[Callable[[EditionView], Iterable[Finding]], ...],
     refused: dict[str, Exception],
+    *,
+    batch: frozenset[str],
+    fixed: list[Planned] | None = None,
 ) -> list[_BatchSealed]:
-    """Pre-check every working copy, then seal each that passed."""
+    """Pre-check every working copy, run the cross-product pre-check on them together, then seal each that passed."""
     ready: list[WorkingCopy] = []
     for wc in working_copies:
         try:
-            wc._precheck(checks)
+            wc._precheck(checks, batch=batch)
         except (SealCheckError, InventoryRuleError, InventoryContentionError) as exc:
             refused[wc.product_id] = exc
         else:
             ready.append(wc)
+    ready = _cross_ready(writer, ready, refused, fixed or [])
     sealed: list[_BatchSealed] = []
     for wc in ready:
         try:
@@ -353,13 +409,47 @@ def _drop_dependents(
                 dropping = True
 
 
+def _batch_leaves(
+    writer: InventoryWriter,
+    full: FullInventory | None,
+    sealed: list[_BatchSealed],
+    at_record: dict[str, InventoryRuleError | EditionCheckError],
+) -> dict[str, Leaf]:
+    """The batch's next leaves on *full*: each product the rules accept; each refused one goes to *at_record*.
+
+    An edition *full* records already with its ``manifest_sha256`` gets no
+    leaf and no refusal. The cross-product rules run again after each drop,
+    since a dropped edition can be the one another was accepted with.
+    """
+    leaves: dict[str, Leaf] = {}
+    for done in sealed:
+        if done.wc._recorded_in(full, done.sealed):
+            continue
+        try:
+            leaves[done.wc.product_id] = done.wc._next_leaf(full, done.sealed)
+        except InventoryRuleError as exc:
+            at_record[done.wc.product_id] = exc
+    while True:
+        _drop_dependents(sealed, leaves, at_record)
+        found = writer.refusals(full, leaves)
+        if not found:
+            return leaves
+        for product_id, exc in found.items():
+            at_record[product_id] = exc
+            del leaves[product_id]
+
+
 def _record_batch(
     writer: InventoryWriter, sealed: list[_BatchSealed], refused: dict[str, Exception]
 ) -> dict[str, Edition]:
-    """`Catalog.seal`'s last pass: record every sealed edition sdmxlib's rules accept, in one commit.
+    """`Catalog.seal`'s last pass: record every sealed edition the rules accept, in one commit.
 
+    A product sdmxlib's rules or the cross-product rules refuse is left out.
     A structure edition refused at record time also drops each batch
-    edition whose publish check was given it, until a pass drops none.
+    edition whose publish check was given it, and the rules run again on
+    the rest, until a pass drops none. An edition another writer's journal
+    repair recorded already, with the same ``manifest_sha256``, counts as
+    recorded.
 
     Args:
         writer: The catalog's Inventory writer.
@@ -373,13 +463,7 @@ def _record_batch(
 
     def change(full: FullInventory | None) -> Change:
         at_record.clear()
-        leaves: dict[str, Leaf] = {}
-        for done in sealed:
-            try:
-                leaves[done.wc.product_id] = done.wc._next_leaf(full, done.sealed)
-            except InventoryRuleError as exc:
-                at_record[done.wc.product_id] = exc
-        _drop_dependents(sealed, leaves, at_record)
+        leaves = _batch_leaves(writer, full, sealed, at_record)
         if not leaves:
             raise _NothingToRecordError
         return Change(leaves=leaves)
