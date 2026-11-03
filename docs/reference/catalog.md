@@ -71,6 +71,8 @@ the same surface with examples.
 
 ::: statcatlib.NonFastForwardError
 
+::: statcatlib.CrossProductRuleError
+
 ::: statcatlib.InventoryConflictError
 
 ::: statcatlib.InventoryContentionError

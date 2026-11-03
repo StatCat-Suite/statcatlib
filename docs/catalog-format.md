@@ -253,6 +253,52 @@ batch the batch's other structure editions in place of their products'
 recorded ones. A finding leaves the edition sealed and unrecorded and raises
 `EditionCheckError`.
 
+### 3.3 The cross-product rules
+
+sdmxlib's Inventory rules read one product's leaf. statcatlib's Inventory
+writer adds the rules that read several products: specification §6.5 items
+4, 7 and 8 (`statcatlib.store.cross_product`). A writer MUST NOT write a
+version that breaks one. Each rule applies to an **incoming** entry, one
+that becomes `live` or `embargoed` in the version, and compares it with
+editions of other products only, since a product's own embargoed edition
+replaces its live one at release. A URN's **structure home** is the
+structure product whose live or embargoed edition holds the URN as a full
+artefact.
+
+| item | applies to | refused when | `rule` |
+| --- | --- | --- | --- |
+| 7 | a structure edition entering `live` | another structure product's live edition holds one of its full artefacts | `structure-home` |
+| 4 | a data edition's full artefact with a structure home | no live or embargoed edition of the home holds its fingerprint | `full-artefacts` |
+| 4 | a data edition's partial that records a `partial_of` | no live or embargoed structure edition holds the URN full with that fingerprint, or none holds it at all | `full-artefacts` |
+| 4 | a data edition entering `live`, full artefact with no structure home | another data product's edition, live once the version is written, holds another fingerprint | `full-artefacts` |
+| 8 | a data edition entering `live`, full artefact with a home, or partial | only an embargoed home edition holds its fingerprint | `publish-order` |
+
+The rules read each edition's artefacts from its `manifest.json`, after
+checking the file's SHA-256 against the Inventory's `manifest_sha256`. A
+partial with no `partial_of` is skipped. A refusal raises
+`CrossProductRuleError`, naming the rule, the item, the URN and the editions
+compared.
+
+The seal checks the rules before sdmxlib's seal, against the head, with the
+working copy's artefacts fingerprinted from its open store; `Catalog.seal`
+checks each pass's working copies together, with the batch's sealed
+structure editions. The Inventory commit checks them again on the version it
+lands on, as do `CatalogAdmin.release` and `CatalogAdmin.rollback`.
+
+A data edition is **stale** when it is `live` or `embargoed` and holds a URN
+with a structure home, as a full artefact or as a partial, whose fingerprint
+(a partial's `partial_of`) matches no live or embargoed edition of that home.
+A structure edit, or a rollback of a structure product, makes the data
+editions holding the old copy stale once the old structure edition leaves
+`live` and `embargoed`. A stale live edition stays live and keeps serving its
+own closure; a stale embargoed edition is refused at release by the item 4
+rows. Stale is derived from the Inventory and the manifests and is never
+recorded. `statcat verify-catalog` and `statcat doctor` report each stale
+edition with the URN, the fingerprint it holds and the home's live edition,
+and the fix: republish the product. `CatalogAdmin.prune` keeps a structure
+edition that a live or embargoed data edition's `partial_of` cites
+(specification §11.4).
+
 ## 4. The search index
 
 ### 4.1 `index.json`
@@ -482,7 +528,8 @@ A structure product's edition replaces step 2 with
 `wc.fill_structures(source, ...)` on a working copy from
 `working_copy(kind="structure")`, and step 4 refuses a dataflow, a binding or
 a partial before the seal and runs the publish check (§3.2) before the
-record.
+record. Step 4 checks the cross-product rules (§3.3) before sdmxlib's seal
+and again at the record.
 
 `statcatlib.testing.synthetic_catalog(path, shape, seed=...)` runs these
 steps over `sdmxlib.testing.synthetic_edition`, building a sealed statcat

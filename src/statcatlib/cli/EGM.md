@@ -32,8 +32,8 @@ Commands:
 | Command | Function | Calls | Exit 1 when |
 | --- | --- | --- | --- |
 | `statcat build-index CATALOG PRODUCT` | `build_index` | `sc.Catalog.create(catalog, exist_ok=True).product(product).working_copy(resume=True).build_index(...)` | `catalog.json` is missing, the product has no unsealed edition, or `sentence_transformers` cannot be imported |
-| `statcat verify-catalog PATH` | `verify_catalog` | `diagnostics.verify_catalog(path)` | any finding, each printed as `FAIL <file>: <detail>`; exit 2 on `CatalogUnreadableError` |
-| `statcat doctor PATH` | `doctor` | `diagnostics.doctor(path)` | the report holds a warning |
+| `statcat verify-catalog PATH` | `verify_catalog` | `diagnostics.verify_catalog(path)` | any finding, each printed as `FAIL <file>: <detail>`; exit 2 on `CatalogUnreadableError`. Each stale data edition prints as `STALE <StaleEdition>` and leaves the exit code alone |
+| `statcat doctor PATH` | `doctor` | `diagnostics.doctor(path)` | the report holds a warning (a stale data edition is one, topic `stale data editions`) |
 | `statcat prune PATH --older-than DAYS --reason TEXT [--apply]` | `prune` | `sc.CatalogAdmin.open(path).prune(older_than=timedelta(days=DAYS), reason=TEXT, dry_run=not apply)` | `catalog.json` is missing, the catalog cannot be opened, the retire commit is refused, or a deletion failed (each printed as `FAIL <path>: <error>`) |
 
 `build-index` options and their `WorkingCopy.build_index` keyword:

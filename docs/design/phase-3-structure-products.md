@@ -1216,6 +1216,45 @@ when the count changes, and runs `just docs-build`.
 *   `verify_catalog` adds a finding for a URN two structure products' live
     editions hold. Tests in `tests/test_cli_verify_doctor.py`.
 
+### As built in S3
+
+Slice S3 follows the design with these changes, each the smallest the code
+forced:
+
+- **One import direction.** `cross_product.refusals` returns `Refusal`
+  values, and `InventoryWriter.refusals` turns each into a
+  `CrossProductRuleError`, which lives in `store/inventory.py` beside
+  `InventoryRuleError` and `NonFastForwardError`. `inventory.py` imports
+  `cross_product`, which imports only sdmxlib; the error in `cross_product`
+  would need an import cycle or a local import.
+- **The reader skips partials with no `partial_of`.** `PartialRecord` has no
+  `partial` flag, so a partial with no `partial_of` would read as a full
+  artefact. `ManifestArtefacts` and `StoreArtefacts` leave such partials
+  out, which is the skip the design states (Partials the seal cannot vouch
+  for).
+- **The pre-check is a separate step.** `_precheck(checks, *, batch=())`
+  takes the batch's product ids, which the journal repair leaves out; the
+  cross-product pre-check runs after it, as `_cross_precheck` in
+  `WorkingCopy.seal` and as `precheck_refusals` over a pass's working copies
+  in `Catalog.seal`.
+- **The pre-check is skipped where no rule can refuse.** `_may_be_refused`
+  is false for a structure working copy when no other structure product has
+  a live or embargoed edition, and for a data working copy when no
+  structure product has one, it holds no partial with a `partial_of`, no
+  other data working copy is in the batch, and no other data product's live
+  edition shares a URN with it. A Phase 2a seal then fingerprints nothing
+  twice (Non-Functional Requirements); the commit runs the rules either way.
+- **A seal counts a repair's record.** With the repair catalog-wide, another
+  writer's `working_copy()` can record an edition between its sdmxlib seal
+  and its own commit; the seal and the batch count an edition the head
+  records with the same `manifest_sha256` as recorded.
+- **`StaleEdition`** is exported from `statcatlib.diagnostics`, beside
+  `VerifyReport`, and from `statcatlib.store.cross_product`; `statcatlib`
+  exports `CrossProductRuleError` only.
+- **Two test files.** `tests/test_cross_product_rules.py` (unit) holds the
+  rules over built leaves and `tests/test_cross_product.py` (integration)
+  the rest, since every test file carries one tier mark (GH-8).
+
 ### Acceptance test map
 
 GH-51's acceptance list, from the issue body and sdmxlib's plan's gating

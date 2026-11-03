@@ -69,6 +69,13 @@ A working copy built on the withdrawn edition fails its seal with
 A withdrawn edition never goes live again on its own: neither the seal
 journal repair nor `release` makes it live.
 
+A rollback makes an edition live, so the cross-product rules apply
+([Publish order and the cross-product rules](#publish-order-and-the-cross-product-rules)).
+A rollback of a data product to an edition cut from a structure edition that
+is neither live nor embargoed is refused with `CrossProductRuleError`
+(`rule="full-artefacts"`). A rollback of a structure product withdraws the
+edition the live data editions were cut from, so those become stale.
+
 ### Embargo, release and cancel
 
 ```python
@@ -109,6 +116,43 @@ and a job timed by a skewed clock releases early or late.
 On local disk the embargo holds only for readers that go through
 `Catalog`: anyone who can read the catalog directory can read an embargoed
 edition's files ([Catalog format](../catalog-format.md)).
+
+### Publish order and the cross-product rules
+
+The Inventory writer refuses a version that breaks specification §6.5 item
+4, 7 or 8 for an edition entering `live` or `embargoed`
+([The cross-product rules](../catalog-format.md#33-the-cross-product-rules)).
+`release` and `rollback` raise `CrossProductRuleError` and write nothing;
+its `rule`, `urn` and `editions` say what to fix:
+
+- `publish-order`: a data edition's partial, or a full artefact a structure
+  product holds, matches only an embargoed structure edition. Release the
+  structure edition first, then the data edition:
+
+  ```python
+  admin.release("structure-geo", geo.edition_id, reason="08:30 release")
+  admin.release("14100287", table.edition_id, reason="08:30 release")
+  ```
+
+- `full-artefacts`: a data edition holds a copy no live or embargoed edition
+  of its structure home holds. A **stale** embargoed edition, cut from a
+  structure edition an edit has since replaced, is refused this way; cancel
+  it and republish the product from the structure's current edition. The
+  same rule refuses a full artefact with no structure home, such as a DSD
+  two data products share, whose copy differs from another data product's
+  live copy. `release` takes one product per call, so under embargo such a
+  change cannot go live: turn the embargo off and seal every product holding
+  it in one `Catalog.seal`, or give the artefact a structure home.
+- `structure-home`: a structure edition holds a full artefact another
+  structure product holds live.
+
+A structure edit is accepted while data editions hold the old copy. The live
+ones stay live and keep serving until their products are republished;
+`statcat verify-catalog` and `statcat doctor` list them as stale.
+
+To move a full artefact from one structure product to another, release the
+edition that drops it first, then the edition that adds it: a data edition
+cut from it in between is refused until the second release.
 
 ### The catalog's description
 
@@ -171,7 +215,9 @@ Prune never touches a product with a working copy or a seal journal entry:
 it reports each in `skipped_products` with the reason, and retires and
 deletes nothing of it. Seal or `discard()` the working copy, or let the
 product's next `working_copy()` settle the journal, and run prune again.
-A live or embargoed edition is never retired, and prune deletes only the
+A live or embargoed edition is never retired, nor is a structure edition
+that a live or embargoed data edition's `partial_of` cites, so a stale data
+edition's partials still verify. Prune deletes only the
 directories of tombstoned editions, so it never deletes a live, embargoed
 or unrecorded edition. It deletes no Inventory root or leaf, and tombstones
 never expire.
@@ -223,7 +269,20 @@ and checks:
   `sdmxlib.edition.check_edition(at="publish", extensions={"statcat": check_catalog})`:
   the size and digests of every file the manifest lists, the product's shared
   `data/` files included, the lake, the bindings, the references, and the
-  `statcat` section with its search index.
+  `statcat` section with its search index. A data edition is checked with
+  every recorded structure edition, so each partial is checked against the
+  one it was cut from; a structure edition with the other structure
+  products' live and embargoed editions, where its references must resolve.
+
+It then lists each **stale** data edition: a live or embargoed one holding a
+URN whose structure home no longer holds that copy, after a structure edit.
+A stale edition is allowed until its product is republished, so it is no
+finding and leaves the exit code alone. It prints one line per edition and
+URN:
+
+```text
+STALE table-a/0192… (live) holds urn:…Codelist=CODR:CL_GEO(1.0) at 4be1f0a2c9d3, which no live or embargoed edition of its structure home structure-geo holds (live edition: 0193…); republish the product
+```
 
 It prints each finding as `FAIL <file>: <detail>`, where the file is a path
 from the catalog directory, and exits with one of three codes:
@@ -238,8 +297,10 @@ from the catalog directory, and exits with one of three codes:
 Inventory recorded, and its error names `statcat verify-catalog`.
 
 From Python, `statcatlib.diagnostics.verify_catalog(path)` returns a
-`VerifyReport` (`ok`, `seq`, `editions`, `findings`) and raises
-`CatalogUnreadableError` where the command exits 2.
+`VerifyReport` (`ok`, `seq`, `editions`, `findings`, `stale`) and raises
+`CatalogUnreadableError` where the command exits 2. Each item of `stale` is
+a `StaleEdition`: `product_id`, `edition_id`, `state`, `urn`, `fingerprint`
+(a partial's `partial_of`), `home` and `home_live`.
 
 ### Reporting on a catalog for support
 
@@ -257,6 +318,7 @@ knowing and `WARNING` for something to act on:
 | `catalog.json` | The catalog id and restore epoch, or why the file cannot be read |
 | `CURRENT` | The version `CURRENT` names against the newest valid version found by probing. A lag after two writers raced is safe, because readers probe forward |
 | `inventory` | Roots the read protocol skipped, and leaves that fail sdmxlib's checks |
+| `stale data editions` | A warning for each stale data edition and URN, as `verify-catalog` lists them, with the fix: republish the product. A stale embargoed edition's release is refused until then |
 | `working copy` | Each unsealed edition with its start time; `working_copy(resume=True)` resumes it and `discard()` deletes it |
 | `journal` | Each seal journal entry, an empty one included. An entry is a seal a crash may have stopped; the product's next `working_copy()` settles it |
 | `unrecorded edition` | Each sealed edition that the newest version neither names nor tombstones |
