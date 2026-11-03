@@ -5,9 +5,9 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## 0.13.0: structure products, on sdmxlib 0.83
+## 0.13.0: structure products, on sdmxlib 0.84
 
-statcatlib requires `sdmxlib>=0.83,<0.84`. sdmxlib's
+statcatlib requires `sdmxlib>=0.84,<0.85`. sdmxlib's
 [upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists
 its own changes. No catalog is rebuilt: the store schema stays 2.52, the
 manifest 3.0, the Inventory 1.0, the `statcat` schema 2.2, the `statcat`
