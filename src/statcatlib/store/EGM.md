@@ -188,6 +188,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
 - `StaleEdition` and `stale_editions(full, artefacts)`: each live or
   embargoed data edition and URN whose fingerprint (a partial's
   `partial_of`) no live or embargoed edition of its structure home holds.
+- `HomelessPartial` and `homeless_partials(full, artefacts)`: each partial
+  of a live or embargoed data edition whose URN no live or embargoed
+  structure edition holds full, as after its home drops the URN.
+  `stale_editions` skips a URN with no home; item 4 refuses the edition's
+  release, and `doctor` warns.
 - `cited_structures(full, artefacts)`: the structure editions, any state, a
   live or embargoed data edition's `partial_of` cites (prune keeps them).
 - `ACTIVE` (`live`, `embargoed`), `CrossRule`.
@@ -400,8 +405,8 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite). The cross-product rules: `tests/test_cross_product_rules.py` (unit,
   `refusals` over built leaves) and `tests/test_cross_product.py`
-  (integration: seals, batches, releases, rollbacks, stale editions, the
-  committed sabotage test). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`
+  (integration: seals, batches, releases, rollbacks, stale editions,
+  partials with no structure home, the committed sabotage test). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`
   and `tests/test_concurrent_seal.py`; the batched seal in
   `tests/test_catalog_model.py::TestBatchSeal`. Structure products, their
   publish check (and which checks skip the fingerprint recompute), batch

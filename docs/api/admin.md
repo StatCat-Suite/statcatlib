@@ -318,7 +318,8 @@ knowing and `WARNING` for something to act on:
 | `catalog.json` | The catalog id and restore epoch, or why the file cannot be read |
 | `CURRENT` | The version `CURRENT` names against the newest valid version found by probing. A lag after two writers raced is safe, because readers probe forward |
 | `inventory` | Roots the read protocol skipped, and leaves that fail sdmxlib's checks |
-| `stale data editions` | A warning for each stale data edition and URN, as `verify-catalog` lists them, with the fix: republish the product. A stale embargoed edition's release is refused until then |
+| `stale data editions` | One item for each stale data edition and URN, as `verify-catalog` lists them, with the fix: republish the product. A stale live edition's item is `ok`; a stale embargoed edition's is a warning, since its release is refused until then |
+| `partials with no structure home` | A warning for each partial of a live or embargoed data edition whose URN no live or embargoed structure edition holds full, as after its structure product drops the codelist. Its release, or a seal that cuts the codelist, is refused. The fix: seal a structure edition that holds the URN full and republish the product from it, or republish the product with `partials=False` |
 | `working copy` | Each unsealed edition with its start time; `working_copy(resume=True)` resumes it and `discard()` deletes it |
 | `journal` | Each seal journal entry, an empty one included. An entry is a seal a crash may have stopped; the product's next `working_copy()` settles it |
 | `unrecorded edition` | Each sealed edition that the newest version neither names nor tombstones |

@@ -26,7 +26,12 @@ edition holds it as a full artefact. A data edition is **stale** when it is
 live or embargoed and holds a URN with a home, full or as a partial, whose
 fingerprint (a partial's ``partial_of``) matches no live or embargoed edition
 of the home: `stale_editions` lists them for ``statcat verify-catalog`` and
-``statcat doctor``. Stale is derived and never recorded.
+``statcat doctor``. Stale is derived and never recorded. A live or embargoed
+data edition can also hold a partial whose URN no live or embargoed
+structure edition holds full, after its structure home drops the URN.
+`stale_editions` skips that URN, which has no home; item 4 refuses the
+edition's release, and `homeless_partials` lists each such partial for
+``statcat doctor``.
 
 The rules read an edition's artefacts through an `Artefacts` callable:
 `ManifestArtefacts` reads sealed manifests, and `StoreArtefacts` answers for
@@ -56,11 +61,13 @@ __all__ = [
     "ACTIVE",
     "Artefacts",
     "CrossRule",
+    "HomelessPartial",
     "ManifestArtefacts",
     "Refusal",
     "StaleEdition",
     "StoreArtefacts",
     "cited_structures",
+    "homeless_partials",
     "incoming",
     "manifest_records",
     "refusals",
@@ -476,6 +483,63 @@ def stale_editions(full: FullInventory | None, artefacts: Artefacts) -> list[Sta
             live = None if live_holder is None else live_holder.entry.edition_id
             found.append(StaleEdition(product_id, entry.edition_id, entry.state, urn, fingerprint, home, live))
     return found
+
+
+@frozen
+class HomelessPartial:
+    """A live or embargoed data edition's partial whose URN no structure edition holds full (§6.5 item 4).
+
+    Attributes:
+        product_id: The data product.
+        edition_id: The edition.
+        state: ``live`` or ``embargoed``.
+        urn: The partial's URN.
+        partial_of: The fingerprint of the full artefact it was cut from.
+    """
+
+    product_id: str
+    edition_id: str
+    state: State
+    urn: str
+    partial_of: str
+
+    def __str__(self) -> str:
+        if self.state == "embargoed":
+            effect = "its release is refused"
+        else:
+            effect = "it keeps serving its own closure, and the product's next seal that cuts the codelist is refused"
+        return (
+            f"{self.product_id}/{self.edition_id} ({self.state}) holds the partial {self.urn}, cut from "
+            f"{_short(self.partial_of)}, and no live or embargoed structure edition holds {self.urn} full, so the "
+            f"partial has no structure home and {effect} (specification §6.5 item 4). Seal a structure edition "
+            f"that holds {self.urn} full and republish the product from it, or republish the product with "
+            "partials=False"
+        )
+
+
+def homeless_partials(full: FullInventory | None, artefacts: Artefacts) -> list[HomelessPartial]:
+    """Every partial of a live or embargoed data edition of *full* whose URN no structure edition holds full.
+
+    `stale_editions` skips such a URN, since it has no structure home to be
+    stale against.
+
+    Args:
+        full: The Inventory version, or ``None``.
+        artefacts: Reads an edition's artefacts.
+
+    Returns:
+        The partials, by product, edition and URN.
+    """
+    if full is None:
+        return []
+    planned = dict(full.leaves())
+    homes = _homes(_active(planned, "structure"), artefacts)
+    return [
+        HomelessPartial(product_id, entry.edition_id, entry.state, urn, held.partial_of)
+        for product_id, entry in _active(planned, "data")
+        for urn, held in sorted(artefacts(product_id, entry.edition_id, entry.manifest_sha256).items())
+        if held.partial_of is not None and urn not in homes
+    ]
 
 
 def cited_structures(full: FullInventory | None, artefacts: Artefacts) -> set[tuple[str, str]]:

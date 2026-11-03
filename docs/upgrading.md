@@ -122,7 +122,10 @@ product is republished, and a stale embargoed edition is refused at release.
 `statcat verify-catalog` prints each as a `STALE` line
 (`VerifyReport.stale`, of `statcatlib.diagnostics.StaleEdition`) without
 counting it as a finding, and `statcat doctor` reports it under
-`stale data editions`. `verify-catalog` also checks each data edition's
+`stale data editions`. `statcat doctor` also warns, under `partials with no
+structure home`, about each data edition holding a partial whose URN no
+structure edition holds full any more; item 4 refuses its release.
+`verify-catalog` also checks each data edition's
 partials against the structure editions they were cut from, and each
 structure edition's references in the other structure products' live and
 embargoed editions. `CatalogAdmin.prune` keeps a structure edition that a

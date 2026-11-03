@@ -229,7 +229,10 @@ read.
   `warning`; `warnings` and `about(topic)` filter them. Topics: `synced
   folder`, `layout`, `catalog.json`, `CURRENT`, `inventory`, `stale data
   editions` (an item per stale data edition and URN: `info` for a live
-  edition, `warning` for an embargoed one), `working copy`
+  edition, `warning` for an embargoed one), `partials with no structure
+  home` (a `warning` per live or embargoed data edition and partial whose
+  URN no live or embargoed structure edition holds full,
+  `cross_product.homeless_partials`), `working copy`
   (`list_editions`), `journal` (empty entries included), `unrecorded edition`
   (sealed, and neither named nor tombstoned by the newest version) and
   `leftover file` (`*.tmp` in `inventory/` and `.*.tmp` in the root).

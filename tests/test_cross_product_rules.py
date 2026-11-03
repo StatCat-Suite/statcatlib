@@ -264,3 +264,30 @@ def test_cited_structures_name_the_edition_a_partial_was_cut_from(cat: Catalog) 
     cat.keep("structure-geo", edit)
 
     assert cross_product.cited_structures(cat.full(), cat.read) == {("structure-geo", first)}
+
+
+class TestHomelessPartials:
+    def test_a_partial_cut_from_the_live_home_is_not_listed(self, cat: Catalog) -> None:
+        _, table = cat.seal("table-a", "data", {GEO: cut("g1")})
+        cat.keep("table-a", table)
+        assert cross_product.homeless_partials(cat.full(), cat.read) == []
+
+    def test_a_live_and_an_embargoed_partial_are_listed_once_the_home_drops_the_urn(self, cat: Catalog) -> None:
+        live, table = cat.seal("table-a", "data", {GEO: cut("g1")})
+        cat.keep("table-a", table)
+        embargoed, table = cat.seal("table-a", "data", {GEO: cut("g1")}, embargo=True)
+        cat.keep("table-a", table)
+        _, edit = cat.seal("structure-geo", "structure", {CS: full("c1")})
+        assert cat.refusals({"structure-geo": edit}) == {}
+        cat.keep("structure-geo", edit)
+
+        found = cross_product.homeless_partials(cat.full(), cat.read)
+
+        assert [(h.edition_id, h.state, h.urn, h.partial_of) for h in found] == [
+            (live, "live", GEO, "g1"),
+            (embargoed, "embargoed", GEO, "g1"),
+        ]
+        assert "its release is refused" in str(found[1])
+        assert cross_product.stale_editions(cat.full(), cat.read) == [], "a URN with no home is not stale"
+        released = release(table, embargoed, now=_NOW, explicit=True)
+        assert "has no structure home" in cat.refusals({"table-a": released})["table-a"].message

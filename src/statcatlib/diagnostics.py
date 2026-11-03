@@ -15,7 +15,8 @@ Two functions, each run by a ``statcat`` command:
   at all raises `CatalogUnreadableError`.
 - `doctor` (``statcat doctor PATH``) reports on a catalog for support: the
   layout, ``catalog.json``, ``CURRENT`` against the newest root, root and leaf
-  validation, stale data editions, unsealed editions, seal journal entries,
+  validation, stale data editions, partials with no structure home,
+  unsealed editions, seal journal entries,
   sealed editions no version names, files a writer staged and left behind,
   and a synced-folder path.
 
@@ -44,7 +45,7 @@ from sdmxlib.inventory import (
 
 from statcatlib.bundle import STATCAT_SECTION, check_catalog
 from statcatlib.catalog import _refuse_legacy_layout
-from statcatlib.store.cross_product import StaleEdition, stale_editions
+from statcatlib.store.cross_product import HomelessPartial, StaleEdition, homeless_partials, stale_editions
 from statcatlib.store.inventory import InventoryWriter
 from statcatlib.store.store import IncompatibleCatalogError
 from statcatlib.store.working_copy import manifest_sha256
@@ -149,7 +150,8 @@ class DoctorItem:
     Attributes:
         topic: What it is about: ``layout``, ``synced folder``,
             ``catalog.json``, ``CURRENT``, ``inventory``,
-            ``stale data editions``, ``working copy``, ``journal``,
+            ``stale data editions``, ``partials with no structure home``,
+            ``working copy``, ``journal``,
             ``unrecorded edition`` or ``leftover file``.
         level: ``warning`` for something support acts on, ``info`` for state
             worth knowing.
@@ -361,6 +363,9 @@ def _stale(full: FullInventory, artefacts: Artefacts) -> tuple[list[StaleEdition
 
 # -- doctor ------------------------------------------------------------------
 
+#: The `DoctorItem.topic` of a partial with no structure home (`_homeless_items`).
+_HOMELESS = "partials with no structure home"
+
 
 def synced_folder(path: str | Path) -> str | None:
     """The sync client whose folder holds *path*, or ``None``.
@@ -522,6 +527,22 @@ def _stale_items(root: Path, full: FullInventory) -> Iterator[DoctorItem]:
             yield DoctorItem("stale data editions", "info", str(item))
 
 
+def _homeless_items(root: Path, full: FullInventory) -> Iterator[DoctorItem]:
+    """One ``partials with no structure home`` warning per live or embargoed data edition and such partial.
+
+    Specification §6.5 item 4 refuses the release of such an edition, so the
+    item is a ``warning`` in either state, as is a manifest the list cannot
+    read.
+    """
+    found: list[HomelessPartial] = []
+    try:
+        found = homeless_partials(full, InventoryWriter(root).artefacts)
+    except (ManifestError, InventoryError) as exc:
+        yield DoctorItem(_HOMELESS, "warning", f"the partials with no structure home cannot be listed: {exc}")
+    for item in found:
+        yield DoctorItem(_HOMELESS, "warning", str(item))
+
+
 def _leftovers(root: Path) -> Iterator[DoctorItem]:
     """Files the Inventory writer staged and never linked or unlinked: in ``inventory/`` and the catalog root."""
     staged = sorted(root.glob(".*.tmp"))
@@ -540,6 +561,8 @@ def doctor(path: str | Path) -> DoctorReport:
     against the newest valid root, root and leaf validation, each stale data
     edition (specification §6.5 item 4, with the fix: republish the
     product; ``info`` for a live edition, ``warning`` for an embargoed one),
+    each partial of a live or embargoed data edition whose URN no live or
+    embargoed structure edition holds full (a ``warning``, with the fix),
     and for each
     product its unsealed editions with their start times, its seal journal
     entries (empty ones included), and its sealed editions that the newest
@@ -574,7 +597,7 @@ def doctor(path: str | Path) -> DoctorReport:
     if full is None and not InventoryWriter(root).has_version():
         items.append(DoctorItem("inventory", "info", "no Inventory version yet; the first seal writes version 1"))
     elif full is not None:
-        items += [_current(root, full), *_inventory(full), *_stale_items(root, full)]
+        items += [_current(root, full), *_inventory(full), *_stale_items(root, full), *_homeless_items(root, full)]
     products = root / "products"
     product_dirs = sorted(p for p in products.iterdir() if p.is_dir()) if products.is_dir() else []
     for product_dir in product_dirs:

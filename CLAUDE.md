@@ -364,7 +364,9 @@ Inventory and seals editions:
   and SHA); a partial with no `partial_of` is skipped. Stale data editions
   (live or embargoed, holding a copy no live or embargoed home edition
   holds) are allowed and derived, never recorded: `stale_editions` lists
-  them for `verify-catalog` and `doctor`. `cross_product` imports only
+  them for `verify-catalog` and `doctor`. `homeless_partials` lists, for
+  `doctor`'s `partials with no structure home` warning, each partial of a
+  live or embargoed data edition whose URN no structure edition holds full. `cross_product` imports only
   sdmxlib; `refusals` returns `Refusal` values, which the writer turns into
   `CrossProductRuleError` (defined in `store/inventory.py`).
 - **Seal steps.** `WorkingCopy.seal(checks=())` settles the journal; runs
