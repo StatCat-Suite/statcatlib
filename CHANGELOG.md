@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-11-03
+
+Phase 3: structure products and partial codelists in data products. `docs/upgrading.md`'s 0.13.0 section describes the changes; no catalog is rebuilt.
+
+### Documentation
+
+- **design**: Draft the Phase 3 design for structure products and partials (GH-51)
+- **design**: Resolve the EGM review of the Phase 3 design (GH-51)
+- **design**: Record the owner's answers to the Phase 3 design's open questions (GH-51)
+- Describe structure products and the publish check (GH-51)
+- Describe partials in data products and the CODR generator (GH-51)
+- **design**: Follow the amended spec items 4, 7 and 8 (GH-51)
+- Describe the cross-product rules and stale data editions (GH-51)
+- **design**: Record Phase 3 slice S4 as built (GH-51)
+
+### Features
+
+- **store**: Add structure products, fill_structures and the publish check at seal (GH-51)
+- **store**: Fill data products with partials and check them at seal (GH-51)
+- **testing**: Add the CODR generator (GH-51)
+- **store**: Enforce the cross-product rules at seal and record (GH-51)
+  - A seal, batch, release, rollback or journal repair that breaks spec §6.5 item 4, 7 or 8 raises `CrossProductRuleError` and writes nothing.
+- **diagnostics**: Report stale data editions and keep their structure editions (GH-51)
+- **doctor**: Report stale live data editions as info (GH-51)
+- **doctor**: Warn about partials with no structure home (GH-51)
+  - `statcat doctor` reports a stale live data edition as `info` and a stale embargoed one as `warning`, and warns under `partials with no structure home` about a partial whose URN no structure edition holds full.
+
+### Performance
+
+- **seal**: Skip the fingerprint recompute in the seal's publish check (GH-51)
+  - The seal passes `fingerprints=False` to `check_edition`; the journal repair and `verify-catalog` still recompute.
+
+### Testing
+
+- Cover partials in data products and the CODR generator (GH-51)
+- Cover the cross-product rules, stale editions and the prune guard (GH-51)
+
+### Miscellaneous
+
+- **deps**: Require `sdmxlib>=0.84,<0.85` (GH-51).
+
 ## [0.12.1] - 2026-11-02
 
 ### Refactoring
