@@ -19,7 +19,9 @@ from statcatlib.store.schema import first_row
 from statcatlib.store.working_copy import WorkingCopy
 
 if TYPE_CHECKING:
-    from sdmxlib import ObsQuery
+    from collections.abc import Mapping, Sequence
+
+    from sdmxlib import EditionRegistry, ObsQuery, RestRegistry, WriteSource
     from sdmxlib.local.registry import LocalRegistry
     from sdmxlib.model.in_memory_registry import InMemoryRegistry
     from sdmxlib.model.urn import SdmxUrn
@@ -30,6 +32,7 @@ __all__ = [
     "ObservationSource",
     "dataset_from_dataflow",
     "ingest_data",
+    "ingest_dataflows",
     "ingest_sdmx",
     "ingest_sdmx_registry",
     "prepare_sdmx",
@@ -239,6 +242,64 @@ def ingest_sdmx(store: WorkingCopy, registry: InMemoryRegistry) -> list[Aggregat
     datasets = prepare_sdmx(registry)
     with store.bulk_load():
         store.put(datasets)
+    return datasets
+
+
+def ingest_dataflows(
+    wc: WorkingCopy,
+    source: RestRegistry | EditionRegistry,
+    dataflows: Sequence[SdmxUrn[Dataflow] | str],
+    *,
+    observations: Mapping[str, WriteSource] | None = None,
+    partials: bool = True,
+    publisher: Agent | None = None,
+    themes: list[ConceptRef] | None = None,
+) -> list[AggregateDataset]:
+    """Fill a data product's working copy with dataflows, cutting their codelists, and store their datasets.
+
+    It calls `WorkingCopy.fill_dataflows`, which copies each dataflow's
+    closure from *source*, writes its observations, cuts each codelist to the
+    codes the product uses and records what each partial was cut from. Then it
+    builds an `AggregateDataset` for each dataflow given, read back from the
+    working copy with its data structure, and stores them in one
+    ``bulk_load``. The other dataflows a republished product holds keep their
+    datasets.
+
+    Args:
+        wc: The working copy of a data product.
+        source: Where the structures are: a `sdmxlib.RestRegistry`, or a
+            sealed edition's or a scratch `sdmxlib.EditionRegistry`.
+        dataflows: The dataflows, by URN. A ``latest`` URN resolves to the
+            version the fill stored.
+        observations: The rows of each dataflow that has any, by URN string.
+        partials: Whether to cut codelists to partials.
+        publisher: The publisher every dataset records; the dataflow's
+            maintenance agency when ``None``.
+        themes: The themes every dataset records.
+
+    Returns:
+        The datasets stored, one per dataflow, in the order given.
+
+    Raises:
+        LookupError: A dataflow or its data structure cannot be read back
+            from the working copy.
+
+    A *wc* that is not a `WorkingCopy`, such as an `EditionView`, raises
+    `TypeError`, as does a structure product's working copy.
+    """
+    wc = require_working_copy(wc, "ingest_dataflows")
+    wc.fill_dataflows(source, dataflows, observations=observations, partials=partials)
+    datasets: list[AggregateDataset] = []
+    for given in dataflows:
+        urn = Dataflow.parse_urn(given) if isinstance(given, str) else given
+        flow = wc.registry.get(urn, expect=Dataflow)
+        dsd = None if flow is None else wc.registry.dsd(flow.urn)
+        if flow is None or dsd is None:
+            msg = f"{urn} or its data structure is not in the working copy of {wc.product_id} after the fill"
+            raise LookupError(msg)
+        datasets.append(dataset_from_dataflow(flow, dsd, publisher=publisher, themes=themes))
+    with wc.bulk_load():
+        wc.put(datasets)
     return datasets
 
 

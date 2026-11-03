@@ -96,10 +96,16 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
     they are made.
   - Writes: `put(obj)`, `put_concept(scheme_uri, concept)`,
     `add_lineage(...)`, `add_language_alternates(pairs, *, source)`,
-    `bulk_load()`, `transaction()`, `build_index(...) -> int`, and on a
+    `bulk_load()`, `transaction()`, `build_index(...) -> int`; on a
     structure product's working copy `fill_structures(source, *, families,
     agency, ids, artefacts) -> tuple[str, ...]`
-    (`sdmxlib.edition.fill_structures`; `TypeError` on a data product's).
+    (`sdmxlib.edition.fill_structures`; `TypeError` on a data product's);
+    and on a data product's `fill_dataflows(source, dataflows, *,
+    observations=None, partials=True) -> dict[str, str]`
+    (`sdmxlib.edition.fill_edition`; `TypeError` on a structure product's),
+    which writes `_meta.fill_in_progress`, fills, then in one transaction
+    merges the returned map into `_meta.partial_of` (JSON, the later value
+    winning) and deletes the marker.
   - Ending: `seal(checks=()) -> Edition`, `close()` (leaves the edition
     unsealed for `working_copy(resume=True)`; also the context manager's
     exit), `discard()` (`sdmxlib.edition.discard`).
@@ -111,12 +117,19 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `manifest_sha256(edition_dir)` hashes an edition's `manifest.json`, and
   `edition_kind(manifest)` reads the kind its `statcat` section names.
 - `structure_editions(full, catalog_root, *, product_id, batch)` lists the
-  structure editions a structure edition's publish check is given: the other
-  structure products' live and embargoed editions, with each `batch`
-  product's batch edition in their place. `publish_check(edition_dir, *,
-  product_id, structures)` runs `check_edition(at="publish",
-  structures=..., extensions={"statcat": check_catalog})`, passing `None`
-  for an empty list, and raises `EditionCheckError`.
+  structure editions an edition's publish check is given: the other
+  structure products' live and embargoed editions (every structure
+  product's, for a data product), with each `batch` product's batch edition
+  in their place. `publish_check(edition_dir, *, product_id, structures,
+  partials=())` runs `check_edition(at="publish", structures=...,
+  extensions={"statcat": check_catalog})`, passing `None` for an empty
+  list, adds a `partials` finding for each of *partials* when *structures*
+  is empty, and raises `EditionCheckError`. `cut_partials(manifest)` lists
+  the partials a manifest records a `partial_of` for.
+- `PARTIAL_OF_KEY` (`"partial_of"`) and `FILL_IN_PROGRESS_KEY`
+  (`"fill_in_progress"`) name the `statcat._meta` keys of
+  `fill_dataflows`; `recorded_cuts(cursor)` reads the first as a dict, and
+  `unvouched_partials(cursor, registry, previous)` is the data pre-check.
 - Errors: `WorkingCopyExistsError`, `WorkingCopyClosedError`
   (`RuntimeError`), `SealCheckError` (with `findings`), `EditionCheckError`
   (with `findings`, `product`, `edition`), `JournalError`.
@@ -218,19 +231,26 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   keeps the stored kind and refuses another (`rule="kind"`), after closing
   the registry.
 - `WorkingCopy.seal` runs these steps: settle the journal; run each check
-  against `view()`, and on a structure working copy
-  `bundle.structure_content` (any finding raises `SealCheckError` and leaves
-  the working copy open); raise `NonFastForwardError` when the base is no
+  against `view()`, on a structure working copy `bundle.structure_content`,
+  and on a data working copy `unvouched_partials` (a set
+  `_meta.fill_in_progress`, or a partial `_meta.partial_of` does not name
+  whose fingerprint differs from the one the previous manifest records with
+  a `partial_of`); any finding raises `SealCheckError` and leaves the
+  working copy open; raise `NonFastForwardError` when the base is no
   longer the live edition; rebuild the search index and `drop_carried`;
-  `catalog_section(store, kind=...)`; close the store and registry;
-  `sdmxlib.edition.seal`, which writes the journal entry and then the
-  manifest; on a structure edition `_publish_check(structures)` (step 5b; a
-  finding raises `EditionCheckError` and leaves the edition unrecorded);
+  `catalog_section(store, kind=...)`; read `_meta.partial_of`, kept to the
+  URNs `sdmx.artefact` holds as partials; close the store and registry;
+  `sdmxlib.edition.seal(partial_of=...)`, which writes the journal entry and
+  then the manifest, and carries the previous manifest's `partial_of` for a
+  partial the map does not name; on a structure edition, or one whose
+  manifest lists a partial with `partial_of`, `_publish_check(structures,
+  partials=...)` (step 5b; a finding raises `EditionCheckError` and leaves
+  the edition unrecorded);
   commit the record (`kind="seal"`), live when the catalog's
   embargo is off; clear the journal entry. The steps are split for
   `Catalog.seal`: `_precheck(checks)` (steps 0 to 2), `_seal_edition()`
-  (steps 3 to 5, returning a private `_Sealed` with the edition and its
-  manifest's store schema), `_next_leaf(full, sealed)` (the record's leaf;
+  (steps 3 to 5, returning a private `_Sealed` with the edition, its
+  manifest's store schema and its `cut_partials`), `_next_leaf(full, sealed)` (the record's leaf;
   `InventoryRuleError` on a refusal), `_publish_check(structures)`,
   `_recorded()` and `_unrecorded(exc)` (clear the journal entry; the second
   also logs the WARNING, for an `InventoryRuleError` or an
@@ -255,9 +275,10 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   cleared. A sealed, unrecorded edition is recorded in one commit, with the
   kind its manifest's `statcat` section names, and its entry cleared; a
   `duplicate` refusal with the same `manifest_sha256` counts as recorded. A
-  structure edition is first given the publish check, with the other
-  structure products' live and embargoed editions and each other product's
-  journalled structure edition in their place. Any other refusal, and a
+  structure edition, and a data edition whose manifest lists a partial with
+  `partial_of`, is first given the publish check, with the other structure
+  products' live and embargoed editions and each other product's journalled
+  structure edition in their place. Any other refusal, and a
   failed check, clears the entry and logs a WARNING.
   `InventoryContentionError` keeps the entry for the next working copy. An
   unreadable entry raises `JournalError`.
@@ -323,6 +344,8 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   and `tests/test_concurrent_seal.py`; the batched seal in
   `tests/test_catalog_model.py::TestBatchSeal`. Structure products, their
   publish check, batch and journal repair:
-  `tests/test_structure_products.py`. Views:
+  `tests/test_structure_products.py`. Partials in data products
+  (`fill_dataflows`, `_meta.partial_of`, the pre-check, the publish check,
+  resume, batch and repair): `tests/test_partials.py`. Views:
   `tests/test_edition_view.py`. Embedding reuse:
   `tests/test_embedding_reuse.py`.

@@ -9,7 +9,12 @@ A product is a ``data`` product or a ``structure`` product (`WorkingCopy.kind`).
 A structure product holds full artefacts only, copied with
 `WorkingCopy.fill_structures`, and its seal runs the publish check
 (`sdmxlib.edition.check_edition` at ``publish``) against the catalog's other
-structure products before the Inventory records the edition.
+structure products before the Inventory records the edition. A data product
+is filled with `WorkingCopy.fill_dataflows`, which cuts each codelist to a
+partial and records the full codelist's fingerprint in
+``statcat._meta.partial_of``; the seal passes it to sdmxlib as
+``partial_of``, and checks the edition's partials against the catalog's
+structure editions the same way.
 
 **The journal rule.** sdmxlib's `seal` writes a journal entry,
 ``<product>/journal/<edition_id>.json``, before the manifest, and statcatlib
@@ -26,14 +31,16 @@ when it resumes one, at the start of a seal and after its record
 | It has a manifest and no root names it | Record it, then clear the entry |
 | Recording raises ``duplicate`` with the same ``manifest_sha256`` | Treat as success; clear the entry |
 | Recording raises any other `InventoryRuleError` | Clear the entry, log a WARNING, leave the edition |
-| A structure edition fails its publish check | Clear the entry, log a WARNING, leave the edition |
+| An edition fails its publish check | Clear the entry, log a WARNING, leave the edition |
 | `InventoryContentionError` | Keep the entry, so the next working copy records it |
 | The entry cannot be read | Raise `JournalError` naming the file and ``statcat doctor`` |
 
 Each edition is recorded with the kind its manifest's ``statcat`` section
 names, ``data`` when it names none. A structure edition's publish check is
 given the other structure products' live and embargoed editions, and each
-other product's journalled structure edition in place of that product's.
+other product's journalled structure edition in place of that product's; a
+data edition whose partials record ``partial_of`` is checked with every
+structure product's, chosen the same way.
 
 A product has one writer at a time: a laptop convention, stated in the docs.
 """
@@ -43,6 +50,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib.util
+import json
 import logging
 import shutil
 from datetime import UTC, datetime
@@ -51,7 +59,8 @@ from typing import TYPE_CHECKING, Self
 import sdmxlib
 import sdmxlib.edition as _edition
 from attrs import frozen
-from sdmxlib.edition import MANIFEST_NAME, Finding, ManifestError, check_edition
+from sdmxlib import SdmxUrn
+from sdmxlib.edition import MANIFEST_NAME, Finding, ManifestError, canonical_json, check_edition
 from sdmxlib.inventory import FullInventory, Leaf, TransitionError, head, record
 from sdmxlib.storage.schema import SCHEMA_VERSION, meta_value
 
@@ -72,7 +81,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import duckdb
-    from sdmxlib import EditionRegistry, MaintainableArtefact, SdmxUrn
+    from sdmxlib import Dataflow, EditionRegistry, MaintainableArtefact, RestRegistry, WriteSource
     from sdmxlib.edition import JournalEntry, Lifecycle, Manifest
     from sdmxlib.inventory import Kind
 
@@ -184,14 +193,20 @@ def edition_kind(manifest: Manifest) -> Kind:
     return "structure" if section.get("kind") == "structure" else "data"
 
 
+def cut_partials(manifest: Manifest) -> tuple[str, ...]:
+    """The URNs of the partials a sealed edition's manifest records a ``partial_of`` for, sorted."""
+    return tuple(sorted(a.urn for a in manifest.artefacts if a.partial and a.partial_of is not None))
+
+
 def structure_editions(
     full: FullInventory | None, catalog_root: Path, *, product_id: str, batch: Mapping[str, Path]
 ) -> list[Path]:
-    """The structure editions a structure edition of *product_id* is checked with (design decision O4).
+    """The structure editions an edition of *product_id* is checked with (design decision O4).
 
     They are the live and embargoed editions of every other structure
     product in *full*, with each product of *batch* holding its batch
-    edition in place of its recorded ones.
+    edition in place of its recorded ones. For a data product that is every
+    structure product's.
 
     Args:
         full: The Inventory version, or ``None`` before the first.
@@ -221,7 +236,9 @@ def structure_editions(
     return found
 
 
-def publish_check(edition_dir: Path, *, product_id: str, structures: Sequence[Path]) -> None:
+def publish_check(
+    edition_dir: Path, *, product_id: str, structures: Sequence[Path], partials: Sequence[str] = ()
+) -> None:
     """Seal step 5b: `sdmxlib.edition.check_edition` at ``publish`` on a sealed edition, with `check_catalog`.
 
     Args:
@@ -230,6 +247,9 @@ def publish_check(edition_dir: Path, *, product_id: str, structures: Sequence[Pa
         structures: The structure editions its references and partials
             resolve in (`structure_editions`); ``structures=None`` when empty,
             since sdmxlib refuses an empty sequence.
+        partials: The partials the edition records a ``partial_of`` for
+            (`cut_partials`). With no *structures*, sdmxlib would skip their
+            check, so each is a finding.
 
     Raises:
         EditionCheckError: The check found something.
@@ -240,8 +260,19 @@ def publish_check(edition_dir: Path, *, product_id: str, structures: Sequence[Pa
         structures=list(structures) or None,
         extensions={STATCAT_SECTION: check_catalog},
     )
-    if report.findings:
-        raise EditionCheckError(report.findings, product=product_id, edition=edition_dir.name)
+    findings = list(report.findings)
+    if not structures:
+        findings += [
+            Finding(
+                "partials",
+                urn,
+                "the catalog has no live or embargoed structure edition to check this partial against; seal the "
+                "structure product that holds its full codelist first",
+            )
+            for urn in partials
+        ]
+    if findings:
+        raise EditionCheckError(findings, product=product_id, edition=edition_dir.name)
 
 
 def _journalled_structures(products_dir: Path, product_id: str, full: FullInventory | None) -> dict[str, Path]:
@@ -441,9 +472,17 @@ def _check_journalled(
     product_id: str,
     pending: Sequence[tuple[JournalEntry, str, str, Kind]],
 ) -> dict[str, EditionCheckError]:
-    """The journal repair's publish check: each journalled structure edition's finding, by edition id."""
+    """The journal repair's publish check: each journalled edition's finding, by edition id.
+
+    It checks each structure edition, and each data edition whose partials
+    record a ``partial_of``.
+    """
     failed: dict[str, EditionCheckError] = {}
-    checked = [entry.edition_id for entry, _, _, kind in pending if kind == "structure"]
+    checked: dict[str, tuple[str, ...]] = {}
+    for entry, _, _, kind in pending:
+        partials = cut_partials(_edition.read_manifest(product_dir / entry.edition_id))
+        if kind == "structure" or partials:
+            checked[entry.edition_id] = partials
     if not checked:
         return failed
     products_dir = product_dir.parent
@@ -453,9 +492,9 @@ def _check_journalled(
         product_id=product_id,
         batch=_journalled_structures(products_dir, product_id, full),
     )
-    for edition_id in checked:
+    for edition_id, partials in checked.items():
         try:
-            publish_check(product_dir / edition_id, product_id=product_id, structures=structures)
+            publish_check(product_dir / edition_id, product_id=product_id, structures=structures, partials=partials)
         except EditionCheckError as exc:
             failed[edition_id] = exc
     return failed
@@ -511,12 +550,101 @@ def _settle_kind(
     return resolved
 
 
+#: The ``statcat._meta`` key holding the cuts `WorkingCopy.fill_dataflows` made: JSON, URN to fingerprint (D2).
+PARTIAL_OF_KEY = "partial_of"
+#: The ``statcat._meta`` key `WorkingCopy.fill_dataflows` holds while sdmxlib fills (D3).
+FILL_IN_PROGRESS_KEY = "fill_in_progress"
+
+
+def _meta_text(cursor: duckdb.DuckDBPyConnection, key: str) -> str | None:
+    """The value ``statcat._meta`` holds for *key*, or ``None``."""
+    row = _catalog_schema.first_row(cursor.execute("SELECT value FROM _meta WHERE key = $key", {"key": key}).fetchall())
+    return None if row is None else str(row[0])
+
+
+def recorded_cuts(cursor: duckdb.DuckDBPyConnection) -> dict[str, str]:
+    """The ``statcat._meta.partial_of`` map: the fingerprint of the full codelist each cut was made from, by URN."""
+    text = _meta_text(cursor, PARTIAL_OF_KEY)
+    if text is None:
+        return {}
+    loaded: dict[str, str] = json.loads(text)
+    return loaded
+
+
+def _held_partials(cursor: duckdb.DuckDBPyConnection) -> set[str]:
+    """The URNs of the partial artefacts the edition's store holds."""
+    return {urn for (urn,) in cursor.execute("SELECT urn FROM sdmx.artefact WHERE is_partial").fetchall()}
+
+
+def _fingerprint(artefact: object) -> str:
+    """An artefact's fingerprint, as sdmxlib's manifest records it: the SHA-256 of its canonical text."""
+    return hashlib.sha256(canonical_json(artefact)).hexdigest()
+
+
+def unvouched_partials(
+    cursor: duckdb.DuckDBPyConnection, registry: EditionRegistry, previous: Path | None
+) -> list[Finding]:
+    """The data pre-check: the partials whose ``partial_of`` the seal cannot vouch for.
+
+    A finding names a fill that stopped before it recorded its cuts
+    (``statcat._meta.fill_in_progress`` is set), and each partial the
+    ``partial_of`` map does not name whose content differs from the partial
+    the previous edition records a ``partial_of`` for: sdmxlib's seal would
+    carry that ``partial_of`` to a partial cut from something else. A partial
+    with no ``partial_of`` in either place is recorded without one.
+
+    Args:
+        cursor: A cursor on the working copy's ``statcat`` schema.
+        registry: The working copy's registry.
+        previous: The previous edition's directory, or ``None``.
+
+    Returns:
+        The findings, possibly none.
+    """
+    findings: list[Finding] = []
+    if _meta_text(cursor, FILL_IN_PROGRESS_KEY) is not None:
+        findings.append(
+            Finding(
+                "partials",
+                f"statcat._meta.{FILL_IN_PROGRESS_KEY}",
+                "a fill_dataflows call stopped before it recorded the codelists it cut; call fill_dataflows "
+                "again with the same dataflows",
+            )
+        )
+    if previous is None:
+        return findings
+    known = recorded_cuts(cursor)
+    earlier = {a.urn: a for a in _edition.read_manifest(previous).artefacts if a.partial and a.partial_of is not None}
+    for urn in sorted(_held_partials(cursor) - set(known)):
+        entry = earlier.get(urn)
+        if entry is None:
+            continue
+        held = registry.get(SdmxUrn.parse(urn), eager=True)
+        if held is None or _fingerprint(held) != entry.fingerprint:
+            findings.append(
+                Finding(
+                    "partials",
+                    urn,
+                    f"the partial was cut again outside fill_dataflows, and the previous edition records it as cut "
+                    f"from {entry.partial_of}, which the seal would carry; fill it with fill_dataflows",
+                )
+            )
+    return findings
+
+
 @frozen
 class _Sealed:
-    """An edition sealed by sdmxlib and not yet recorded, with the store schema its manifest names."""
+    """An edition sealed by sdmxlib and not yet recorded, with the store schema its manifest names.
+
+    Attributes:
+        edition: The edition.
+        schema_version: Its store schema.
+        partials: The partials its manifest records a ``partial_of`` for.
+    """
 
     edition: Edition
     schema_version: str
+    partials: tuple[str, ...] = ()
 
 
 @frozen
@@ -793,6 +921,74 @@ class WorkingCopy:
             self._registry, source, families=families, agency=agency, ids=ids, artefacts=artefacts
         )
 
+    def fill_dataflows(
+        self,
+        source: RestRegistry | EditionRegistry,
+        dataflows: Sequence[SdmxUrn[Dataflow] | str],
+        *,
+        observations: Mapping[str, WriteSource] | None = None,
+        partials: bool = True,
+    ) -> dict[str, str]:
+        """Add dataflows' closures and observations to a data product's working copy, and cut its codelists.
+
+        It calls `sdmxlib.edition.fill_edition`, which keeps what the working
+        copy holds: on a republish the other dataflows' bindings stay, and a
+        codelist they share is cut to the codes every binding uses. The map
+        it returns is merged into ``statcat._meta.partial_of``, a later
+        fill's value winning for a URN, so a seal after
+        ``working_copy(resume=True)`` in another process records each
+        partial's ``partial_of``. ``statcat._meta.fill_in_progress`` is set
+        while sdmxlib fills; a fill that stops before the merge leaves it, and
+        the seal refuses the working copy until a fill completes.
+
+        Fill a data product through this method: a direct
+        ``fill_edition(wc.registry, ...)`` leaves its cuts out of the map.
+
+        Args:
+            source: Where the structures are: a `sdmxlib.RestRegistry`, or a
+                sealed edition's or a scratch `sdmxlib.EditionRegistry`.
+            dataflows: The dataflows, by URN. A ``latest`` URN is filled at
+                the version it resolves to.
+            observations: The rows of each dataflow that has any, by URN
+                string, in any form `sdmxlib.LocalRegistry.write_observations`
+                reads.
+            partials: Whether to cut codelists to partials.
+
+        Returns:
+            The fingerprint of the full codelist each partial cut here was
+            cut from, by URN.
+
+        Raises:
+            TypeError: The working copy is a structure product's.
+
+        sdmxlib raises `TypeError` for a URN that names no dataflow at
+        *source*, and `ValueError` for a dataflow with no data structure, for
+        *observations* naming a dataflow not in *dataflows*, and for a coded
+        column holding a value outside its codelist.
+        """
+        store = self._live()
+        if self._kind != "data":
+            msg = (
+                f"{self._product_id} is a {self._kind} product, and fill_dataflows fills a data product; a "
+                "structure product is filled with fill_structures"
+            )
+            raise TypeError(msg)
+        urns = [sdmxlib.Dataflow.parse_urn(given) if isinstance(given, str) else given for given in dataflows]
+        cursor = store._cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO _meta VALUES ($key, $at)",
+            {"key": FILL_IN_PROGRESS_KEY, "at": datetime.now(UTC).isoformat()},
+        )
+        cut = _edition.fill_edition(self._registry, source, urns, observations=observations, partials=partials)
+        with store.transaction():
+            merged = recorded_cuts(cursor) | cut
+            cursor.execute(
+                "INSERT OR REPLACE INTO _meta VALUES ($key, $map)",
+                {"key": PARTIAL_OF_KEY, "map": json.dumps(merged, sort_keys=True)},
+            )
+            cursor.execute("DELETE FROM _meta WHERE key = $key", {"key": FILL_IN_PROGRESS_KEY})
+        return cut
+
     def put(self, obj: Dataset | ConceptScheme | Sequence[Dataset | ConceptScheme]) -> None:
         """Add or update a dataset, a concept scheme, or a sequence of either.
 
@@ -1019,9 +1215,13 @@ class WorkingCopy:
 
         The steps: settle the journal; run *checks*; refuse when the base is
         no longer live; rebuild the search index; compute the ``statcat``
-        section; close; seal with sdmxlib (journal entry, then manifest);
-        run the publish check on a structure edition; record the edition,
-        ``live`` when the catalog's embargo is off; settle the journal entry.
+        section; close; seal with sdmxlib (journal entry, then manifest),
+        passing the ``partial_of`` of each partial ``statcat._meta`` names
+        and the store still holds; run the publish check on a structure
+        edition, or on an edition whose partials record a ``partial_of``, with
+        every other structure product's live and embargoed editions; record
+        the edition, ``live`` when the catalog's embargo is off; settle the
+        journal entry.
         `Catalog.seal` runs the same steps for several working copies and
         records them in one Inventory version.
 
@@ -1034,10 +1234,12 @@ class WorkingCopy:
             The edition.
 
         Raises:
-            EditionCheckError: The publish check of a structure edition found
-                something, such as a reference no other structure product's
-                live or embargoed edition resolves; the sealed edition stays
-                on disk unrecorded.
+            EditionCheckError: The publish check found something, such as a
+                reference no other structure product's live or embargoed
+                edition resolves, or a partial whose codes its full codelist
+                lacks, or one with no structure edition in the catalog to
+                check it against; the sealed edition stays on disk
+                unrecorded.
             InventoryRuleError: sdmxlib's rules refused the record after the
                 manifest was written, such as `NonFastForwardError` when a
                 rollback lands during the seal; the sealed edition stays on
@@ -1047,7 +1249,10 @@ class WorkingCopy:
 
         Before anything is written, a check's finding raises `SealCheckError`
         (for a structure product, also each dataflow, binding or partial it
-        holds), and a base that is no longer the live edition raises
+        holds; for a data product, a fill that stopped before it recorded its
+        cuts, or a partial cut outside `fill_dataflows` that would carry the
+        previous edition's ``partial_of``), and a base that is no longer the
+        live edition raises
         `NonFastForwardError`; both leave the working copy open. A
         `ManifestError` means sdmxlib refused the edition, such as for a coded
         value outside its codelist, before writing the journal entry; the
@@ -1055,12 +1260,12 @@ class WorkingCopy:
         """
         self._precheck(checks)
         sealed = self._seal_edition()
-        if self._kind == "structure":
+        if self._kind == "structure" or sealed.partials:
             structures = structure_editions(
                 self._writer.full(), self._writer.root, product_id=self._product_id, batch={}
             )
             try:
-                self._publish_check(structures)
+                self._publish_check(structures, partials=sealed.partials)
             except EditionCheckError as exc:
                 self._unrecorded(exc)
                 raise
@@ -1083,7 +1288,9 @@ class WorkingCopy:
         """Seal steps 0 to 2: settle the journal, run *checks*, and refuse a base that is no longer live.
 
         A structure working copy is also checked for content a structure
-        product does not hold (`statcatlib.bundle.structure_content`).
+        product does not hold (`statcatlib.bundle.structure_content`), and a
+        data working copy for partials whose ``partial_of`` the seal cannot
+        vouch for (`unvouched_partials`).
 
         Args:
             checks: The seal checks, run against `view`.
@@ -1097,6 +1304,9 @@ class WorkingCopy:
         findings = [finding for check in checks for finding in check(self.view())]
         if self._kind == "structure":
             findings += structure_content(store._cursor())
+        else:
+            previous = None if self._previous is None else self._product_dir / self._previous
+            findings += unvouched_partials(store._cursor(), self._registry, previous)
         if findings:
             raise SealCheckError(findings)
         live = _live_head(self._writer, self._product_id)
@@ -1120,6 +1330,11 @@ class WorkingCopy:
         store = self._live()
         self._search(store)
         section = catalog_section(store, kind=self._kind)
+        cursor = store._cursor()
+        held = _held_partials(cursor)
+        # A later fill can have replaced a cut partial by its full codelist,
+        # and sdmxlib refuses a partial_of for a URN it holds as no partial.
+        cuts = {urn: fingerprint for urn, fingerprint in recorded_cuts(cursor).items() if urn in held}
         edition_dir = self._registry.edition_dir
         self._close(f"the working copy {self._edition_id} of {self._product_id} is sealed")
         try:
@@ -1129,6 +1344,7 @@ class WorkingCopy:
                 producer=producer(),
                 lifecycle=self._lifecycle,
                 extensions={STATCAT_SECTION: section},
+                partial_of=cuts or None,
             )
         except ManifestError as exc:
             self._closed = (
@@ -1142,7 +1358,7 @@ class WorkingCopy:
             previous=manifest.previous,
             manifest_sha256=manifest_sha256(edition_dir),
         )
-        return _Sealed(edition=edition, schema_version=manifest.schema_version)
+        return _Sealed(edition=edition, schema_version=manifest.schema_version, partials=cut_partials(manifest))
 
     def _next_leaf(self, full: FullInventory | None, sealed: _Sealed) -> Leaf:
         """Seal step 6's record: the product's next leaf in *full*, with *sealed* recorded.
@@ -1179,15 +1395,22 @@ class WorkingCopy:
         except TransitionError as exc:
             raise InventoryRuleError.wrapping(exc, product=product_id, edition=edition_id) from exc
 
-    def _publish_check(self, structures: Sequence[Path]) -> None:
+    def _publish_check(self, structures: Sequence[Path], *, partials: Sequence[str] = ()) -> None:
         """Seal step 5b: the publish check of the sealed edition, with *structures* (`publish_check`).
 
         Args:
-            structures: The structure editions its references resolve in.
+            structures: The structure editions its references and partials
+                resolve in.
+            partials: The partials its manifest records a ``partial_of`` for.
 
         A finding raises `EditionCheckError`.
         """
-        publish_check(self._product_dir / self._edition_id, product_id=self._product_id, structures=structures)
+        publish_check(
+            self._product_dir / self._edition_id,
+            product_id=self._product_id,
+            structures=structures,
+            partials=partials,
+        )
 
     def _recorded(self) -> None:
         """After the record: clear the edition's journal entry."""

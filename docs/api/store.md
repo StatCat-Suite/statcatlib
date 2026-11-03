@@ -287,6 +287,53 @@ the sealed edition unrecorded; `statcat doctor` reports it. Seal the three
 products in one `Catalog.seal`, in any order, to record them in one Inventory
 version.
 
+### Partials in data products
+
+A data product holds its dataflows' closures, with each codelist cut to a
+partial: the codes the product's observations and allowed constraints use,
+with their ancestors. Fill its working copy with `fill_dataflows`, or with
+[`ingest_dataflows`](sources.md#ingest_dataflows), which also stores a
+dataset per dataflow:
+
+```python
+wc.fill_dataflows(
+    source: sdmxlib.RestRegistry | sdmxlib.EditionRegistry,
+    dataflows: Sequence[SdmxUrn[Dataflow] | str],
+    *,
+    observations: Mapping[str, WriteSource] | None = None,
+    partials: bool = True,
+) -> dict[str, str]
+```
+
+It calls `sdmxlib.edition.fill_edition` and returns the fingerprint of the
+full codelist each partial was cut from, by URN. The working copy keeps that
+map in `statcat._meta.partial_of`, so a seal after
+`working_copy(resume=True)`, in this process or another, records each
+partial's `partial_of` in the manifest. A republish built on the live edition
+keeps the other dataflows' bindings and cuts a shared codelist to the codes
+every binding uses; a seal that fills nothing keeps every partial's
+`partial_of` from the previous manifest. `partials=False` copies each
+codelist full. On a structure product's working copy it raises `TypeError`.
+
+!!! warning "Fill through `fill_dataflows`"
+    `sdmxlib.edition.fill_edition(wc.registry, ...)` cuts the codelists but
+    leaves the map out of `statcat._meta`. A partial cut that way, whose
+    previous edition records a `partial_of`, fails the seal with
+    `SealCheckError`, and so does a working copy whose `fill_dataflows` call
+    stopped before it recorded its cuts; call `fill_dataflows` again.
+
+The seal of an edition with partials runs the publish check with every
+structure product's live and embargoed editions as `structures=`: each
+partial must match the full codelist its `partial_of` names, in any of them,
+and hold no code that codelist lacks. A finding raises `EditionCheckError`
+and leaves the edition unrecorded, as does a partial in a catalog with no
+structure edition. `Catalog.seal` checks a batch's data editions against the
+batch's structure editions, so a structure product and the tables cut from
+it go live in one Inventory version.
+
+`statcatlib.testing.codr_structures` and `codr_product` build such a catalog
+from a seed, for tests and benchmarks.
+
 ---
 
 ## Writing datasets

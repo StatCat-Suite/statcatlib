@@ -97,6 +97,40 @@ themes = [sc.ConceptRef(uri="urn:myorg:themes/ECONOMY")]
 sc.ingest_sdmx_registry(wc, reg.registry, publisher=publisher, themes=themes)
 ```
 
+### `ingest_dataflows`
+
+```python
+ingest_dataflows(
+    wc: WorkingCopy,
+    source: sdmxlib.RestRegistry | sdmxlib.EditionRegistry,
+    dataflows: Sequence[SdmxUrn[Dataflow] | str],
+    *,
+    observations: Mapping[str, WriteSource] | None = None,
+    partials: bool = True,
+    publisher: Agent | None = None,
+    themes: list[ConceptRef] | None = None,
+) -> list[AggregateDataset]
+```
+
+Fill a data product's working copy with dataflows and their observations,
+with each codelist cut to a partial, and store a dataset for each dataflow.
+It calls `wc.fill_dataflows`
+([Partials in data products](store.md#partials-in-data-products)), then
+reads each dataflow back from `wc.registry` with its data structure and
+stores its `AggregateDataset` in one `bulk_load`. `observations` maps each
+dataflow's URN string to its rows: a Polars frame, an Arrow table or reader,
+or a DuckDB relation. A republish keeps the datasets of the dataflows it does
+not name.
+
+```python
+wc = cat.product("table-14100287").working_copy()
+datasets = sc.ingest_dataflows(wc, fmr, [flow_urn], observations={str(flow_urn): rows})
+wc.seal()
+```
+
+`ingest_sdmx` copies an in-memory registry whole and cuts nothing; use it for
+a source with no structure products.
+
 ### `ingest_data`
 
 ```python

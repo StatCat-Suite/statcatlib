@@ -13,7 +13,7 @@ product's `WorkingCopy`, its one unsealed edition. Two sources exist:
 - `ckan.py` ingests a CKAN portal (open.canada.ca, data.gov) through the CKAN
   Action API v3 and stores one `OpenDataset` per CKAN package.
 
-The package's `__init__.py` re-exports the six ingest functions, and
+The package's `__init__.py` re-exports the seven ingest functions, and
 `statcatlib/__init__.py` re-exports them again as `sc.ingest_sdmx` and so on.
 
 ## Interface
@@ -27,6 +27,17 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
 - `ingest_sdmx_registry(store, registry, *, publisher=None, themes=None)`
   does the same as `ingest_sdmx` and applies the `publisher` and `themes`
   overrides to every dataset.
+- `ingest_dataflows(wc, source, dataflows, *, observations=None,
+  partials=True, publisher=None, themes=None) -> list[AggregateDataset]`
+  is the partial path: it calls `require_working_copy`, then
+  `wc.fill_dataflows` (`sdmxlib.edition.fill_edition`: each dataflow's
+  closure and observations, codelists cut to partials, the cuts recorded in
+  `statcat._meta.partial_of`), then reads each given dataflow back from
+  `wc.registry` with its DSD (`wc.registry.dsd`), builds its dataset with
+  `dataset_from_dataflow`, and stores them in one `bulk_load()`. It builds
+  datasets for the given dataflows only, so on a republish the other
+  tables' datasets stay as they were. A dataflow that cannot be read back
+  raises `LookupError`.
 - `prepare_sdmx(registry, *, publisher=None, themes=None) -> list[AggregateDataset]`
   builds datasets without storing them, so callers can `attrs.evolve()` each
   one before `store.put()`. It accepts an `InMemoryRegistry` or a
@@ -107,7 +118,8 @@ Internal helpers that tests import directly:
 ## Invariants
 
 - Every ingest function writes into a `WorkingCopy` only. `ingest_sdmx`,
-  `ingest_sdmx_registry`, `ingest_data` and `ingest_ckan` pass their *store*
+  `ingest_sdmx_registry`, `ingest_dataflows`, `ingest_data` and
+  `ingest_ckan` pass their *store*
   through `require_working_copy`, so an `EditionView` raises `TypeError`
   before anything is written. A sealed edition is never written.
 - An `AggregateDataset` links to sdmxlib's tables through
@@ -160,6 +172,10 @@ Internal helpers that tests import directly:
   through `store.registry.ingest()` and upsert rows in its `statcat` schema
   through `store.put()`. Their `bulk_load()` block raises DuckDB's
   `wal_autocheckpoint` to 1 GB and runs one `CHECKPOINT` on exit.
+- `ingest_dataflows` writes the edition's `sdmx` schema, lake and
+  bindings through `sdmxlib.edition.fill_edition`, the `statcat._meta`
+  keys `fill_in_progress` and `partial_of`, and the dataset rows; with a
+  `RestRegistry` source, sdmxlib fetches each dataflow's closure over HTTP.
 - `ingest_data` makes network calls through `reg.obs(...)` when `reg` is a
   `RestRegistry`, writes or replaces a table in the edition's DuckLake
   through `store.registry.write_observations`, adds a `DataflowBinding` to
@@ -180,6 +196,7 @@ Internal helpers that tests import directly:
 - Unit tier: `uv run pytest -m unit` covers `tests/test_sources_ckan.py` and
   `tests/test_sdmx_bridge.py`.
 - Integration tier: `uv run pytest -m integration` covers
-  `tests/test_sources_sdmx.py` and `tests/test_ingest_data.py`.
+  `tests/test_sources_sdmx.py`, `tests/test_ingest_data.py` and, for
+  `ingest_dataflows`, `tests/test_partials.py`.
 - Live tier (network, outside `just ci`): `just test-live` runs
   `tests/test_live_sdmx.py`.

@@ -45,6 +45,31 @@ A product is now a data product or a structure product
 - `statcatlib.bundle.catalog_section(store, *, kind="data")` takes the kind
   it writes.
 
+### Partials in data products
+
+- `WorkingCopy.fill_dataflows(source, dataflows, *, observations, partials)`
+  fills a data product's working copy through
+  `sdmxlib.edition.fill_edition`, cutting each codelist to a partial, and
+  keeps the map of cuts in `statcat._meta.partial_of`
+  ([Partials in data products](api/store.md#partials-in-data-products)).
+  The seal passes it to sdmxlib as `partial_of`, also after
+  `working_copy(resume=True)` in another process.
+- `ingest_dataflows(wc, source, dataflows, *, observations, partials,
+  publisher, themes)`, exported from `statcatlib`, fills through
+  `fill_dataflows` and stores a dataset per dataflow. `ingest_sdmx` still
+  copies an in-memory registry whole.
+- The seal of an edition whose partials record a `partial_of` runs the
+  publish check with every structure product's live and embargoed editions,
+  and raises `EditionCheckError` for a partial that matches none of them or
+  holds a code its full codelist lacks, and for a partial in a catalog with
+  no structure edition. A data edition with no partial seals as in 0.12.
+- The seal refuses, with `SealCheckError`, a working copy whose
+  `fill_dataflows` stopped before it recorded its cuts, and one holding a
+  partial cut outside `fill_dataflows` (a direct `fill_edition` on
+  `wc.registry`) that would carry the previous edition's `partial_of`.
+- `statcatlib.testing` gains the CODR generator: `CodrShape`,
+  `STRUCTURE_PRODUCTS`, `CODR_AGENCY`, `codr_structures` and `codr_product`.
+
 Write a catalog that holds a structure product with statcatlib 0.13 only. A
 0.12 writer records every edition as `kind: "data"`, so sdmxlib refuses its
 record of a structure product's edition after the seal, and the edition stays
