@@ -385,8 +385,11 @@ Inventory and seals editions:
   the URNs the store holds as partials, which writes the journal entry and
   then the manifest; on a structure edition, or one whose manifest lists a
   partial with `partial_of`, runs the publish check
-  (`check_edition(at="publish", structures=...)` with `check_catalog`,
-  given the other structure products' live and embargoed editions; a
+  (`check_edition(at="publish", structures=..., fingerprints=False)` with
+  `check_catalog`, given the other structure products' live and embargoed
+  editions; `fingerprints=False` skips recomputing the fingerprints the
+  seal just wrote, where the journal repair and `verify-catalog` recompute
+  them; a
   partial with no structure edition in the catalog is a finding; a finding
   raises `EditionCheckError` and leaves the edition unrecorded); records
   the edition in one Inventory commit, live when the catalog's embargo is

@@ -249,7 +249,12 @@ def structure_editions(
 
 
 def publish_check(
-    edition_dir: Path, *, product_id: str, structures: Sequence[Path], partials: Sequence[str] = ()
+    edition_dir: Path,
+    *,
+    product_id: str,
+    structures: Sequence[Path],
+    partials: Sequence[str] = (),
+    fingerprints: bool = True,
 ) -> None:
     """Seal step 5b: `sdmxlib.edition.check_edition` at ``publish`` on a sealed edition, with `check_catalog`.
 
@@ -262,6 +267,11 @@ def publish_check(
         partials: The partials the edition records a ``partial_of`` for
             (`cut_partials`). With no *structures*, sdmxlib would skip their
             check, so each is a finding.
+        fingerprints: Whether sdmxlib recomputes each artefact's fingerprint
+            and compares it with the manifest's. The seal that just wrote the
+            manifest passes ``False`` (`WorkingCopy._publish_check`, sdmxlib
+            GH-357); the journal repair, which checks an edition another
+            process sealed, keeps the default.
 
     Raises:
         EditionCheckError: The check found something.
@@ -271,6 +281,7 @@ def publish_check(
         at="publish",
         structures=list(structures) or None,
         extensions={STATCAT_SECTION: check_catalog},
+        fingerprints=fingerprints,
     )
     findings = list(report.findings)
     if not structures:
@@ -1731,6 +1742,10 @@ class WorkingCopy:
     def _publish_check(self, structures: Sequence[Path], *, partials: Sequence[str] = ()) -> None:
         """Seal step 5b: the publish check of the sealed edition, with *structures* (`publish_check`).
 
+        This seal wrote the manifest's fingerprints from the edition it just
+        built, so the check skips recomputing them (``fingerprints=False``,
+        sdmxlib GH-357) and checks the files, references and partials.
+
         Args:
             structures: The structure editions its references and partials
                 resolve in.
@@ -1743,6 +1758,7 @@ class WorkingCopy:
             product_id=self._product_id,
             structures=structures,
             partials=partials,
+            fingerprints=False,
         )
 
     def _recorded(self) -> None:
