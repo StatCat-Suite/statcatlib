@@ -5,8 +5,8 @@
 `statcatlib` is the package root. `__init__.py` re-exports the public API of
 `model`, `sources` and `store`; `CatalogAdmin` from `admin.py`; `Catalog`, `Product`, `Edition`,
 `SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
-`InventoryContentionError`, `InventoryRuleError` and `NonFastForwardError`
-from `store/inventory.py`, and `WorkingCopyExistsError`,
+`InventoryContentionError`, `InventoryRuleError`, `NonFastForwardError` and
+`CrossProductRuleError` from `store/inventory.py`, and `WorkingCopyExistsError`,
 `WorkingCopyClosedError`, `SealCheckError`, `EditionCheckError` and `JournalError` from
 `store/working_copy.py`; `NotLoadedError` and `is_unloaded` from the store's
 sentinel module; and part of `expr` (listed below). It exposes `checks`,
@@ -58,17 +58,24 @@ and test catalogs (`testing.py`).
     It refuses, with `ValueError`, a working copy of another catalog or two
     of one product, and raises `WorkingCopyClosedError` for a closed one,
     before sealing anything. `_seal_each` then runs the structure pass
-    (`WorkingCopy._precheck` and `_seal_edition` for each structure working
-    copy), the structure-check pass (`_check_structures`: each structure
-    edition's `_publish_check`, given the batch's other structure editions,
-    repeated until it drops none) and the data pass (every data
-    `_precheck`, then each `_seal_edition`, then `_check_partials`: the
-    `_publish_check` of each data edition whose partials record a
-    `partial_of`, given every structure product's editions with the batch's
-    structure editions in their place). `_record_batch` records every
-    sealed edition in one `InventoryWriter.commit`, leaving out each product
-    whose `_next_leaf` raises `InventoryRuleError`, and each edition whose
-    publish check was given a left-out one (`_drop_dependents`). `RuntimeError` on a catalog from `open`.
+    (`_seal_ready`: `WorkingCopy._precheck(checks, batch=)` for each
+    structure working copy, whose journal repair leaves the batch's other
+    products out; `_cross_ready`, the cross-product pre-check of the pass's
+    working copies together through `precheck_refusals`; then
+    `_seal_edition` for each), the structure-check pass
+    (`_check_structures`: each structure edition's `_publish_check`, given
+    the batch's other structure editions, repeated until it drops none) and
+    the data pass (the same `_seal_ready`, its cross-product pre-check given
+    the checked structure editions as `Planned` records (`_fixed`), then
+    `_check_partials`: the `_publish_check` of each data edition whose
+    partials record a `partial_of`, given every structure product's editions
+    with the batch's structure editions in their place). `_record_batch`
+    records every sealed edition in one `InventoryWriter.commit`;
+    `_batch_leaves` leaves out each product whose `_next_leaf` raises
+    `InventoryRuleError`, each the cross-product rules refuse, and each
+    edition whose publish check was given a left-out one (`_drop_dependents`),
+    running the rules again until a pass drops none, and counts an edition a
+    journal repair recorded already as recorded. `RuntimeError` on a catalog from `open`.
   - `search` and `facets` raise `NotImplementedError` naming
     `product(id).view()`. `__getattr__` raises `AttributeError` naming
     `cat.product(id).view().<name>` for every name in
@@ -86,7 +93,8 @@ and test catalogs (`testing.py`).
 - `SealOutcomes`: a frozen attrs value with `sealed` (product id to
   `Edition`, all recorded in one version) and `refused` (product id to the
   error: `SealCheckError`, `NonFastForwardError` or another
-  `InventoryRuleError`, `ManifestError`, `EditionCheckError`, or
+  `InventoryRuleError` (`CrossProductRuleError` from the pre-check or the
+  record included), `ManifestError`, `EditionCheckError`, or
   `InventoryContentionError`).
 - `Edition` is re-exported from `store/working_copy.py`.
 
@@ -120,13 +128,18 @@ are imported from `statcatlib.admin`.
   *, kind, reason)`, which applies one of sdmxlib's pure rules to the head's
   leaf with `datetime.now(UTC)` (the local clock, design decision P1) and
   wraps a `TransitionError` with `InventoryRuleError.wrapping`. A product the
-  head does not record raises `InventoryRuleError(rule="unknown")`.
+  head does not record raises `InventoryRuleError(rule="unknown")`. The
+  writer's `commit` runs the cross-product rules on a release or a rollback
+  and raises `CrossProductRuleError`; `admin.py` adds no rule of its own.
 - `prune(*, older_than, reason, dry_run=True) -> PruneReport` (design
   decision P7): refuses a blank *reason* or a window that is not positive
   (`ValueError`). It skips every product `_busy` names (an unsealed edition
   whose id is not tombstoned, a `journal/*.json` file, or an unreadable
   manifest), then runs three steps. `_prune_retire` retires superseded and
-  withdrawn entries whose `state_changed_at` is before the cutoff with
+  withdrawn entries whose `state_changed_at` is before the cutoff, except
+  the structure editions `_cited` returns (those a live or embargoed data
+  edition's `partial_of` cites, `cross_product.cited_structures`; every
+  structure edition when a manifest cannot be read), with
   sdmxlib's `retire`, in one `InventoryWriter.commit` of kind `retire`
   (`Change(leaves=..., retired=head tombstones + new)`), re-planned against
   each head and skipped when nothing qualifies. `_prune_dirs` deletes
@@ -199,16 +212,24 @@ read.
   root the read protocol skipped (`full.skipped`), each leaf that fails its
   hash or `validate_leaf`, and for every leaf entry a `manifest.json` whose
   SHA-256 differs from the entry's, then runs
-  `check_edition(at="publish", extensions={"statcat": check_catalog})`.
+  `check_edition(at="publish", structures=..., extensions={"statcat":
+  check_catalog})`, with `structures=` from `_structures_for`: every recorded
+  edition of every structure product for a data edition, the other
+  structure products' live and embargoed editions for a structure edition,
+  `None` when empty. Last it lists the stale data editions
+  (`cross_product.stale_editions`, re-exported here as `StaleEdition`).
   `VerifyReport` has `root`, `seq` (`None` before the first version),
-  `editions` and `findings` (`VerifyFinding(file, detail)`, the file a path
-  from the catalog directory) and `ok`. A path that is no directory, a legacy
+  `editions`, `findings` (`VerifyFinding(file, detail)`, the file a path
+  from the catalog directory), `stale` (no finding; `ok` ignores it) and
+  `ok`. A path that is no directory, a legacy
   layout, a missing or malformed `catalog.json`, or no valid root raise
   `CatalogUnreadableError`.
 - `doctor(path) -> DoctorReport`: `layout` (`catalog`, `legacy`, `unknown`)
   and `items`, each a `DoctorItem(topic, level, detail)` with level `info` or
   `warning`; `warnings` and `about(topic)` filter them. Topics: `synced
-  folder`, `layout`, `catalog.json`, `CURRENT`, `inventory`, `working copy`
+  folder`, `layout`, `catalog.json`, `CURRENT`, `inventory`, `stale data
+  editions` (an item per stale data edition and URN: `info` for a live
+  edition, `warning` for an embargoed one), `working copy`
   (`list_editions`), `journal` (empty entries included), `unrecorded edition`
   (sealed, and neither named nor tombstoned by the newest version) and
   `leftover file` (`*.tmp` in `inventory/` and `.*.tmp` in the root).

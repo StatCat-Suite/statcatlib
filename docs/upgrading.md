@@ -70,10 +70,73 @@ A product is now a data product or a structure product
 - `statcatlib.testing` gains the CODR generator: `CodrShape`,
   `STRUCTURE_PRODUCTS`, `CODR_AGENCY`, `codr_structures` and `codr_product`.
 
+### The cross-product rules
+
+The Inventory writer now refuses a version that breaks specification §6.5
+item 4, 7 or 8 for an edition entering `live` or `embargoed`, with the new
+`CrossProductRuleError` (exported from `statcatlib`, a subclass of
+`InventoryRuleError`). It names the rule, the item, the URN and the editions
+compared, and nothing is written
+([The cross-product rules](catalog-format.md#33-the-cross-product-rules)):
+
+- `rule="full-artefacts"` (item 4): a data edition's full artefact that a
+  structure product holds differs from every live or embargoed edition of
+  that structure home; a partial's `partial_of` matches none; a cut codelist
+  has no structure home; or a full artefact no structure product holds, such
+  as a DSD two data products share, differs from another data product's live
+  copy when it enters `live`.
+- `rule="structure-home"` (item 7): a structure edition entering `live`
+  holds a full artefact another structure product holds live.
+- `rule="publish-order"` (item 8): a data edition entering `live` holds a
+  partial or a full artefact whose fingerprint only an embargoed structure
+  edition holds; release that structure edition first.
+
+The rules run in every seal, `Catalog.seal`, `CatalogAdmin.release` and
+`CatalogAdmin.rollback`. The seal checks them before sdmxlib's seal, so a
+refusal there leaves the working copy open; a refusal at the record, after
+another writer changed the head, leaves the sealed edition unrecorded.
+`Catalog.seal` checks the batch together, so data products that change a
+shared full artefact with no structure home pass when they seal in one
+batch. `CatalogAdmin.release` releases one product per call, so under
+embargo such a change cannot go live until the embargo is off and the
+products are sealed in one batch.
+
+What changes for existing code:
+
+- A data product filled with `fill_dataflows` or `ingest_dataflows` needs a
+  structure product holding each codelist it cuts, or `partials=False`.
+- Two data products holding one URN with different content (two copies of a
+  DSD or a codelist, from `ingest_sdmx` included) can no longer both be live:
+  the second seal raises `CrossProductRuleError`.
+- `InventoryWriter(root, *, artefacts=None)` reads each live and embargoed
+  edition's `manifest.json` for the rules, and raises
+  `sdmxlib.edition.ManifestError` for one it cannot read or whose SHA-256
+  differs from the Inventory's. Code that commits leaves naming editions
+  with no manifest on disk passes an `artefacts` reader.
+- `InventoryRuleError.rule` also takes `"full-artefacts"`,
+  `"structure-home"` and `"publish-order"`.
+
+A structure edit is accepted while data editions hold the old copy. Those
+data editions are **stale**: a stale live edition keeps serving until its
+product is republished, and a stale embargoed edition is refused at release.
+`statcat verify-catalog` prints each as a `STALE` line
+(`VerifyReport.stale`, of `statcatlib.diagnostics.StaleEdition`) without
+counting it as a finding, and `statcat doctor` reports it under
+`stale data editions`. `verify-catalog` also checks each data edition's
+partials against the structure editions they were cut from, and each
+structure edition's references in the other structure products' live and
+embargoed editions. `CatalogAdmin.prune` keeps a structure edition that a
+live or embargoed data edition's `partial_of` cites.
+
+The journal repair is catalog-wide: a product's next `working_copy()`
+records every product's sealed, unrecorded editions in one version,
+leaving out the products of a running `Catalog.seal` and a product whose
+first edition has no leaf yet.
+
 Write a catalog that holds a structure product with statcatlib 0.13 only. A
 0.12 writer records every edition as `kind: "data"`, so sdmxlib refuses its
 record of a structure product's edition after the seal, and the edition stays
-unrecorded.
+unrecorded; it also applies none of the cross-product rules.
 
 ## 0.12.0: catalogs of products and editions, on sdmxlib 0.81
 

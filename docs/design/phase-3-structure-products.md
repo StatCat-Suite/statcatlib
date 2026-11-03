@@ -3,7 +3,10 @@
 *   **Author:** Gabriel Gellner
 *   **Status:** Accepted. The EGM review (five reviewers, one resolution
     round) is in `docs/design/egm/phase-3-structure-products/`. The owner
-    answered the open questions on 2026-11-02 (Recorded answers).
+    answered the open questions on 2026-11-02 (Recorded answers). Aligned on
+    2026-11-03, before slice S3, with the specification as amended by
+    StatCat-Suite/sdmxlib#355 (sdmxlib `dd0cdbdf`: §6.5 items 4, 7 and 8,
+    §8, §11.2 and §11.4) and with the owner's answers on S1.
 *   **Date:** 2026-11-02
 *   **Issue:** GH-51. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#19.
@@ -50,9 +53,13 @@ product kind and the rules that span products:
   `sdmxlib.edition.check_edition(at="publish", structures=[...])` against the
   catalog's structure editions before the Inventory commit.
 - The **Inventory writer** refuses a version that breaks specification §6.5
-  item 4 (full artefacts agree with their structure home), item 7 (one
-  structure home per full artefact) or item 8 (a data edition goes live only
-  after the structure edition its partials were cut from).
+  item 4 (full artefacts agree with their structure home, and a full artefact
+  with no structure home carries one fingerprint among the live editions),
+  item 7 (at most one structure home per full artefact) or item 8 (a data
+  edition goes live only after the structure edition its partials were cut
+  from, or whose full artefacts it holds, is live).
+- `statcat verify-catalog` and `statcat doctor` report each **stale** data
+  edition: a live or embargoed one holding an old copy of a structure.
 - **`statcatlib.testing`** gains a CODR-shaped generator: three structure
   products and data products of one or more tables, from a seed.
 
@@ -94,9 +101,9 @@ Three parts of statcatlib 0.12 at `41d4b88` need changing:
 | data product | A product of `kind: "data"`, as in Phase 2a. |
 | full artefact | An artefact a manifest lists with `partial: false`. |
 | partial | A codelist a manifest lists with `partial: true`. The Phase 3 rules read the partials that record `partial_of`. |
-| structure home | A live or embargoed edition of a structure product that holds a URN as a full artefact. A URN has homes in at most one structure product, and at most two editions of it (one live, one embargoed). |
+| structure home | The structure product whose live or embargoed edition holds a URN as a full artefact (specification §6.5 item 4). Among live editions a URN has at most one home (item 7); while an artefact moves between structure products, an embargoed edition of the second can hold it too. A DSD or an agency scheme may have none. |
 | incoming entry | A leaf entry that becomes `live` or `embargoed` in the version being written. A seal's record, a release and a rollback each produce one. |
-| stale data edition | A live data edition holding a full artefact or a partial that matches no live structure home, after an edit to that structure. Specification §6.5 item 8 lets such an edition stay live until its product is republished. |
+| stale data edition | A live or embargoed data edition holding a URN that has a structure home, as a full artefact or as a partial, whose fingerprint (for a partial, its `partial_of`) matches no live or embargoed edition of that home. A data edition whose copy matches an embargoed home edition is not stale. Specification §6.5 item 4 defines it: a stale live edition stays live and keeps serving its own closure until its product is republished, and a stale embargoed edition is refused at release. Stale is derived from the Inventory and the manifests and never recorded. |
 | unrecorded edition | A sealed edition that no Inventory version names. `statcat doctor` reports it. |
 
 ## Goals
@@ -135,7 +142,9 @@ slice's test list covers its goals.
 *   **G7. Integrity tools.** `statcat verify-catalog` checks each partial
     against the catalog's structure editions, and each structure edition's
     references against the other structure products' live and embargoed
-    editions.
+    editions. `verify-catalog` and `doctor` report each stale data edition,
+    naming the URN, the fingerprint the edition holds and the home's live
+    edition, with the fix: republish the product.
 *   **G8. The CODR generator.** `statcatlib.testing` builds the three
     structure products and a CODR-shaped data product of a given number of
     tables, from a seed (O6).
@@ -160,7 +169,12 @@ slice's test list covers its goals.
 *   **Releases and rollbacks of several products in one version.**
     `CatalogAdmin.release` and `rollback` stay one product per call. Moving a
     full artefact from one structure product to another takes two releases,
-    the edition that drops it first (see Item 7).
+    the edition that drops it first (see Item 7). A changed full artefact with
+    no structure home, such as a DSD that two data products share, must enter
+    `live` in every product that holds it in one version (§6.5 item 4). With
+    embargo on, one-product releases cannot do that: the producer seals the
+    products in one `Catalog.seal` with embargo off, or waits for Phase 5's
+    batched release job (§11.2 step 4).
 *   **Moving `ingest_sdmx` onto partials.** `ingest_sdmx` keeps copying an
     in-memory registry whole; `ingest_dataflows` is the partial path.
 
@@ -170,7 +184,7 @@ Owner decisions of 2026-11-02, recorded on GH-51:
 
 | ID | Decision | Consequence |
 |---|---|---|
-| O1 | StatCan's structure products are split by change rate: `structure-geo`, `structure-classifications`, `structure-concepts`. Each full artefact has exactly one home (invariant 7). | The writer refuses a second home (item 7). The generator builds the three. |
+| O1 | StatCan's structure products are split by change rate: `structure-geo`, `structure-classifications`, `structure-concepts`. A full artefact has at most one structure home among live editions (invariant 7); every codelist a data product cuts has one (D11), and a DSD or an agency scheme may have none. | The writer refuses a second home (item 7). The generator builds the three. |
 | O2 | A hierarchy goes in the structure product of the codelist it is built on. | The generator puts the geography hierarchy in `structure-geo`. |
 | O3 | statcatlib persists the `partial_of` map `fill_edition` returns, so a resumed `WorkingCopy` passes it to `seal`. sdmxlib adds no build-store key. | The map goes in `statcat._meta` (D2). |
 | O4 | Sealing a structure product passes the catalog's other live or embargoed structure editions to `check_edition(at="publish", structures=[...])`. sdmxlib treats an edition with no bindings as a structure product. Sealing a data product passes the structure editions its partials were cut from. | The seal gains a publish check (D4). |
@@ -188,10 +202,10 @@ answers):
 | D4 | The publish check runs after sdmxlib's seal and before the Inventory commit, for a structure edition or an edition holding a partial. A data edition with no partial seals as in Phase 2a. | Phase 2a's seal cost is unchanged for data products without partials. A finding leaves the edition unrecorded (Risks). |
 | D5 | The cross-product rules live in a new pure module, `store/cross_product.py`. `InventoryWriter.commit` runs them on every planned change with an incoming entry. The seal's pre-check, the batch seal and the journal repair call the same function. | One implementation covers the pre-check, the seal, the batch seal, the journal repair, `release` and `rollback`. |
 | D6 | Each accepted version keeps its operation's `event.kind` (`seal`, `release`, `rollback`). A refused version is not written. | sdmxlib is unchanged. |
-| D7 | Item 4 treats the structure home as authoritative. An incoming data edition's full artefact must equal a home's fingerprint. An incoming structure edition is accepted when a data edition holds an older copy; that data edition becomes stale. | Settles case C of sdmxlib's plan (Item 4). |
+| D7 | Item 4 treats the structure home as authoritative. An incoming data edition's full artefact must equal a live or embargoed home edition's fingerprint, and each partial's `partial_of` likewise. An incoming structure edition is accepted when a live or embargoed data edition holds an older copy; that data edition becomes stale once the old structure edition leaves `live` and `embargoed`. | Settles case C of sdmxlib's plan (Item 4). The specification adopts it (StatCat-Suite/sdmxlib#355). |
 | D8 | An item-8 refusal under embargo off is raised by the pre-check, before sdmxlib's seal, so the working copy stays open. A refusal at the Inventory commit, after another writer changed the head, leaves the edition unrecorded, as a late fast-forward refusal does. | Settles case A of sdmxlib's plan. |
 | D9 | `Catalog.seal` seals and checks the batch's structure working copies first, then pre-checks, seals and checks each data working copy against them. The Inventory commit runs the rules on the whole version and drops refused products until a pass drops none. | Settles case B of sdmxlib's plan: a structure edition and its data editions go live in one version. |
-| D10 | Item 7 is checked as the specification states it: on entry to `live`, against the other structure products' live editions. | A second home under embargo is refused at its release. |
+| D10 | Item 7 is checked as the specification states it: on entry to `live`, against the other structure products' live editions, so a full artefact has at most one structure home among live editions. | A second home under embargo is refused at its release. A DSD or an agency scheme may have no home (item 4 compares it across data products). |
 | D11 | Every codelist `fill_edition` cuts needs a structure home. A partial whose URN no structure product holds is refused by the pre-check, naming the URN and the fix. | A producer puts every cut codelist (unit, status and scale codelists included) in a structure product, or fills with `partials=False`. Unit, status and SDMX-agency codelists get a home, mostly in `structure-classifications` (A5). |
 
 ## Critical User Journeys (CUJs)
@@ -232,8 +246,11 @@ answers):
 *   **Then**: The table's release is refused with
     `CrossProductRuleError(rule="publish-order")`, naming the geography URN,
     the table's edition and the embargoed `structure-geo` edition. After
-    `release("structure-geo", ...)`, the table's release succeeds. Between
-    the two releases the live table edition is stale.
+    `release("structure-geo", ...)`, the table's release succeeds. Before the
+    first release neither table edition is stale: the live one matches the
+    live `structure-geo` edition, and the embargoed one the embargoed
+    edition. Between the two releases the live table edition is stale, keeps
+    serving, and `statcat verify-catalog` and `statcat doctor` report it.
 
 ### CUJ 4: A second home is refused
 
@@ -513,19 +530,29 @@ Two readers implement `Artefacts`:
   edition it defers to the writer's reader. A test pins the pre-check's
   fingerprints to the sealed manifest's.
 
-Let `A` be the planned version's live and embargoed entries, `S` those of
-structure products, `S_live` the live ones, and `E` the incoming entries. The
-rules compare entries of different products only, because an embargoed
-edition replaces its own product's live edition at release. For each `e` in
-`E`, of product `p`:
+Let `A` be the planned version's live and embargoed entries, `A_live` the
+live ones, `S` those of structure products, `S_live` the live ones, and `E`
+the incoming entries. The rules compare entries of different products only
+(specification §6.5 item 4; owner confirmation, 2026-11-03), because an
+embargoed edition replaces its own product's live edition at release. For
+each `e` in `E`, of product `p`:
 
 | Item | Applies to | Refused when | `rule` |
 |---|---|---|---|
 | 7 | `e` in a structure product, entering `live` | a full artefact of `e` is a full artefact of an entry of `S_live` in another product | `structure-home` |
 | 4 | `e` in a data product, full artefact `u` with fingerprint `f` | entries of `S` hold `u` full, and none with `f` | `full-artefacts` |
 | 4 | `e` in a data product, partial `u` with `partial_of` `f` | no entry of `S` holds `u` full with fingerprint `f` | `full-artefacts` |
-| 4 | `e` in a data product, full artefact `u` with fingerprint `f`, no entry of `S` holding `u` | an entry of `A` in another data product holds `u` full with another fingerprint | `full-artefacts` |
+| 4 | `e` in a data product entering `live`, full artefact `u` with fingerprint `f`, no entry of `S` holding `u` | an entry of `A_live` in another data product holds `u` full with another fingerprint | `full-artefacts` |
+| 8 | `e` in a data product entering `live`, full artefact `u` with fingerprint `f`, entries of `S` holding `u` | an embargoed entry of `S` holds `u` with `f`, and no live one does | `publish-order` |
 | 8 | `e` in a data product entering `live`, partial `u` with `partial_of` `f` | an embargoed entry of `S` holds `u` with `f`, and no live one does | `publish-order` |
+
+The no-home row compares `e` with the editions that will be live once the
+version is written, so an embargoed edition with a changed copy is recorded
+and compared when it enters `live`. A version in which every product holding
+the changed artefact enters `live` together passes, since their old live
+editions are superseded in it. An item 4 row is checked before its item 8
+row, so a stale embargoed data edition (its copy matches no live or
+embargoed home edition) is refused with `full-artefacts` at its release.
 
 `commit` skips `refusals` when the planned change has no incoming entry, so
 `describe`, `set_embargo`, `cancel` (event kind `withdraw`) and `prune`
@@ -550,7 +577,7 @@ matches (item 4, partial row), `editions` names the incoming entry and every
 structure edition that holds `u` with another fingerprint, or the incoming
 entry alone when none holds `u`. The message names the item, the URN and the
 editions, for example
-`structure-geo/0193…: CL_NAICS(1.0) is a full artefact of structure-classifications/0192…, live; a full artefact has one structure home (specification §6.5 item 7)`.
+`structure-geo/0193…: CL_NAICS(1.0) is a full artefact of structure-classifications/0192…, live; a full artefact has at most one structure home (specification §6.5 item 7)`.
 `InventoryRuleError.rule` widens to
 `Rule | Literal["lifecycle", "full-artefacts", "structure-home", "publish-order"]`,
 and `statcatlib` exports `CrossProductRuleError`.
@@ -565,9 +592,14 @@ Where the rules run:
 - **The pre-check** (step 2) builds the product's provisional leaf with
   sdmxlib's `record` (`embargo=` the head's), and calls `refusals` with
   `StoreArtefacts` and the batch's sealed structure editions in the planned
-  leaves. Under embargo off the incoming entry is `live`, so items 7 and 8
-  apply before the seal (D8). Under embargo on, items 4 and the partial
-  match apply, and items 7 and 8 wait for the release.
+  leaves. Under embargo off the incoming entry is `live`, so every row
+  applies before the seal (D8). Under embargo on, the item 4 rows against a
+  structure home apply, and item 7, item 8 and the no-home row wait for the
+  release. In `Catalog.seal` the pre-check of each pass runs on the pass's
+  working copies together, each with its provisional leaf in the planned
+  leaves, and drops refused ones until a pass drops none: two data products
+  that change a full artefact with no structure home in one batch pass, as
+  §6.5 item 4 requires of a batched seal.
 - **`Catalog.seal`'s Inventory commit** (`_record_batch`, `catalog.py:206`)
   computes every leaf, calls `writer.refusals`, removes the refused
   products, and repeats until a pass drops none. A dropped structure
@@ -581,15 +613,17 @@ Where the rules run:
 `_seal_each` (`catalog.py:174`) runs every pre-check before any seal. Phase 3
 restructures it into three passes over the batch:
 
-1. **Structure.** For each structure working copy: `_precheck(checks)` (items
-   7 and the structure content, against the head), then `_seal_edition()`.
+1. **Structure.** For each structure working copy: `_precheck(checks)` (the
+   structure content, against the head); then the cross-product pre-check of
+   the pass's working copies together (item 7); then `_seal_edition()`.
 2. **Structure check.** For each sealed structure edition:
    `_publish_check(structures)` with every other structure edition the batch
    sealed plus the head's, as above. An edition with a finding is dropped
    and the pass repeats for the rest, until a pass drops none.
-3. **Data.** For each data working copy: `_precheck(checks, batch=...)`,
-   where `batch` is the surviving structure editions as provisional `live`
-   (or `embargoed`) entries; then `_seal_edition()`; then
+3. **Data.** For each data working copy: `_precheck(checks, batch=...)`;
+   then the cross-product pre-check of the pass's working copies together,
+   with the surviving structure editions as provisional `live` (or
+   `embargoed`) entries; then `_seal_edition()`; then
    `_publish_check(structures)` with the head's and the batch's structure
    editions.
 
@@ -602,17 +636,33 @@ publish check; S3 adds the cross-product pre-check to passes 1 and 3.
 
 #### The journal repair
 
-A crash between sdmxlib's seal and step 6 leaves a journal entry. Phase 3's
-`settle_journal` settles every product's journal entries together when any
-product has one, in one change that runs the batch's rules: the edition of
-`structure-geo` and a table sealed in one crashed batch are recorded
-together. Before the change it runs `_publish_check` on each journalled
-structure edition and each journalled edition holding a partial, with the
-same `structures=` rule (the journalled structure editions counting as a
-batch). An edition with a finding, or one the rules refuse, is cleared with
-a WARNING and stays unrecorded, as other refusals are. Listing every
-product's `journal/` costs one directory read per product at each
-`working_copy()`; Phase 4 re-measures it at 7,000 products.
+A crash between sdmxlib's seal and step 6 leaves a journal entry. Slice S1
+settles one product's entries. In S3 `settle_journal` settles every
+product's journal entries together when any product has one, in one change
+that runs the batch's rules: the edition of `structure-geo` and a table
+sealed in one crashed batch are recorded together. The owner's answers on S1
+(GH-51, 2026-11-03) bound it:
+
+- It leaves out the products of the current batch other than its own, since
+  `Catalog.seal`'s data pre-check runs after the batch's structure editions
+  are sealed and journalled, and those are the batch's to record.
+- It leaves a product whose first edition is journalled with no leaf in the
+  head to that product's own next `working_copy()`, which knows its
+  lifecycle.
+- For another product it acts only on an entry whose edition has a manifest
+  and is unrecorded; an entry without a manifest may be a seal in progress in
+  another process.
+
+Before the change it runs `_publish_check` on each journalled structure
+edition and each journalled edition holding a partial, with the same
+`structures=` rule (the journalled structure editions counting as a batch).
+An edition with a finding, or one the rules refuse, is cleared with a
+WARNING and stays unrecorded, as other refusals are; an edition whose check
+was given a refused structure edition is dropped with it, as in the batch. A
+seal whose own record finds its edition already recorded by another
+writer's repair, with the same `manifest_sha256`, counts it as recorded.
+Listing every product's `journal/` costs one directory read per product at
+each `working_copy()`; Phase 4 re-measures it at 7,000 products.
 
 #### Item 4 and a structure edit (case C of sdmxlib's plan)
 
@@ -625,25 +675,30 @@ product, whose copy no longer matches the live structure, blocks the
 republish. Under both refusals neither the edit nor the republish can go
 live. D7 makes the structure home authoritative: the structure edition is
 accepted, the data editions holding the old copy stay live and stale, and
-each republish must match the new home. Item 8 already treats partials this
-way: it holds back a data product "until that product is republished". The
-owner accepted D7 (A3); the specification's wording is amended in
-StatCat-Suite/sdmxlib#354 before S3.
+each republish must match the new home. The owner accepted D7 (A3), and
+StatCat-Suite/sdmxlib#355 amended the specification: the stale rule lives in
+§6.5 item 4, and item 8 cross-references it. A stale live edition keeps
+serving its own closure, and a stale embargoed edition is refused at release
+until its product is republished from the home's current edition.
 
 A full artefact with no structure home, such as a DSD shared by two data
-products or an agency scheme, is compared across the data products that hold
-it, as item 4 states (A4). An incoming data edition whose copy differs from
-another data product's live or embargoed copy is refused with
-`full-artefacts`. An in-place edit at the source then blocks each product's
-republish until the products agree; the fix is a structure home for the
-artefact.
+products or an agency scheme, is compared at release among the editions that
+will be live once the version is written, as item 4 states (A4). An incoming
+data edition entering `live` whose copy differs from another data product's
+live copy in the planned version is refused with `full-artefacts`; an
+embargoed edition with a changed copy is recorded and compared when it
+enters `live`. The products that hold a changed copy enter `live` in one
+version: under embargo off one `Catalog.seal` of all of them, and under
+embargo on Phase 5's batched release job, since `CatalogAdmin.release`
+releases one product per call (Non-Goals). The other fix is a structure home
+for the artefact.
 
 #### Item 8 under embargo off (case A of sdmxlib's plan)
 
 With embargo off a seal records its edition live. An embargo that was on
 earlier can leave a structure edition embargoed. The pre-check refuses a data
-edition whose partials match only that edition, and the working copy stays
-open; the producer releases the structure edition and seals again. A refusal
+edition whose partials, or whose full artefacts with a structure home, match
+only that edition, and the working copy stays open; the producer releases the structure edition and seals again. A refusal
 at the Inventory commit, after another writer changed the head, leaves the
 edition unrecorded. Alternative B records such an edition `embargoed`.
 
@@ -662,7 +717,7 @@ home, and a data edition cut from it in that window is refused by item 4.
 A rollback makes a superseded structure edition live (an incoming entry) and
 withdraws the live one. Item 7 checks the incoming edition. Data editions cut
 from the withdrawn edition stay live and stale, as after a forward structure
-edit. A rollback of a data product to an edition cut from a structure edition
+edit (§6.5 item 4). A rollback of a data product to an edition cut from a structure edition
 that is neither live nor embargoed is refused by item 4's partial row
 (`full-artefacts`). A rollback of both together needs a release of several
 products in one version (Non-Goals).
@@ -682,16 +737,32 @@ products in one version (Non-Goals).
 - `None` when the list is empty.
 
 `CatalogAdmin.prune` keeps a structure edition that a live or embargoed data
-edition's `partial_of` cites: `_retirable` (`admin.py:149`) skips it. A
-pruned source would make the stale data edition fail its partial check in
-`verify-catalog`.
+edition's `partial_of` cites (specification §11.4): `_retirable`
+(`admin.py:149`) skips it. A pruned source would make the stale data edition
+fail its partial check in `verify-catalog`.
 
-Two reports wait for slice S4, which the owner may drop: a `verify-catalog`
+Both tools report stale data editions (specification §6.5 item 4), from one
+function, `cross_product.stale_editions(full, artefacts)`, over the head and
+the manifests:
+
+- `verify_catalog` returns them in `VerifyReport.stale`, one
+  `StaleEdition` per edition and URN: the product, the edition and its
+  state, the URN, the fingerprint the edition holds (a partial's
+  `partial_of`), the home product and its live edition, and the fix,
+  republish the product. `statcat verify-catalog` prints each as a `STALE`
+  line. A stale edition is a state the specification allows, so it is no
+  finding: it leaves `VerifyReport.ok` and the exit code alone.
+- `doctor` adds the topic `stale data editions`, one item per stale edition
+  and URN, with the same fields and fix. A stale live edition's item is
+  level `info`: the state is normal right after a structure edit, and the
+  edition keeps serving, so it leaves `doctor`'s exit code at 0. A stale
+  embargoed edition's item is level `warning` and says its release is
+  refused until the republish.
+
+One report waits for slice S4, which the owner may drop: a `verify-catalog`
 finding for a URN two structure products' live editions hold (a state only a
-writer other than statcatlib can produce), and a `doctor` topic,
-`stale data editions` (level `warning`), listing each stale data edition and
-each embargoed data edition item 8 can never release, with the fix: republish
-the product. Both call `cross_product` functions.
+writer other than statcatlib can produce). It calls `cross_product`
+functions.
 
 ### The CODR generator
 
@@ -867,12 +938,13 @@ GH-51's body names `tests/support/codr.py`, which does not exist at
 
 | Risk | Mitigation |
 |---|---|
-| A full artefact with no structure home, edited in place at the source, blocks the republish of every data product that holds it (A4) | The refusal names the URN and the editions; the fix is a structure home for the artefact |
+| A full artefact with no structure home, edited in place at the source, blocks the release of each data product that holds it alone (A4) | The refusal names the URN and the editions. The products are sealed together in one `Catalog.seal` with embargo off, or the artefact gets a structure home |
+| Under embargo on, a changed full artefact with no structure home cannot go live, since `CatalogAdmin.release` releases one product per call | Turn the embargo off and seal the products in one `Catalog.seal`, or wait for Phase 5's batched release job (§11.2 step 4); `docs/api/admin.md` says so |
 | A publish-check finding leaves a sealed edition unrecorded, and a rebuild costs a full ingest | The pre-check catches items 4, 7 and 8 before the seal. The remaining findings (a partial's codes, a structure reference) point at a producer error. `doctor` reports the unrecorded edition |
 | A 0.12 writer on a catalog with structure products records `kind: "data"` for a structure product (refused after sdmxlib's seal, so unrecorded) and applies none of the cross-product rules | `docs/upgrading.md`: write such a catalog with 0.13 only |
 | A caller fills `wc.registry` with `fill_edition` directly | The pre-check refuses a re-cut partial the map does not name (Partials the seal cannot vouch for). The guide names `fill_dataflows` |
 | A source's own unit, status or SDMX-agency codelists are cut and have no structure home | D11 refuses them with the fix in the message; the producer gives them a home, mostly in `structure-classifications` (A5) |
-| A stale data edition serves an old copy of a structure | Specification §6.5 item 8 allows it. S4's `doctor` topic lists stale editions |
+| A stale data edition serves an old copy of a structure | Specification §6.5 item 4 allows it. `verify-catalog` and `doctor`'s `stale data editions` topic list each one with the fix |
 | A rollback of a structure product strands data editions cut from the withdrawn edition | Stated in `docs/api/admin.md` |
 | The first commit of a process on Phase 4's 7,000 entries reads 7,000 manifests | Phase 4 measures it (A1) |
 | Two generator calls with different seeds produce mismatching structures | The refusal names `full-artefacts`; the generator's docstring states the seed rule |
@@ -893,6 +965,23 @@ latest comment on GH-51:
 | A7 | Item 7 timing (D10) | Item 7 stays at release, among live editions, as the specification states. |
 | A8 | Release cadence | One 0.13.0 release after S3, together with StatCat-Suite/sdmxlib-rest#90. |
 
+The owner answered S1's questions on 2026-11-03, in a comment on GH-51:
+
+| ID | Question | Answer |
+|---|---|---|
+| B1 | Should the journal repair be catalog-wide? | Per product in S1; S3 makes it catalog-wide and leaves the current batch's products out (The journal repair). |
+| B2 | A product whose first edition is journalled with no leaf | S3's catalog-wide repair leaves it to that product's own next `working_copy()`. |
+| B3 | A structure edition refused at record time | It still drops every structure edition of the batch, since each was given the others' editions; narrow it only if it causes trouble. |
+
+The same comment and the S2 comment record the specification's amendment
+(StatCat-Suite/sdmxlib#355, closing StatCat-Suite/sdmxlib#354): stale covers
+live and embargoed data editions; full artefacts with no structure home are
+compared at release among the editions that will be live; `verify-catalog`
+reports stale editions, so that report moves from S4 into S3; the stale rule
+lives in item 4, and item 8 also covers full artefacts with a home; item 7
+says at most one structure home. The owner also confirmed that item 4
+compares only editions of different products.
+
 ## Detailed Implementation Plan
 
 ### Slices
@@ -906,8 +995,8 @@ when the count changes, and runs `just docs-build`.
 |---|---|---|
 | S1 | sdmxlib 0.83 pin; the product kind; `fill_structures`; `structure_content`; the batch's structure passes; the publish check for structure editions; `EditionCheckError`; the journal repair's kind and publish check | nothing |
 | S2 | `fill_dataflows`, `_meta.partial_of` and `fill_in_progress`, `ingest_dataflows`; the publish check for editions with partials; the partials the seal cannot vouch for; the CODR generator; the cost measurement | S1 |
-| S3 | `cross_product.py`; the rules in `commit`, the pre-check, the batch and the journal repair; `CrossProductRuleError`; `verify-catalog`'s `structures=`; `prune`'s guard | S2 |
-| S4 (optional) | `verify-catalog`'s second-home finding; `doctor`'s `stale data editions` | S3 |
+| S3 | `cross_product.py`; the rules in `commit`, the pre-check, the batch and the catalog-wide journal repair; `CrossProductRuleError`; `verify-catalog`'s `structures=` and its stale report; `doctor`'s `stale data editions`; `prune`'s guard | S2 |
+| S4 (optional) | `verify-catalog`'s second-home finding | S3 |
 
 ### Slice S1: the pin and structure products
 
@@ -1042,7 +1131,8 @@ when the count changes, and runs `just docs-build`.
 #### 13. `src/statcatlib/store/cross_product.py` (Create)
 
 *   **Changes**: `Artefacts`, `refusals`, `CrossProductRuleError`,
-    `ManifestArtefacts`, `StoreArtefacts` (above).
+    `ManifestArtefacts`, `StoreArtefacts`, `stale_editions` and
+    `StaleEdition` (above).
 
 #### 14. `src/statcatlib/store/inventory.py` (Modify)
 
@@ -1053,17 +1143,23 @@ when the count changes, and runs `just docs-build`.
 
 #### 15. `src/statcatlib/store/working_copy.py`, `src/statcatlib/catalog.py`, `src/statcatlib/__init__.py` (Modify)
 
-*   **Changes**: the cross-product pre-check in `_precheck` (step 2), with
-    `batch`; `_record_batch` drops refused products until a pass drops none;
-    `settle_journal` runs the rules on its catalog-wide change and drops
-    refused editions; export `CrossProductRuleError`.
+*   **Changes**: the cross-product pre-check at step 2, run on a pass's
+    working copies together in `Catalog.seal`; `_precheck(batch=)` leaves
+    the batch's other products out of the journal repair; `_record_batch`
+    drops refused products until a pass drops none; `settle_journal` becomes
+    catalog-wide (The journal repair), runs the rules on its change and drops
+    refused editions; a seal's own record counts its edition recorded when a
+    repair recorded it with the same `manifest_sha256`; export
+    `CrossProductRuleError` and `StaleEdition`.
 
 #### 16. `src/statcatlib/diagnostics.py`, `src/statcatlib/admin.py` (Modify)
 
-*   **Changes**: `_verify_edition` passes `structures=` (above); `_retirable`
-    skips a structure edition a live or embargoed data edition's
-    `partial_of` cites; the `Raises` sections of `release` and `rollback`
-    name `CrossProductRuleError`.
+*   **Changes**: `_verify_edition` passes `structures=` (above);
+    `VerifyReport.stale` and the `STALE` lines of `statcat verify-catalog`;
+    `doctor`'s `stale data editions` topic, named in the `DoctorItem`
+    docstring's topic list; `_retirable` skips a structure edition a live or
+    embargoed data edition's `partial_of` cites; the `Raises` sections of
+    `release` and `rollback` name `CrossProductRuleError`.
 
 #### 17. Tests (Create or Modify)
 
@@ -1074,7 +1170,9 @@ when the count changes, and runs `just docs-build`.
       `structure-concepts` is refused, naming the URN and both editions; a
       structure edit is accepted and the data edition holding the old copy
       stays live; a data edition whose full DSD with no structure home
-      differs from another data product's live copy is refused (A4);
+      differs from another data product's live copy is refused when it
+      enters `live` (A4), recorded when embargoed and refused at its
+      release, and accepted when both products seal it in one batch;
     - item 7: under embargo off, a second home is refused by the pre-check
       (working copy open) and at the Inventory commit (a race simulated by
       committing the first home between the pre-check and the commit); under
@@ -1082,7 +1180,11 @@ when the count changes, and runs `just docs-build`.
     - item 8: with embargo on, a data edition's release is refused with
       `publish-order` while its structure edition is embargoed and succeeds
       after the structure's release (CUJ 3); with embargo off, the seal is
-      refused before sdmxlib's seal;
+      refused before sdmxlib's seal; the same for a data edition whose full
+      `CS_CODR` matches only an embargoed `structure-concepts` edition;
+    - stale: a structure edit makes the live data edition stale, and it
+      keeps serving; an embargoed data edition cut from the old structure
+      edition is refused at its release once the edit is live;
     - D11: a cut codelist with no structure home is refused by the
       pre-check, naming the URN;
     - a batch of a structure edition and its data edition records both live
@@ -1100,10 +1202,14 @@ when the count changes, and runs `just docs-build`.
     manifest construct the writer with a reader that returns nothing; a new
     test shows `commit` raising `ManifestError` for an incoming entry whose
     manifest is missing.
-*   `tests/test_cli_verify_doctor.py`: `verify-catalog` is clean on a
+*   `tests/test_cli_verify_doctor.py`: `verify-catalog` has no finding on a
     generated catalog with a structure edit and a stale data edition, and
-    after a `prune`; a structure reference only a superseded edition
-    resolves is a finding.
+    after a `prune`, and reports the stale edition with its URN, fingerprint
+    and the home's live edition; `doctor` reports it under `stale data
+    editions` at level `info` and exits 0; a structure reference only a
+    superseded edition resolves is a finding. `TestStale` in
+    `tests/test_cross_product.py` shows `doctor` reporting a stale
+    embargoed edition at level `warning`.
 
 #### 18. Docs (Modify)
 
@@ -1113,9 +1219,46 @@ when the count changes, and runs `just docs-build`.
 ### Slice S4 (optional): reports
 
 *   `verify_catalog` adds a finding for a URN two structure products' live
-    editions hold; `doctor` adds `stale data editions`, and the `DoctorItem`
-    docstring's topic list (`diagnostics.py:138`) names it. Tests in
-    `tests/test_cli_verify_doctor.py`.
+    editions hold. Tests in `tests/test_cli_verify_doctor.py`.
+
+### As built in S3
+
+Slice S3 follows the design with these changes, each the smallest the code
+forced:
+
+- **One import direction.** `cross_product.refusals` returns `Refusal`
+  values, and `InventoryWriter.refusals` turns each into a
+  `CrossProductRuleError`, which lives in `store/inventory.py` beside
+  `InventoryRuleError` and `NonFastForwardError`. `inventory.py` imports
+  `cross_product`, which imports only sdmxlib; the error in `cross_product`
+  would need an import cycle or a local import.
+- **The reader skips partials with no `partial_of`.** `PartialRecord` has no
+  `partial` flag, so a partial with no `partial_of` would read as a full
+  artefact. `ManifestArtefacts` and `StoreArtefacts` leave such partials
+  out, which is the skip the design states (Partials the seal cannot vouch
+  for).
+- **The pre-check is a separate step.** `_precheck(checks, *, batch=())`
+  takes the batch's product ids, which the journal repair leaves out; the
+  cross-product pre-check runs after it, as `_cross_precheck` in
+  `WorkingCopy.seal` and as `precheck_refusals` over a pass's working copies
+  in `Catalog.seal`.
+- **The pre-check is skipped where no rule can refuse.** `_may_be_refused`
+  is false for a structure working copy when no other structure product has
+  a live or embargoed edition, and for a data working copy when no
+  structure product has one, it holds no partial with a `partial_of`, no
+  other data working copy is in the batch, and no other data product's live
+  edition shares a URN with it. A Phase 2a seal then fingerprints nothing
+  twice (Non-Functional Requirements); the commit runs the rules either way.
+- **A seal counts a repair's record.** With the repair catalog-wide, another
+  writer's `working_copy()` can record an edition between its sdmxlib seal
+  and its own commit; the seal and the batch count an edition the head
+  records with the same `manifest_sha256` as recorded.
+- **`StaleEdition`** is exported from `statcatlib.diagnostics`, beside
+  `VerifyReport`, and from `statcatlib.store.cross_product`; `statcatlib`
+  exports `CrossProductRuleError` only.
+- **Two test files.** `tests/test_cross_product_rules.py` (unit) holds the
+  rules over built leaves and `tests/test_cross_product.py` (integration)
+  the rest, since every test file carries one tier mark (GH-8).
 
 ### Acceptance test map
 
@@ -1129,7 +1272,8 @@ tests, as restated against `41d4b88` and sdmxlib 0.83.0:
 | A partial whose full artefact is in a second structure product passes `check_edition` given both | S2 | `test_partials.py` (`CL_GEO` in `structure-geo`, `CL_CLASS_*` in `structure-classifications`) |
 | Two editions holding one URN as a full artefact with different fingerprints are refused, naming the URN and both editions (item 4) | S3 | `test_cross_product.py` (a data edition against its structure home; two data products' copies of a full artefact with no structure home, A4) |
 | A full artefact with two structure homes is refused (item 7) | S3 | `test_cross_product.py` |
-| A data edition is refused `live` while its structure edition is not live, and released once it is (item 8) | S3 | `test_cross_product.py` |
+| A data edition is refused `live` while its structure edition is not live, and released once it is (item 8) | S3 | `test_cross_product.py` (partials, and full artefacts with a home) |
+| A stale data edition stays live, is reported, and a stale embargoed one is refused at release (item 4) | S3 | `test_cross_product.py`, `test_cli_verify_doctor.py` |
 | A republish of a data product through a working copy keeps its partials cut | S2 | `test_partials.py` |
 | A product generated with two tables vendors each shared partial once | S2 | `test_codr.py` |
 | Dropped: a structure edition with a binding fails `check_catalog` | — | Passes on main: `tests/test_bundle_manifest.py:113` (`test_a_structure_kind_with_bindings_is_refused`), run at `41d4b88` with sdmxlib 0.82.0 (2 passed with its companion, `:107`). S1 adds a sealed structure edition to the same file. |

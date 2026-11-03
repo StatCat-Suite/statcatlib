@@ -89,6 +89,7 @@ from statcatlib.store import (
     xhtml_to_markdown,
 )
 from statcatlib.store.inventory import (
+    CrossProductRuleError,
     InventoryConflictError,
     InventoryContentionError,
     InventoryRuleError,
@@ -133,6 +134,7 @@ __all__ = [
     "ConceptsScope",
     "ContactPoint",
     "CountExpr",
+    "CrossProductRuleError",
     "DataService",
     "Dataset",
     "DatasetScope",

@@ -14,15 +14,18 @@ is filled with `WorkingCopy.fill_dataflows`, which cuts each codelist to a
 partial and records the full codelist's fingerprint in
 ``statcat._meta.partial_of``; the seal passes it to sdmxlib as
 ``partial_of``, and checks the edition's partials against the catalog's
-structure editions the same way.
+structure editions the same way. The Inventory writer runs the cross-product
+rules (`statcatlib.store.cross_product`) on every record, and the seal runs
+them first as a pre-check, before anything is sealed.
 
 **The journal rule.** sdmxlib's `seal` writes a journal entry,
 ``<product>/journal/<edition_id>.json``, before the manifest, and statcatlib
 clears it once the edition is recorded. An entry left behind is a seal that a
-crash may have stopped before the record. Every writer settles the product's
+crash may have stopped before the record. Every writer settles the catalog's
 entries against the newest Inventory version when it starts a working copy,
 when it resumes one, at the start of a seal and after its record
-(`settle_journal`):
+(`settle_journal`), recording every product's unrecorded editions in one
+version:
 
 | Journal entry | Action |
 |---|---|
@@ -32,11 +35,15 @@ when it resumes one, at the start of a seal and after its record
 | Recording raises ``duplicate`` with the same ``manifest_sha256`` | Treat as success; clear the entry |
 | Recording raises any other `InventoryRuleError` | Clear the entry, log a WARNING, leave the edition |
 | An edition fails its publish check | Clear the entry, log a WARNING, leave the edition |
+| The cross-product rules refuse it | Clear the entry, log a WARNING, leave the edition |
+| Its check was given a structure edition that is not recorded | Clear the entry, log a WARNING, leave the edition |
 | `InventoryContentionError` | Keep the entry, so the next working copy records it |
 | The entry cannot be read | Raise `JournalError` naming the file and ``statcat doctor`` |
 
-Each edition is recorded with the kind its manifest's ``statcat`` section
-names, ``data`` when it names none. A structure edition's publish check is
+Another product's entry is acted on only when its edition has a manifest and
+the head records the product; a ``Catalog.seal`` batch leaves its other
+products out. Each edition is recorded with the kind its manifest's
+``statcat`` section names, ``data`` when it names none. A structure edition's publish check is
 given the other structure products' live and embargoed editions, and each
 other product's journalled structure edition in place of that product's; a
 data edition whose partials record ``partial_of`` is checked with every
@@ -61,13 +68,15 @@ import sdmxlib.edition as _edition
 from attrs import frozen
 from sdmxlib import SdmxUrn
 from sdmxlib.edition import MANIFEST_NAME, Finding, ManifestError, canonical_json, check_edition
-from sdmxlib.inventory import FullInventory, Leaf, TransitionError, head, record
+from sdmxlib.inventory import FullInventory, Leaf, PartialRecord, TransitionError, head, record
 from sdmxlib.storage.schema import SCHEMA_VERSION, meta_value
 
 from statcatlib.bundle import STATCAT_SECTION, catalog_section, check_catalog, structure_content
 from statcatlib.store import schema as _catalog_schema
+from statcatlib.store.cross_product import ACTIVE, StoreArtefacts
 from statcatlib.store.inventory import (
     Change,
+    CrossProductRuleError,
     InventoryContentionError,
     InventoryRuleError,
     InventoryWriter,
@@ -87,16 +96,19 @@ if TYPE_CHECKING:
 
     from statcatlib.model.dataset import Dataset
     from statcatlib.model.skos import Concept, ConceptScheme
+    from statcatlib.store.cross_product import Artefacts
     from statcatlib.store.store import CodelistIndexPolicy, EmbeddingModel, ReferenceMetadataBlend
 
 __all__ = [
     "Edition",
     "EditionCheckError",
     "JournalError",
+    "Planned",
     "SealCheckError",
     "WorkingCopy",
     "WorkingCopyClosedError",
     "WorkingCopyExistsError",
+    "precheck_refusals",
     "settle_journal",
 ]
 
@@ -275,28 +287,6 @@ def publish_check(
         raise EditionCheckError(findings, product=product_id, edition=edition_dir.name)
 
 
-def _journalled_structures(products_dir: Path, product_id: str, full: FullInventory | None) -> dict[str, Path]:
-    """Each other product's newest sealed, unrecorded structure edition that a journal entry names.
-
-    A batch that crashed after sdmxlib's seals leaves one per product; the
-    repair of one checks it with the others, as the batch would have.
-    """
-    found: dict[str, Path] = {}
-    for other_dir in sorted(products_dir.iterdir()) if products_dir.is_dir() else ():
-        if other_dir.name == product_id or not (other_dir / "journal").is_dir():
-            continue
-        with contextlib.suppress(ManifestError):
-            for entry in _edition.read_journal(other_dir):
-                edition_dir = other_dir / entry.edition_id
-                if _named(full, other_dir.name, entry.edition_id) or not (edition_dir / MANIFEST_NAME).is_file():
-                    continue
-                if edition_kind(_edition.read_manifest(edition_dir)) == "structure":
-                    newest = found.get(other_dir.name)
-                    if newest is None or newest.name < edition_dir.name:
-                        found[other_dir.name] = edition_dir
-    return found
-
-
 def _read_journal(product_dir: Path) -> list[JournalEntry]:
     try:
         return _edition.read_journal(product_dir)
@@ -375,74 +365,233 @@ def record_journalled(
     return (current if changed else None), settled, refused
 
 
-def settle_journal(writer: InventoryWriter, product_dir: Path, product_id: str, lifecycle: Lifecycle) -> None:
-    """Apply the journal rule to the product's journal entries (see the module docstring).
+def settle_journal(
+    writer: InventoryWriter,
+    product_dir: Path,
+    product_id: str,
+    lifecycle: Lifecycle,
+    *,
+    exclude: Collection[str] = (),
+) -> None:
+    """Apply the journal rule to every product's journal entries (see the module docstring).
 
-    Every edition that needs recording goes into one Inventory commit, each
-    with the kind its manifest names. A structure edition is recorded only
-    once its publish check finds nothing.
+    The repair is catalog-wide: every edition that needs recording, of any
+    product, goes into one Inventory commit, each with the kind its manifest
+    names, and the cross-product rules run on that version, so a structure
+    edition and a data edition sealed in one crashed batch are recorded
+    together. Another product's entry is acted on only when its edition has
+    a manifest and the head does not name it, and only when the head records
+    the product: a product whose first edition is journalled is left to its
+    own next ``working_copy()``, which knows its lifecycle. A structure
+    edition, and a data edition whose partials record a ``partial_of``, is
+    recorded only once its publish check finds nothing; an edition whose
+    check was given a journalled structure edition that is not recorded is
+    left unrecorded with it.
 
     Args:
         writer: The catalog's Inventory writer.
         product_dir: The product's directory.
         product_id: The product.
-        lifecycle: The lifecycle to record a product's first edition with.
+        lifecycle: The lifecycle to record the product's first edition with.
+        exclude: Other products to leave alone: the products of the
+            `Catalog.seal` batch running, whose sealed editions the batch
+            records itself.
 
-    An entry that cannot be read raises `JournalError`.
-
-    Raises:
-        InventoryContentionError: The record lost too many races; the entries
-            are kept, and the next working copy records them.
+    An entry of the product that cannot be read raises `JournalError`;
+    another product's unreadable journal is left to that product. A record
+    that loses too many races raises `InventoryContentionError`, and the
+    entries are kept for the next working copy.
     """
-    entries = _read_journal(product_dir)
-    if not entries:
+    products_dir = product_dir.parent
+    own = _read_journal(product_dir)
+    others = _other_journals(products_dir, product_id, exclude)
+    if not own and not others:
         return
     full = writer.full()
-    pending = _pending_entries(full, product_dir, product_id, entries)
+    pending: dict[str, list[_Journalled]] = {}
+    mine = _pending_entries(full, product_dir, product_id, own)
+    if mine:
+        pending[product_id] = mine
+    for other, entries in others.items():
+        if full is None or other not in full.products():
+            continue
+        found = _journalled(full, products_dir / other, other, entries, clear=False)
+        if found:
+            pending[other] = found
     if not pending:
         return
-    failed: dict[str, Exception] = dict(_check_journalled(full, product_dir, product_id, pending))
-    recordable = [item for item in pending if item[0].edition_id not in failed]
-    refused: dict[str, TransitionError] = {}
+    lifecycles = {
+        other: full.leaf(other).lifecycle if full is not None and other in full.products() else lifecycle
+        for other in pending
+    }
+    repair = _Repair(writer, full, pending, lifecycles=lifecycles)
+    repair.commit()
+    for other, items in pending.items():
+        for entry, _, _, _ in items:
+            why = repair.why(other, entry.edition_id)
+            if why is not None:
+                log.warning(
+                    "%s: the journalled edition %s cannot be recorded (%s); it stays on disk unrecorded, and "
+                    "`statcat doctor` reports it",
+                    other,
+                    entry.edition_id,
+                    why,
+                )
+            _edition.clear_journal(products_dir / other, entry.edition_id)
 
-    def change(head_now: FullInventory | None) -> Change:
-        leaf = head_now.leaf(product_id) if head_now is not None and product_id in head_now.products() else None
-        retired = [t.edition_id for t in head_now.retired if t.product_id == product_id] if head_now else []
-        nxt, _, found = record_journalled(
-            leaf,
-            recordable,
-            product_id=product_id,
-            lifecycle=lifecycle,
-            embargo=head_now.embargo if head_now is not None else False,
-            retired=retired,
-            now=datetime.now(UTC),
-        )
-        refused.clear()
-        refused.update(found)
-        return Change(leaves={} if nxt is None else {product_id: nxt})
 
-    if recordable and change(full).leaves:
+type _Journalled = tuple[JournalEntry, str, str, Kind]
+"""A journal entry with its edition's ``manifest_sha256``, ``schema_version`` and product kind."""
+
+
+def _other_journals(products_dir: Path, product_id: str, exclude: Collection[str]) -> dict[str, list[JournalEntry]]:
+    """The journal entries of every product but *product_id* and *exclude*; an unreadable journal is skipped."""
+    found: dict[str, list[JournalEntry]] = {}
+    for other_dir in sorted(products_dir.iterdir()) if products_dir.is_dir() else ():
+        other = other_dir.name
+        if other == product_id or other in exclude or not (other_dir / "journal").is_dir():
+            continue
+        with contextlib.suppress(ManifestError):
+            entries = _edition.read_journal(other_dir)
+            if entries:
+                found[other] = entries
+    return found
+
+
+class _Repair:
+    """The journal repair's checks and its one Inventory commit, over every product's journalled editions."""
+
+    def __init__(
+        self,
+        writer: InventoryWriter,
+        full: FullInventory | None,
+        pending: Mapping[str, Sequence[_Journalled]],
+        *,
+        lifecycles: Mapping[str, Lifecycle],
+    ) -> None:
+        self._writer = writer
+        self._pending = pending
+        self._lifecycles = lifecycles
+        self._failed: dict[tuple[str, str], Exception] = {}
+        self._refused: dict[tuple[str, str], Exception] = {}
+        self._given: dict[tuple[str, str], frozenset[str]] = {}
+        self._structures = self._journalled_structures()
+        self._check(full)
+
+    def why(self, product_id: str, edition_id: str) -> Exception | None:
+        """Why the edition was not recorded, or ``None`` when it was."""
+        key = (product_id, edition_id)
+        return self._failed.get(key) or self._refused.get(key)
+
+    def _journalled_structures(self) -> dict[str, tuple[str, Path]]:
+        """Each product's newest journalled structure edition, by product: its id and directory."""
+        found: dict[str, tuple[str, Path]] = {}
+        for product_id, items in self._pending.items():
+            for entry, _, _, kind in items:
+                newest = found.get(product_id)
+                if kind == "structure" and (newest is None or newest[0] < entry.edition_id):
+                    found[product_id] = (entry.edition_id, self._dir(product_id, entry.edition_id))
+        return found
+
+    def _dir(self, product_id: str, edition_id: str) -> Path:
+        return self._writer.root / "products" / product_id / edition_id
+
+    def _check(self, full: FullInventory | None) -> None:
+        """The publish check of each journalled structure edition and each data edition with ``partial_of``."""
+        for product_id, items in self._pending.items():
+            for entry, _, _, kind in items:
+                edition_dir = self._dir(product_id, entry.edition_id)
+                partials = cut_partials(_edition.read_manifest(edition_dir))
+                if kind != "structure" and not partials:
+                    continue
+                batch = {other: found[1] for other, found in self._structures.items() if other != product_id}
+                structures = structure_editions(full, self._writer.root, product_id=product_id, batch=batch)
+                try:
+                    publish_check(edition_dir, product_id=product_id, structures=structures, partials=partials)
+                except EditionCheckError as exc:
+                    self._failed[product_id, entry.edition_id] = exc
+                else:
+                    self._given[product_id, entry.edition_id] = frozenset(batch)
+
+    def _lost(self) -> dict[str, Exception]:
+        """Each product whose journalled structure edition was refused or failed its check, with why."""
+        lost: dict[str, Exception] = {}
+        for product_id, (edition_id, _) in self._structures.items():
+            why = self.why(product_id, edition_id)
+            if why is not None:
+                lost[product_id] = why
+        return lost
+
+    def _change(self, head_now: FullInventory | None) -> Change:
+        self._refused.clear()
+        leaves: dict[str, Leaf] = {}
+        for product_id, items in self._pending.items():
+            recordable = [item for item in items if (product_id, item[0].edition_id) not in self._failed]
+            if not recordable:
+                continue
+            leaf = head_now.leaf(product_id) if head_now is not None and product_id in head_now.products() else None
+            retired = [t.edition_id for t in head_now.retired if t.product_id == product_id] if head_now else []
+            nxt, _, found = record_journalled(
+                leaf,
+                recordable,
+                product_id=product_id,
+                lifecycle=self._lifecycles[product_id],
+                embargo=head_now.embargo if head_now is not None else False,
+                retired=retired,
+                now=datetime.now(UTC),
+            )
+            for edition_id, exc in found.items():
+                self._refused[product_id, edition_id] = exc
+            if nxt is not None:
+                leaves[product_id] = nxt
+        self._drop(head_now, leaves)
+        if not leaves:
+            raise _NothingToRepairError
+        return Change(leaves=leaves)
+
+    def _drop(self, head_now: FullInventory | None, leaves: dict[str, Leaf]) -> None:
+        """Drop each product the cross-product rules refuse, and each whose check was given a lost one."""
+        while True:
+            dropping: dict[str, Exception] = dict(self._writer.refusals(head_now, leaves))
+            lost = self._lost()
+            for (product_id, edition_id), given in self._given.items():
+                gone = sorted(given & set(lost))
+                if product_id in leaves and gone and product_id not in dropping:
+                    lost_id = self._structures[gone[0]][0]
+                    finding = Finding(
+                        "structures",
+                        f"{gone[0]}/{lost_id}",
+                        f"the publish check was given this journalled edition, which was not recorded "
+                        f"({lost[gone[0]]})",
+                    )
+                    dropping[product_id] = EditionCheckError([finding], product=product_id, edition=edition_id)
+            if not dropping:
+                return
+            for product_id, exc in dropping.items():
+                del leaves[product_id]
+                for entry, _, _, _ in self._pending[product_id]:
+                    self._refused.setdefault((product_id, entry.edition_id), exc)
+
+    def commit(self) -> None:
+        """Record every journalled edition the checks and the rules accept, in one Inventory commit."""
         try:
-            writer.commit(change, kind="seal", reason="record a seal its writer did not record (journal repair)")
+            self._writer.commit(
+                self._change, kind="seal", reason="record a seal its writer did not record (journal repair)"
+            )
+        except _NothingToRepairError:
+            pass
         except InventoryContentionError as exc:
             msg = f"{exc}; the journalled edition is recorded at the next working_copy()"
             raise InventoryContentionError(msg) from exc
-    for entry, _, _, _ in pending:
-        why = failed.get(entry.edition_id) or refused.get(entry.edition_id)
-        if why is not None:
-            log.warning(
-                "%s: the journalled edition %s cannot be recorded (%s); it stays on disk unrecorded, and "
-                "`statcat doctor` reports it",
-                product_id,
-                entry.edition_id,
-                why,
-            )
-        _edition.clear_journal(product_dir, entry.edition_id)
+
+
+class _NothingToRepairError(Exception):
+    """The journal repair has no edition to record, so it writes no Inventory version."""
 
 
 def _pending_entries(
     full: FullInventory | None, product_dir: Path, product_id: str, entries: Iterable[JournalEntry]
-) -> list[tuple[JournalEntry, str, str, Kind]]:
+) -> list[_Journalled]:
     """The journal entries whose sealed edition *full* does not name, with what records each; clears the rest.
 
     Args:
@@ -455,49 +604,23 @@ def _pending_entries(
         Each entry with its edition's ``manifest_sha256``, ``schema_version``
         and product kind.
     """
-    pending: list[tuple[JournalEntry, str, str, Kind]] = []
+    return _journalled(full, product_dir, product_id, entries, clear=True)
+
+
+def _journalled(
+    full: FullInventory | None, product_dir: Path, product_id: str, entries: Iterable[JournalEntry], *, clear: bool
+) -> list[_Journalled]:
+    """The entries whose edition has a manifest and that *full* does not name; with *clear*, clears the others."""
+    pending: list[_Journalled] = []
     for entry in entries:
         edition_dir = product_dir / entry.edition_id
         if _named(full, product_id, entry.edition_id) or not (edition_dir / MANIFEST_NAME).is_file():
-            _edition.clear_journal(product_dir, entry.edition_id)
+            if clear:
+                _edition.clear_journal(product_dir, entry.edition_id)
             continue
         manifest = _edition.read_manifest(edition_dir)
         pending.append((entry, manifest_sha256(edition_dir), manifest.schema_version, edition_kind(manifest)))
     return pending
-
-
-def _check_journalled(
-    full: FullInventory | None,
-    product_dir: Path,
-    product_id: str,
-    pending: Sequence[tuple[JournalEntry, str, str, Kind]],
-) -> dict[str, EditionCheckError]:
-    """The journal repair's publish check: each journalled edition's finding, by edition id.
-
-    It checks each structure edition, and each data edition whose partials
-    record a ``partial_of``.
-    """
-    failed: dict[str, EditionCheckError] = {}
-    checked: dict[str, tuple[str, ...]] = {}
-    for entry, _, _, kind in pending:
-        partials = cut_partials(_edition.read_manifest(product_dir / entry.edition_id))
-        if kind == "structure" or partials:
-            checked[entry.edition_id] = partials
-    if not checked:
-        return failed
-    products_dir = product_dir.parent
-    structures = structure_editions(
-        full,
-        products_dir.parent,
-        product_id=product_id,
-        batch=_journalled_structures(products_dir, product_id, full),
-    )
-    for edition_id, partials in checked.items():
-        try:
-            publish_check(product_dir / edition_id, product_id=product_id, structures=structures, partials=partials)
-        except EditionCheckError as exc:
-            failed[edition_id] = exc
-    return failed
 
 
 def _as_kind(value: object) -> Kind | None:
@@ -645,6 +768,69 @@ class _Sealed:
     edition: Edition
     schema_version: str
     partials: tuple[str, ...] = ()
+
+
+@frozen
+class Planned:
+    """One edition as the cross-product pre-check plans it: its product's provisional leaf, and how to read it.
+
+    Attributes:
+        product_id: The product.
+        edition_id: The edition.
+        leaf: The product's leaf with the edition recorded, as the seal's
+            record would write it on the head.
+        read: Computes the edition's artefacts from a working copy's open
+            store (`StoreArtefacts`); ``None`` for a sealed edition, whose
+            manifest the writer's reader reads.
+    """
+
+    product_id: str
+    edition_id: str
+    leaf: Leaf
+    read: Callable[[], Mapping[str, PartialRecord]] | None = None
+
+
+def precheck_refusals(
+    writer: InventoryWriter,
+    full: FullInventory | None,
+    planned: Sequence[Planned],
+    fixed: Sequence[Planned] = (),
+) -> dict[str, CrossProductRuleError]:
+    """The seal's cross-product pre-check: the rules over *planned* and *fixed* together, before any of *planned* seals.
+
+    Each refused product of *planned* is dropped, and the rules run again on
+    the rest until a pass refuses none, since a dropped edition can be the
+    one another was accepted with. *fixed* holds editions the caller keeps,
+    such as a batch's sealed structure editions.
+
+    Args:
+        writer: The catalog's Inventory writer.
+        full: The head the pre-check runs on.
+        planned: The working copies to check.
+        fixed: Other editions of the version, checked with them.
+
+    Returns:
+        Each refused product of *planned*, with its error.
+    """
+    reader: Artefacts = writer.artefacts
+    for one in [*fixed, *planned]:
+        if one.read is not None:
+            reader = StoreArtefacts(one.edition_id, one.read, fallback=reader)
+    leaves = {one.product_id: one.leaf for one in [*fixed, *planned]}
+    checked = {one.product_id for one in planned}
+    refused: dict[str, CrossProductRuleError] = {}
+    while True:
+        found = {
+            product_id: exc
+            for product_id, exc in writer.refusals(full, leaves, artefacts=reader).items()
+            if product_id in checked
+        }
+        if not found:
+            return refused
+        for product_id, exc in found.items():
+            refused[product_id] = exc
+            checked.discard(product_id)
+            del leaves[product_id]
 
 
 @frozen
@@ -1259,6 +1445,7 @@ class WorkingCopy:
         working copy is closed, and ``working_copy(resume=True)`` reopens it.
         """
         self._precheck(checks)
+        self._cross_precheck()
         sealed = self._seal_edition()
         if self._kind == "structure" or sealed.partials:
             structures = structure_editions(
@@ -1271,10 +1458,10 @@ class WorkingCopy:
                 raise
         try:
             self._writer.commit(
-                lambda full: Change(leaves={self._product_id: self._next_leaf(full, sealed)}),
-                kind="seal",
-                reason=f"seal {self._edition_id}",
+                lambda full: self._record_change(full, sealed), kind="seal", reason=f"seal {self._edition_id}"
             )
+        except _RecordedAlreadyError:
+            pass
         except InventoryRuleError as exc:
             self._unrecorded(exc)
             raise
@@ -1284,23 +1471,34 @@ class WorkingCopy:
         self._recorded()
         return sealed.edition
 
-    def _precheck(self, checks: Iterable[Callable[[EditionView], Iterable[Finding]]]) -> None:
+    def _precheck(
+        self, checks: Iterable[Callable[[EditionView], Iterable[Finding]]], *, batch: Collection[str] = ()
+    ) -> None:
         """Seal steps 0 to 2: settle the journal, run *checks*, and refuse a base that is no longer live.
 
         A structure working copy is also checked for content a structure
         product does not hold (`statcatlib.bundle.structure_content`), and a
         data working copy for partials whose ``partial_of`` the seal cannot
-        vouch for (`unvouched_partials`).
+        vouch for (`unvouched_partials`). The cross-product pre-check
+        (`_cross_precheck`, or `precheck_refusals` over a batch) follows.
 
         Args:
             checks: The seal checks, run against `view`.
+            batch: The products of the `Catalog.seal` batch, which the
+                journal repair leaves to the batch.
 
         Raises:
             SealCheckError: A check found something.
             NonFastForwardError: The base is no longer the live edition.
         """
         store = self._live()
-        settle_journal(self._writer, self._product_dir, self._product_id, self._lifecycle)
+        settle_journal(
+            self._writer,
+            self._product_dir,
+            self._product_id,
+            self._lifecycle,
+            exclude=[other for other in batch if other != self._product_id],
+        )
         findings = [finding for check in checks for finding in check(self.view())]
         if self._kind == "structure":
             findings += structure_content(store._cursor())
@@ -1316,6 +1514,141 @@ class WorkingCopy:
                 f"{live}. Discard it with discard(), then start one from the live edition with working_copy()."
             )
             raise NonFastForwardError(msg, rule="fast-forward", product=self._product_id, edition=self._edition_id)
+
+    def _cross_precheck(self) -> None:
+        """Seal step 2's cross-product pre-check of this working copy alone, against the head (design D8).
+
+        A record that would break specification §6.5 item 4, 7 or 8 raises
+        `CrossProductRuleError`; nothing is sealed, and the working copy stays
+        open.
+        """
+        full = self._writer.full()
+        planned = self._planned(full)
+        if self._may_be_refused(full, ()):
+            refused = precheck_refusals(self._writer, full, [planned])
+            if self._product_id in refused:
+                raise refused[self._product_id]
+
+    def _planned(self, full: FullInventory | None) -> Planned:
+        """This working copy's provisional record on *full*, for the cross-product pre-check.
+
+        Args:
+            full: The head.
+
+        Returns:
+            The provisional record, read through `_own_artefacts`.
+
+        Raises:
+            InventoryRuleError: sdmxlib's rules refuse the record.
+        """
+        product_id = self._product_id
+        leaf = full.leaf(product_id) if full is not None and product_id in full.products() else None
+        retired = {t.edition_id for t in full.retired if t.product_id == product_id} if full else set()
+        try:
+            provisional = record(
+                leaf,
+                product_id=product_id,
+                kind=self._kind,
+                lifecycle=self._lifecycle,
+                edition_id=self._edition_id,
+                previous=self._previous,
+                manifest_sha256="0" * 64,
+                schema_version=SCHEMA_VERSION,
+                embargo=full.embargo if full is not None else False,
+                now=datetime.now(UTC),
+                retired=retired,
+            )
+        except TransitionError as exc:
+            raise InventoryRuleError.wrapping(exc, product=product_id, edition=self._edition_id) from exc
+        return Planned(product_id, self._edition_id, provisional, read=self._own_artefacts)
+
+    def _may_be_refused(self, full: FullInventory | None, batch: Sequence[Planned]) -> bool:
+        """Whether any cross-product rule could refuse this working copy, so the pre-check needs its artefacts.
+
+        No rule can refuse a structure working copy when no other structure
+        product has a live or embargoed edition, nor a data working copy
+        when no structure product has one, it holds no partial with a
+        ``partial_of``, no other data working copy is in *batch*, and no
+        other data product's live edition shares a URN with it. The
+        pre-check then fingerprints nothing, so a Phase 2a seal costs what it
+        did; the Inventory commit runs the rules either way.
+
+        Args:
+            full: The head.
+            batch: The other editions the pre-check is given.
+
+        Returns:
+            Whether to run the pre-check.
+        """
+        others = {one.product_id: one.leaf for one in batch if one.product_id != self._product_id}
+        if full is not None:
+            others = {p: full.leaf(p) for p in full.products() if p != self._product_id} | others
+        if any(leaf.kind == "structure" and any(e.state in ACTIVE for e in leaf.editions) for leaf in others.values()):
+            return True
+        if self._kind == "structure":
+            return False
+        if self._cuts() or any(one.product_id != self._product_id and one.leaf.kind == "data" for one in batch):
+            return True
+        cursor = self._live()._cursor()
+        own = {urn for (urn,) in cursor.execute("SELECT urn FROM sdmx.artefact").fetchall()}
+        for other, leaf in others.items():
+            for entry in leaf.editions:
+                if entry.state == "live" and own & set(
+                    self._writer.artefacts(other, entry.edition_id, entry.manifest_sha256)
+                ):
+                    return True
+        return False
+
+    def _cuts(self) -> dict[str, str]:
+        """Each held partial's ``partial_of`` as the seal records it: ``_meta``'s, else the previous manifest's."""
+        cursor = self._live()._cursor()
+        held = _held_partials(cursor)
+        carried: dict[str, str] = {}
+        if self._previous is not None:
+            manifest = _edition.read_manifest(self._product_dir / self._previous)
+            carried = {a.urn: a.partial_of for a in manifest.artefacts if a.partial and a.partial_of is not None}
+        cuts = carried | recorded_cuts(cursor)
+        return {urn: fingerprint for urn, fingerprint in cuts.items() if urn in held}
+
+    def _own_artefacts(self) -> dict[str, PartialRecord]:
+        """The working copy's artefacts as its seal would fingerprint them (`StoreArtefacts`).
+
+        Each full artefact's fingerprint is the SHA-256 of
+        `sdmxlib.edition.canonical_json`, as ``seal`` computes it; each
+        partial's ``partial_of`` is `_cuts`'s. A partial with none is left
+        out, and so are the bindings, which the manifest does not list.
+        """
+        cursor = self._live()._cursor()
+        cuts = self._cuts()
+        rows = cursor.execute(
+            "SELECT urn, is_partial FROM sdmx.artefact WHERE artefact_type <> 'DataflowBinding' ORDER BY urn"
+        ).fetchall()
+        found: dict[str, PartialRecord] = {}
+        for urn, partial in rows:
+            if partial and urn not in cuts:
+                continue
+            artefact = self._registry.get(SdmxUrn.parse(urn), eager=True)
+            if artefact is None:
+                continue
+            found[urn] = PartialRecord(
+                fingerprint=_fingerprint(artefact), partial_of=cuts.get(urn) if partial else None
+            )
+        return found
+
+    def _record_change(self, full: FullInventory | None, sealed: _Sealed) -> Change:
+        """Seal step 6's change: the product's next leaf, or `_RecordedAlreadyError` when a repair recorded it."""
+        if self._recorded_in(full, sealed):
+            raise _RecordedAlreadyError
+        return Change(leaves={self._product_id: self._next_leaf(full, sealed)})
+
+    def _recorded_in(self, full: FullInventory | None, sealed: _Sealed) -> bool:
+        """Whether *full* records *sealed* already with its ``manifest_sha256``: another writer's journal repair did."""
+        if full is None or self._product_id not in full.products():
+            return False
+        return any(
+            e.edition_id == self._edition_id and e.manifest_sha256 == sealed.edition.manifest_sha256
+            for e in full.entries(self._product_id)
+        )
 
     def _seal_edition(self) -> _Sealed:
         """Seal steps 3 to 5: rebuild the search index, compute the section, close, and seal with sdmxlib.
@@ -1429,6 +1762,10 @@ class WorkingCopy:
             self._edition_id,
             exc,
         )
+
+
+class _RecordedAlreadyError(Exception):
+    """The edition the seal records is recorded already, by another writer's journal repair."""
 
 
 def _build(

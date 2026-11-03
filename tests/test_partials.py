@@ -254,10 +254,15 @@ class TestRefusals:
         (item,) = diagnostics.doctor(root).about("unrecorded edition")
         assert wc.edition_id in item.detail
 
-    def test_a_partial_with_no_structure_edition_in_the_catalog_fails_the_publish_check(self, tmp_path: Path) -> None:
+    def test_a_partial_with_no_structure_edition_in_the_catalog_fails_the_publish_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         root = tmp_path / "catalog"
         with sc.Catalog.create(root) as cat:
             wc = _filled(cat)
+            # The cross-product pre-check refuses this first (test_cross_product.py); without it the
+            # publish check is the last guard.
+            monkeypatch.setattr(sc.WorkingCopy, "_cross_precheck", lambda _self: None)
             with pytest.raises(sc.EditionCheckError, match="no live or embargoed structure edition") as caught:
                 wc.seal()
 
@@ -369,6 +374,8 @@ class TestBatchAndRepair:
 
         with monkeypatch.context() as mp, sc.Catalog.create(root) as cat:
             mp.setattr(working_copy_module, "publish_check", killed)
+            # The cross-product pre-check would refuse the seal before the crash.
+            mp.setattr(sc.WorkingCopy, "_cross_precheck", lambda _self: None)
             wc = _filled(cat)
             with pytest.raises(Killed):
                 wc.seal()

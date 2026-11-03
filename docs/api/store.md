@@ -190,20 +190,23 @@ leaves and one root. It runs in four passes:
 1. The structure pass. For every structure product's working copy, it
    settles the product's journal, runs `checks` against the working copy's
    view, refuses a dataflow, a binding or a partial, and refuses a working
-   copy whose base is no longer the live edition. Then it seals each one that
-   passed: the search index, the `statcat` section, and sdmxlib's journal
-   entry and manifest.
+   copy whose base is no longer the live edition. The journal repair leaves
+   the batch's other products alone. Then it checks the cross-product rules
+   on the pass's working copies together, and seals each one that passed:
+   the search index, the `statcat` section, and sdmxlib's journal entry and
+   manifest.
 2. The structure-check pass. It runs each sealed structure edition's publish
    check, given the batch's other structure editions in place of their
    products' recorded ones, and drops each edition with a finding. It repeats
    until a pass drops none, since a reference may have resolved only in a
    dropped edition.
 3. The data pass. It pre-checks every data product's working copy as in the
-   structure pass, and seals each that passed. No data working copy is sealed
+   structure pass, the cross-product rules given the batch's structure
+   editions, and seals each that passed. No data working copy is sealed
    until every one has passed or been refused.
 4. It records the sealed editions in one commit, leaving out each product
-   whose record sdmxlib's rules refuse, and each structure edition whose
-   publish check was given a left-out one.
+   whose record sdmxlib's rules or the cross-product rules refuse, and each
+   edition whose publish check was given a left-out structure edition.
 
 A refusal in one product never stops another's seal. `SealOutcomes.sealed`
 maps each recorded product to its `Edition`, and `SealOutcomes.refused` maps
@@ -213,9 +216,10 @@ each refused product to its error:
 |---|---|---|
 | `SealCheckError` | a check found something | stays open |
 | `NonFastForwardError` | its base is no longer live, before the seal | stays open; `discard()` it |
+| `CrossProductRuleError` | the cross-product rules refuse it, before the seal | stays open |
 | `ManifestError` | sdmxlib refused the edition | closed; `working_copy(resume=True)` reopens it |
 | `EditionCheckError` | a structure edition's publish check found something | sealed and unrecorded, logged at WARNING |
-| `InventoryRuleError` | sdmxlib's rules refused the record, such as a rollback landing during the batch | sealed and unrecorded, logged at WARNING |
+| `InventoryRuleError` | sdmxlib's rules or the cross-product rules refused the record, such as a rollback landing during the batch | sealed and unrecorded, logged at WARNING |
 | `InventoryContentionError` | the commit lost 8 races in a row | sealed; the product's next `working_copy()` records it |
 
 ```python
@@ -260,8 +264,10 @@ An artefact is selected when `artefacts` names its URN, or when its class is
 one of `families`, its agency is `agency` and its id matches one of the `ids`
 patterns (`SGC*`). `source` is any `sdmxlib.EditionRegistry`, such as a
 scratch `LocalRegistry` an FMR's structures were ingested into. Nothing is
-copied for what a selected artefact references, so each full artefact has one
-structure home. On a data product's working copy it raises `TypeError`.
+copied for what a selected artefact references, so each full artefact has at
+most one structure home among live editions; a structure edition entering
+`live` with a full artefact another structure product holds live is refused
+with `CrossProductRuleError` (`rule="structure-home"`). On a data product's working copy it raises `TypeError`.
 
 StatCan splits its structures by change rate into three products. A
 hierarchy goes in the product of the codelist it is built on:
@@ -326,8 +332,16 @@ The seal of an edition with partials runs the publish check with every
 structure product's live and embargoed editions as `structures=`: each
 partial must match the full codelist its `partial_of` names, in any of them,
 and hold no code that codelist lacks. A finding raises `EditionCheckError`
-and leaves the edition unrecorded, as does a partial in a catalog with no
-structure edition. `Catalog.seal` checks a batch's data editions against the
+and leaves the edition unrecorded.
+
+Before sdmxlib's seal, the cross-product pre-check refuses with
+`CrossProductRuleError`, and leaves the working copy open, a data edition
+that holds a cut codelist no structure product holds (`rule="full-artefacts"`,
+naming the URN: add it to a structure product, or fill with
+`partials=False`), a partial or a full artefact matching no live or embargoed
+edition of its structure home, and, with embargo off, one matching only an
+embargoed structure edition (`rule="publish-order"`). See
+[Catalog administration](admin.md#publish-order-and-the-cross-product-rules). `Catalog.seal` checks a batch's data editions against the
 batch's structure editions, so a structure product and the tables cut from
 it go live in one Inventory version.
 

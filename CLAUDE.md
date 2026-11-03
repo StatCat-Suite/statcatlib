@@ -52,6 +52,7 @@ src/
     │   ├── store.py         # _Store (private engine), EditionView, QueryBuilder
     │   ├── working_copy.py  # WorkingCopy, Edition, the journal rule, the seal
     │   ├── inventory.py     # InventoryWriter: catalog.json, inventory/, CURRENT
+    │   ├── cross_product.py # The cross-product rules (§6.5 items 4, 7, 8), stale editions
     │   ├── schema.py        # DDL: statcat namespace, MAP columns, use_statcat
     │   ├── lance.py         # LanceDB search index (BM25 + vector)
     │   ├── scopes.py        # Scope-based graph traversal
@@ -67,7 +68,7 @@ src/
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
     ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, prune
     ├── checks.py       # Seal checks: SealCheck, conf_status
-    ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks
+    ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks, stale data editions
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
     ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog
@@ -348,6 +349,24 @@ Inventory and seals editions:
   `MAX_RACES` (8). sdmxlib's refusals become `InventoryRuleError`, and a
   `fast-forward` refusal becomes `NonFastForwardError`. `Catalog.create`
   refuses a filesystem without hard links.
+- **The cross-product rules.** `commit` runs `InventoryWriter.refusals`
+  (`store/cross_product.py`) on every change that makes an entry live or
+  embargoed, and raises the first `CrossProductRuleError` by product id:
+  item 7 `structure-home` (a structure edition entering live holds a full
+  artefact another structure product holds live), item 4 `full-artefacts`
+  (a data edition's full artefact or `partial_of` matches no live or
+  embargoed edition of its structure home, a cut codelist has no home, or a
+  full artefact with no home differs from another data product's copy live
+  after the version), item 8 `publish-order` (a data edition entering live
+  matches only an embargoed home edition). The rules compare editions of
+  different products only, and read each edition's artefacts through the
+  writer's `ManifestArtefacts` (manifest SHA-256 checked, cached by edition
+  and SHA); a partial with no `partial_of` is skipped. Stale data editions
+  (live or embargoed, holding a copy no live or embargoed home edition
+  holds) are allowed and derived, never recorded: `stale_editions` lists
+  them for `verify-catalog` and `doctor`. `cross_product` imports only
+  sdmxlib; `refusals` returns `Refusal` values, which the writer turns into
+  `CrossProductRuleError` (defined in `store/inventory.py`).
 - **Seal steps.** `WorkingCopy.seal(checks=())` settles the journal; runs
   the checks against `wc.view()`, on a structure working copy
   `bundle.structure_content` (a dataflow, binding or partial), and on a data
@@ -355,7 +374,11 @@ Inventory and seals editions:
   or a partial cut outside `fill_dataflows` that would carry the previous
   manifest's `partial_of`); a finding raises `SealCheckError` and leaves the
   working copy open; raises `NonFastForwardError` when its base is no
-  longer the live edition; rebuilds the search index from the edition's
+  longer the live edition; runs the cross-product pre-check
+  (`_cross_precheck`: the rules over a provisional leaf, the working copy's
+  artefacts fingerprinted from its store by `StoreArtefacts`; skipped when
+  no rule could refuse it, `_may_be_refused`), whose `CrossProductRuleError`
+  leaves the working copy open; rebuilds the search index from the edition's
   rows and drops the carried tables; computes the `statcat` section with
   `catalog_section(store, kind=...)`; closes the store and registry; calls
   `sdmxlib.edition.seal(partial_of=...)` with `_meta.partial_of` kept to
@@ -367,31 +390,42 @@ Inventory and seals editions:
   partial with no structure edition in the catalog is a finding; a finding
   raises `EditionCheckError` and leaves the edition unrecorded); records
   the edition in one Inventory commit, live when the catalog's embargo is
-  off; and clears the journal entry.
+  off, where the cross-product rules run again (an edition another writer's
+  journal repair recorded with the same `manifest_sha256` counts as
+  recorded); and clears the journal entry.
 - **The batched seal.** `Catalog.seal(working_copies, *, checks=())` runs
   those steps for one working copy per product in four passes: the
-  structure pass (pre-check, then seal, each structure working copy); the
-  structure-check pass (each structure edition's publish check, given the
-  batch's other structure editions in place of their products' recorded
-  ones, repeated until it drops none); the data pass (every data pre-check
-  before any data seal, then the publish check of each data edition with
-  partials, given the batch's structure editions in place of their
-  products' recorded ones); then one Inventory commit that leaves out each
-  product sdmxlib's rules refuse, and each edition whose check was given a
-  left-out one. It returns `SealOutcomes(sealed, refused)`, keyed by
+  structure pass (pre-check each structure working copy, then the
+  cross-product pre-check of the pass's working copies together, then seal);
+  the structure-check pass (each structure edition's publish check, given
+  the batch's other structure editions in place of their products' recorded
+  ones, repeated until it drops none); the data pass (every data pre-check,
+  then the cross-product pre-check of the pass together with the batch's
+  structure editions (`precheck_refusals`, dropping refused ones until a
+  pass drops none), before any data seal, then the publish check of each
+  data edition with partials, given the batch's structure editions in place
+  of their products' recorded ones); then one Inventory commit that leaves
+  out each product sdmxlib's rules or the cross-product rules refuse, and
+  each edition whose check was given a left-out one. Each pre-check's
+  journal repair leaves out the batch's other products. It returns `SealOutcomes(sealed, refused)`, keyed by
   product id. A crash during a batch can leave its products recorded across
   several versions, each by its product's next `working_copy()`.
 - **The journal rule.** `settle_journal` (`store/working_copy.py`; its
   module docstring has the table) runs when a working copy starts or
-  resumes, at the start of a seal and after its record. Against the newest
-  root it clears an entry whose edition the root names or tombstones, or
-  whose edition has no manifest; it records a sealed, unrecorded edition
-  with the kind its manifest's `statcat` section names, after the publish
-  check of a structure edition or of an edition with partials passes, and
-  clears the entry; it clears the entry
-  of a refused record or a failed check with a WARNING; and it keeps the
-  entry on `InventoryContentionError`. An unreadable entry raises
-  `JournalError`.
+  resumes, at the start of a seal and after its record. It is catalog-wide:
+  against the newest root it clears the product's entries whose edition the
+  root names or tombstones, or whose edition has no manifest; it records
+  every product's sealed, unrecorded editions in one commit, each with the
+  kind its manifest's `statcat` section names, after the publish check of a
+  structure edition or of an edition with partials passes, with the
+  cross-product rules run on the version, and clears the entries; it clears
+  the entry of a refused record, a failed check, or an edition whose check
+  was given a refused structure edition, with a WARNING; and it keeps the
+  entries on `InventoryContentionError`. It leaves out the products of a
+  running `Catalog.seal` (`exclude=`), another product's entry with no
+  manifest, and another product with no leaf in the head (its first
+  edition, left to its own next `working_copy()`). An unreadable entry of
+  the product raises `JournalError`; another product's is skipped.
 - **One seal per edition.** A product has one working copy at a time, and
   each working copy seals once into one edition. Nothing writes to a sealed edition: a
   `_Store` over one is not writable, every write method (`add_lineage`
@@ -411,8 +445,10 @@ Inventory and seals editions:
   (P7): it retires old superseded and withdrawn editions in one `retire`
   version, deletes the directories of editions tombstoned longer than the
   window and the `data/` files no on-disk manifest lists, skips a product
-  with a working copy or a journal entry, and deletes no root, leaf or
-  tombstone. It returns a `PruneReport`.
+  with a working copy or a journal entry, keeps a structure edition a live
+  or embargoed data edition's `partial_of` cites (`cited_structures`), and
+  deletes no root, leaf or tombstone. It returns a `PruneReport`.
+  `release` and `rollback` raise `CrossProductRuleError` from `commit`.
 - **Section format 3.** The manifest's `statcat` section
   (`bundle.STATCAT_SECTION_FORMAT`) holds `format`, `kind`,
   `statcatlib_version`, `datasets` and `search`. `kind` is `"data"` or
@@ -535,7 +571,8 @@ Under the hood:
 partials=True)` is the partial path: `wc.fill_dataflows` copies each
 dataflow's closure and observations and cuts each codelist to the codes the
 product uses, then it stores a dataset for each given dataflow. Every cut
-codelist needs a structure home (design D11, enforced in Phase 3's S3). Fill
+codelist needs a structure home (design D11): the seal's cross-product
+pre-check refuses one with none (`CrossProductRuleError`). Fill
 a data product through `fill_dataflows` or `ingest_dataflows`, never with
 `sdmxlib.edition.fill_edition` on `wc.registry`: the map of cuts the seal
 passes as `partial_of` is kept only by `fill_dataflows`.

@@ -165,6 +165,7 @@ class TestStoreExports:
             "InventoryContentionError",
             "InventoryRuleError",
             "NonFastForwardError",
+            "CrossProductRuleError",
             "WorkingCopyExistsError",
             "WorkingCopyClosedError",
             "SealCheckError",
@@ -176,6 +177,7 @@ class TestStoreExports:
             assert name in sc.__all__, name
             assert issubclass(getattr(sc, name), Exception)
         assert issubclass(sc.NonFastForwardError, sc.InventoryRuleError)
+        assert issubclass(sc.CrossProductRuleError, sc.InventoryRuleError)
 
     def test_query_builder(self) -> None:
         import statcatlib as sc

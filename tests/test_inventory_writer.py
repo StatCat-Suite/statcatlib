@@ -15,11 +15,13 @@ from pathlib import Path
 
 import pytest
 import sdmxlib.storage
+from sdmxlib.edition import ManifestError
 from sdmxlib.inventory import (
     CURRENT_NAME,
     FullInventory,
     InventoryError,
     Leaf,
+    PartialRecord,
     Root,
     decode_current,
     decode_leaf,
@@ -66,11 +68,17 @@ def _leaf(leaf: Leaf | None, product: str, n: int, previous: str | None = None) 
     )
 
 
+def _nothing(*_args: str) -> dict[str, PartialRecord]:
+    """An artefacts reader for leaves with no edition on disk: every edition holds nothing."""
+    return {}
+
+
 @pytest.fixture
 def writer(tmp_path: Path) -> InventoryWriter:
+    """A writer over a new catalog whose leaves name editions with no manifest on disk."""
     root = tmp_path / "cat"
     root.mkdir()
-    w = InventoryWriter(root)
+    w = InventoryWriter(root, artefacts=_nothing)
     w.write_catalog_json()
     return w
 
@@ -271,6 +279,25 @@ class TestCommit:
         with pytest.raises(InventoryContentionError, match=f"{MAX_RACES} commits"):
             writer.commit(lambda _: Change(leaves={}), kind="seal", reason="x")
         assert calls == MAX_RACES == 8
+
+    def test_an_incoming_entry_whose_manifest_is_missing_raises_manifest_error(self, tmp_path: Path) -> None:
+        root = tmp_path / "cat"
+        root.mkdir()
+        writer = InventoryWriter(root)
+        writer.write_catalog_json()
+
+        with pytest.raises(ManifestError, match="manifest cannot be read"):
+            writer.commit(lambda _: Change(leaves={"a": _leaf(None, "a", 1)}), kind="seal", reason="x")
+        assert not writer.has_version(), "nothing is written"
+
+    def test_a_change_with_no_incoming_entry_reads_no_manifest(self, tmp_path: Path) -> None:
+        root = tmp_path / "cat"
+        root.mkdir()
+        writer = InventoryWriter(root)
+        writer.write_catalog_json()
+
+        root_written = writer.commit(lambda _: Change(leaves={}, embargo=True), kind="embargo-change", reason="x")
+        assert root_written.embargo
 
     def test_the_actor_comes_from_the_os(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(inventory_module.getpass, "getuser", lambda: "ana")
