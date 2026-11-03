@@ -62,7 +62,11 @@ design decisions in full. This file indexes the code contracts.
 - A product has one unsealed edition at a time. `WorkingCopy.seal` rebuilds
   the search index, computes the `statcat` section with
   `bundle.catalog_section`, seals with `sdmxlib.edition.seal`, and records
-  the edition. Nothing writes to a sealed edition: its store refuses every
+  the edition. A product is a `data` or a `structure` product, and keeps
+  the kind it was first recorded with; a structure edition holds full
+  artefacts only and passes the publish check (`check_edition` at
+  `publish`, given the other structure products) before it is recorded.
+  Nothing writes to a sealed edition: its store refuses every
   write method, and a later write would fail the manifest's files check.
 - Every writer settles the product's seal journal (the journal rule,
   `store/working_copy.py`) when a working copy starts or resumes and around

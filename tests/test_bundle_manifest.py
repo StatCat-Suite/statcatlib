@@ -24,6 +24,7 @@ import statcatlib as sc
 from statcatlib.bundle import STATCAT_SECTION, STATCAT_SECTION_FORMAT, check_catalog, overlay_affects_search
 from statcatlib.store.store import annotation_fingerprint
 from statcatlib.testing import synthetic_catalog
+from tests.conftest import GEO, GEO_HIERARCHY, structure_source
 
 pytestmark = pytest.mark.unit
 
@@ -53,6 +54,39 @@ def no_observations(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 identifier="d", title=sc.InternationalString(en="D"), description=sc.InternationalString(en="D")
             )
         )
+        edition = wc.seal()
+    return _edition_dir(root, edition)
+
+
+_PARTIAL = sl.Codelist(
+    id="CL_PART",
+    maintainer="T",
+    version="1.0",
+    name={"en": "part"},
+    is_partial=True,
+    codes=[sl.Code(id="A", name={"en": "A"})],
+)
+
+
+@pytest.fixture(scope="module")
+def structure_edition(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A sealed structure product's edition, holding a codelist and its hierarchy; its directory."""
+    tmp = tmp_path_factory.mktemp("structure")
+    root = tmp / "catalog"
+    with structure_source(tmp / "source") as source, sc.Catalog.create(root) as cat:
+        wc = cat.product("structure-geo").working_copy(kind="structure")
+        wc.fill_structures(source, artefacts=[GEO.urn, GEO_HIERARCHY.urn])
+        edition = wc.seal()
+    return _edition_dir(root, edition)
+
+
+@pytest.fixture(scope="module")
+def partial_edition(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A sealed data edition holding one partial codelist and no dataflow; its directory."""
+    root = tmp_path_factory.mktemp("partial") / "catalog"
+    with sc.Catalog.create(root) as cat:
+        wc = cat.product("p").working_copy()
+        wc.registry.add(_PARTIAL)
         edition = wc.seal()
     return _edition_dir(root, edition)
 
@@ -114,10 +148,28 @@ class TestCheckCatalog:
         manifest = read_manifest(synthetic)
         assert manifest.bindings
         findings = _check(synthetic, _with_section(manifest, kind="structure"))
-        assert findings == [
+        bound = [
             f"[{STATCAT_SECTION}] {b.dataflow}: a structure product's edition binds a dataflow to observations"
             for b in manifest.bindings
         ]
+        assert findings[: len(bound)] == bound
+        held = "which a structure product does not hold: it holds full artefacts only"
+        assert [f.split(": ", 1)[1] for f in findings[len(bound) :]] == [
+            f"a DataflowBinding, {held}",
+            f"a Dataflow, {held}",
+        ], "by URN: the binding's package sorts first"
+
+    def test_a_sealed_structure_edition_passes_every_check(self, structure_edition: Path) -> None:
+        assert read_manifest(structure_edition).extensions[STATCAT_SECTION]["kind"] == "structure"
+        report = check_edition(structure_edition, at="publish", extensions={STATCAT_SECTION: check_catalog})
+
+        assert report.ok, [str(f) for f in report.findings]
+
+    def test_a_structure_kind_holding_a_partial_is_refused(self, partial_edition: Path) -> None:
+        manifest = _with_section(read_manifest(partial_edition), kind="structure")
+
+        detail = "a partial Codelist, which a structure product does not hold: it holds full artefacts only"
+        assert _check(partial_edition, manifest) == [f"[{STATCAT_SECTION}] {_PARTIAL.urn}: {detail}"]
 
 
 class TestAnnotationFingerprint:

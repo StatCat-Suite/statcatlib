@@ -1,9 +1,15 @@
-"""A product's one unsealed edition, and its seal (Phase 2a).
+"""A product's one unsealed edition, and its seal (Phase 2a, Phase 3).
 
 `Product.working_copy` starts or resumes a `WorkingCopy`. Ingest writes into
 it through the write methods and `WorkingCopy.registry`, `WorkingCopy.view`
 reads it back, and `WorkingCopy.seal` turns it into an immutable edition and
 records it in the Inventory, live when the catalog's embargo is off.
+
+A product is a ``data`` product or a ``structure`` product (`WorkingCopy.kind`).
+A structure product holds full artefacts only, copied with
+`WorkingCopy.fill_structures`, and its seal runs the publish check
+(`sdmxlib.edition.check_edition` at ``publish``) against the catalog's other
+structure products before the Inventory records the edition.
 
 **The journal rule.** sdmxlib's `seal` writes a journal entry,
 ``<product>/journal/<edition_id>.json``, before the manifest, and statcatlib
@@ -20,8 +26,14 @@ when it resumes one, at the start of a seal and after its record
 | It has a manifest and no root names it | Record it, then clear the entry |
 | Recording raises ``duplicate`` with the same ``manifest_sha256`` | Treat as success; clear the entry |
 | Recording raises any other `InventoryRuleError` | Clear the entry, log a WARNING, leave the edition |
+| A structure edition fails its publish check | Clear the entry, log a WARNING, leave the edition |
 | `InventoryContentionError` | Keep the entry, so the next working copy records it |
 | The entry cannot be read | Raise `JournalError` naming the file and ``statcat doctor`` |
+
+Each edition is recorded with the kind its manifest's ``statcat`` section
+names, ``data`` when it names none. A structure edition's publish check is
+given the other structure products' live and embargoed editions, and each
+other product's journalled structure edition in place of that product's.
 
 A product has one writer at a time: a laptop convention, stated in the docs.
 """
@@ -39,11 +51,11 @@ from typing import TYPE_CHECKING, Self
 import sdmxlib
 import sdmxlib.edition as _edition
 from attrs import frozen
-from sdmxlib.edition import MANIFEST_NAME, Finding, ManifestError
+from sdmxlib.edition import MANIFEST_NAME, Finding, ManifestError, check_edition
 from sdmxlib.inventory import FullInventory, Leaf, TransitionError, head, record
 from sdmxlib.storage.schema import SCHEMA_VERSION, meta_value
 
-from statcatlib.bundle import STATCAT_SECTION, catalog_section
+from statcatlib.bundle import STATCAT_SECTION, catalog_section, check_catalog, structure_content
 from statcatlib.store import schema as _catalog_schema
 from statcatlib.store.inventory import (
     Change,
@@ -56,10 +68,13 @@ from statcatlib.store.inventory import (
 from statcatlib.store.store import EditionView, _refuse_statcat_schema_mismatch, _Store
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
     from pathlib import Path
 
-    from sdmxlib.edition import JournalEntry, Lifecycle
+    import duckdb
+    from sdmxlib import EditionRegistry, MaintainableArtefact, SdmxUrn
+    from sdmxlib.edition import JournalEntry, Lifecycle, Manifest
+    from sdmxlib.inventory import Kind
 
     from statcatlib.model.dataset import Dataset
     from statcatlib.model.skos import Concept, ConceptScheme
@@ -67,6 +82,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Edition",
+    "EditionCheckError",
     "JournalError",
     "SealCheckError",
     "WorkingCopy",
@@ -76,9 +92,6 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
-
-#: The only product kind Phase 2a writes; structure products arrive in Phase 3.
-_KIND = "data"
 
 
 @frozen
@@ -126,6 +139,36 @@ class SealCheckError(Exception):
         )
 
 
+class EditionCheckError(Exception):
+    """The publish check found something wrong with a sealed edition, so it was not recorded.
+
+    The edition stays on disk, sealed and unrecorded, and ``statcat doctor``
+    reports it. Fix the source, then start a new working copy from the live
+    edition with ``working_copy()``.
+
+    Attributes:
+        findings: Everything `sdmxlib.edition.check_edition` found.
+        product: The product.
+        edition: The sealed edition.
+    """
+
+    findings: tuple[Finding, ...]
+    product: str
+    edition: str
+
+    def __init__(self, findings: Sequence[Finding], *, product: str, edition: str) -> None:
+        """List the findings, and name the product and the edition."""
+        self.findings = tuple(findings)
+        self.product = product
+        self.edition = edition
+        listed = "; ".join(str(f) for f in self.findings)
+        super().__init__(
+            f"{product}: the publish check of the sealed edition {edition} found {len(self.findings)} problem(s), "
+            f"so it was not recorded and stays on disk unrecorded: {listed}. Fix the source, then start a new "
+            "working copy from the live edition with working_copy()."
+        )
+
+
 class JournalError(Exception):
     """A seal journal entry cannot be read, so the product's seals cannot be settled."""
 
@@ -133,6 +176,94 @@ class JournalError(Exception):
 def manifest_sha256(edition_dir: Path) -> str:
     """The SHA-256 of *edition_dir*'s ``manifest.json``, lowercase hex."""
     return hashlib.sha256((edition_dir / MANIFEST_NAME).read_bytes()).hexdigest()
+
+
+def edition_kind(manifest: Manifest) -> Kind:
+    """The product kind a sealed edition's ``statcat`` section names; ``data`` when it names none."""
+    section = manifest.extensions.get(STATCAT_SECTION) or {}
+    return "structure" if section.get("kind") == "structure" else "data"
+
+
+def structure_editions(
+    full: FullInventory | None, catalog_root: Path, *, product_id: str, batch: Mapping[str, Path]
+) -> list[Path]:
+    """The structure editions a structure edition of *product_id* is checked with (design decision O4).
+
+    They are the live and embargoed editions of every other structure
+    product in *full*, with each product of *batch* holding its batch
+    edition in place of its recorded ones.
+
+    Args:
+        full: The Inventory version, or ``None`` before the first.
+        catalog_root: The catalog directory.
+        product_id: The product whose edition is checked; its own editions
+            are left out.
+        batch: Other products' sealed, unrecorded structure editions, by
+            product.
+
+    Returns:
+        The edition directories, possibly none.
+    """
+    found = [edition_dir for other, edition_dir in sorted(batch.items()) if other != product_id]
+    if full is None:
+        return found
+    for other in full.products():
+        if other == product_id or other in batch:
+            continue
+        leaf = full.leaf(other)
+        if leaf.kind != "structure":
+            continue
+        found += [
+            catalog_root / "products" / other / entry.edition_id
+            for entry in leaf.editions
+            if entry.state in {"live", "embargoed"}
+        ]
+    return found
+
+
+def publish_check(edition_dir: Path, *, product_id: str, structures: Sequence[Path]) -> None:
+    """Seal step 5b: `sdmxlib.edition.check_edition` at ``publish`` on a sealed edition, with `check_catalog`.
+
+    Args:
+        edition_dir: The sealed edition.
+        product_id: Its product.
+        structures: The structure editions its references and partials
+            resolve in (`structure_editions`); ``structures=None`` when empty,
+            since sdmxlib refuses an empty sequence.
+
+    Raises:
+        EditionCheckError: The check found something.
+    """
+    report = check_edition(
+        edition_dir,
+        at="publish",
+        structures=list(structures) or None,
+        extensions={STATCAT_SECTION: check_catalog},
+    )
+    if report.findings:
+        raise EditionCheckError(report.findings, product=product_id, edition=edition_dir.name)
+
+
+def _journalled_structures(products_dir: Path, product_id: str, full: FullInventory | None) -> dict[str, Path]:
+    """Each other product's newest sealed, unrecorded structure edition that a journal entry names.
+
+    A batch that crashed after sdmxlib's seals leaves one per product; the
+    repair of one checks it with the others, as the batch would have.
+    """
+    found: dict[str, Path] = {}
+    for other_dir in sorted(products_dir.iterdir()) if products_dir.is_dir() else ():
+        if other_dir.name == product_id or not (other_dir / "journal").is_dir():
+            continue
+        with contextlib.suppress(ManifestError):
+            for entry in _edition.read_journal(other_dir):
+                edition_dir = other_dir / entry.edition_id
+                if _named(full, other_dir.name, entry.edition_id) or not (edition_dir / MANIFEST_NAME).is_file():
+                    continue
+                if edition_kind(_edition.read_manifest(edition_dir)) == "structure":
+                    newest = found.get(other_dir.name)
+                    if newest is None or newest.name < edition_dir.name:
+                        found[other_dir.name] = edition_dir
+    return found
 
 
 def _read_journal(product_dir: Path) -> list[JournalEntry]:
@@ -156,7 +287,7 @@ def _named(full: FullInventory | None, product_id: str, edition_id: str) -> bool
 
 def record_journalled(
     leaf: Leaf | None,
-    entries: Sequence[tuple[JournalEntry, str, str]],
+    entries: Sequence[tuple[JournalEntry, str, str, Kind]],
     *,
     product_id: str,
     lifecycle: Lifecycle,
@@ -168,8 +299,8 @@ def record_journalled(
 
     Args:
         leaf: The product's leaf in the head, or ``None``.
-        entries: Each journal entry with its edition's ``manifest_sha256`` and
-            ``schema_version``.
+        entries: Each journal entry with its edition's ``manifest_sha256``,
+            ``schema_version`` and product kind.
         product_id: The product.
         lifecycle: The product's lifecycle, for a first record.
         embargo: The head's embargo setting.
@@ -186,12 +317,12 @@ def record_journalled(
     settled: list[str] = []
     refused: dict[str, TransitionError] = {}
     gone = set(retired)
-    for entry, sha, schema_version in entries:
+    for entry, sha, schema_version, kind in entries:
         try:
             current = record(
                 current,
                 product_id=product_id,
-                kind=_KIND,
+                kind=kind,
                 lifecycle=current.lifecycle if current is not None else lifecycle,
                 edition_id=entry.edition_id,
                 previous=entry.previous,
@@ -216,7 +347,9 @@ def record_journalled(
 def settle_journal(writer: InventoryWriter, product_dir: Path, product_id: str, lifecycle: Lifecycle) -> None:
     """Apply the journal rule to the product's journal entries (see the module docstring).
 
-    Every edition that needs recording goes into one Inventory commit.
+    Every edition that needs recording goes into one Inventory commit, each
+    with the kind its manifest names. A structure edition is recorded only
+    once its publish check finds nothing.
 
     Args:
         writer: The catalog's Inventory writer.
@@ -234,16 +367,11 @@ def settle_journal(writer: InventoryWriter, product_dir: Path, product_id: str, 
     if not entries:
         return
     full = writer.full()
-    pending: list[tuple[JournalEntry, str, str]] = []
-    for entry in entries:
-        edition_dir = product_dir / entry.edition_id
-        if _named(full, product_id, entry.edition_id) or not (edition_dir / MANIFEST_NAME).is_file():
-            _edition.clear_journal(product_dir, entry.edition_id)
-            continue
-        manifest = _edition.read_manifest(edition_dir)
-        pending.append((entry, manifest_sha256(edition_dir), manifest.schema_version))
+    pending = _pending_entries(full, product_dir, product_id, entries)
     if not pending:
         return
+    failed: dict[str, Exception] = dict(_check_journalled(full, product_dir, product_id, pending))
+    recordable = [item for item in pending if item[0].edition_id not in failed]
     refused: dict[str, TransitionError] = {}
 
     def change(head_now: FullInventory | None) -> Change:
@@ -251,7 +379,7 @@ def settle_journal(writer: InventoryWriter, product_dir: Path, product_id: str, 
         retired = [t.edition_id for t in head_now.retired if t.product_id == product_id] if head_now else []
         nxt, _, found = record_journalled(
             leaf,
-            pending,
+            recordable,
             product_id=product_id,
             lifecycle=lifecycle,
             embargo=head_now.embargo if head_now is not None else False,
@@ -262,22 +390,125 @@ def settle_journal(writer: InventoryWriter, product_dir: Path, product_id: str, 
         refused.update(found)
         return Change(leaves={} if nxt is None else {product_id: nxt})
 
-    if change(full).leaves:
+    if recordable and change(full).leaves:
         try:
             writer.commit(change, kind="seal", reason="record a seal its writer did not record (journal repair)")
         except InventoryContentionError as exc:
             msg = f"{exc}; the journalled edition is recorded at the next working_copy()"
             raise InventoryContentionError(msg) from exc
-    for entry, _, _ in pending:
-        if entry.edition_id in refused:
+    for entry, _, _, _ in pending:
+        why = failed.get(entry.edition_id) or refused.get(entry.edition_id)
+        if why is not None:
             log.warning(
                 "%s: the journalled edition %s cannot be recorded (%s); it stays on disk unrecorded, and "
                 "`statcat doctor` reports it",
                 product_id,
                 entry.edition_id,
-                refused[entry.edition_id],
+                why,
             )
         _edition.clear_journal(product_dir, entry.edition_id)
+
+
+def _pending_entries(
+    full: FullInventory | None, product_dir: Path, product_id: str, entries: Iterable[JournalEntry]
+) -> list[tuple[JournalEntry, str, str, Kind]]:
+    """The journal entries whose sealed edition *full* does not name, with what records each; clears the rest.
+
+    Args:
+        full: The newest Inventory version, or ``None`` before the first.
+        product_dir: The product's directory.
+        product_id: The product.
+        entries: Its journal entries.
+
+    Returns:
+        Each entry with its edition's ``manifest_sha256``, ``schema_version``
+        and product kind.
+    """
+    pending: list[tuple[JournalEntry, str, str, Kind]] = []
+    for entry in entries:
+        edition_dir = product_dir / entry.edition_id
+        if _named(full, product_id, entry.edition_id) or not (edition_dir / MANIFEST_NAME).is_file():
+            _edition.clear_journal(product_dir, entry.edition_id)
+            continue
+        manifest = _edition.read_manifest(edition_dir)
+        pending.append((entry, manifest_sha256(edition_dir), manifest.schema_version, edition_kind(manifest)))
+    return pending
+
+
+def _check_journalled(
+    full: FullInventory | None,
+    product_dir: Path,
+    product_id: str,
+    pending: Sequence[tuple[JournalEntry, str, str, Kind]],
+) -> dict[str, EditionCheckError]:
+    """The journal repair's publish check: each journalled structure edition's finding, by edition id."""
+    failed: dict[str, EditionCheckError] = {}
+    checked = [entry.edition_id for entry, _, _, kind in pending if kind == "structure"]
+    if not checked:
+        return failed
+    products_dir = product_dir.parent
+    structures = structure_editions(
+        full,
+        products_dir.parent,
+        product_id=product_id,
+        batch=_journalled_structures(products_dir, product_id, full),
+    )
+    for edition_id in checked:
+        try:
+            publish_check(product_dir / edition_id, product_id=product_id, structures=structures)
+        except EditionCheckError as exc:
+            failed[edition_id] = exc
+    return failed
+
+
+def _as_kind(value: object) -> Kind | None:
+    """*value* as a product kind, or ``None`` when it names none."""
+    if value == "structure":
+        return "structure"
+    if value == "data":
+        return "data"
+    return None
+
+
+def _settle_kind(
+    cursor: duckdb.DuckDBPyConnection, product_id: str, edition_id: str, wanted: Kind | None, *, resume: bool
+) -> Kind:
+    """`WorkingCopy._start`'s fourth step: the working copy's kind, recorded in ``statcat._meta.product_kind``.
+
+    A new edition takes *wanted*, or ``data``, and drops the ``partial_of``
+    and ``fill_in_progress`` keys the copied ``metadata.duckdb`` carries from
+    the previous edition. A resumed one keeps the kind it was started with.
+
+    Args:
+        cursor: A cursor on the edition's ``statcat`` schema.
+        product_id: The product.
+        edition_id: The edition.
+        wanted: The leaf's kind, or the caller's ``kind``; ``None`` for
+            neither.
+        resume: Whether the edition is resumed.
+
+    Returns:
+        The kind.
+
+    Raises:
+        InventoryRuleError: A resumed edition was started with another kind
+            (``rule="kind"``).
+    """
+    resolved: Kind = wanted or "data"
+    if resume:
+        row = _catalog_schema.first_row(cursor.execute("SELECT value FROM _meta WHERE key = 'product_kind'").fetchall())
+        stored = None if row is None else _as_kind(row[0])
+        if stored is not None and wanted is not None and stored != wanted:
+            msg = (
+                f"{product_id}'s working copy {edition_id} was started as a {stored} product, and "
+                f"working_copy() asked for kind={wanted!r}; resume it with kind={stored!r}, or discard it"
+            )
+            raise InventoryRuleError(msg, rule="kind", product=product_id, edition=edition_id)
+        resolved = wanted or stored or "data"
+    else:
+        cursor.execute("DELETE FROM _meta WHERE key IN ('partial_of', 'fill_in_progress')")
+    cursor.execute("INSERT OR REPLACE INTO _meta VALUES ('product_kind', $kind)", {"kind": resolved})
+    return resolved
 
 
 @frozen
@@ -298,6 +529,7 @@ class _Parts:
     product_id: str
     previous: str | None
     lifecycle: Lifecycle
+    kind: Kind
 
 
 def _live_head(writer: InventoryWriter, product_id: str) -> str | None:
@@ -332,6 +564,7 @@ class WorkingCopy:
     _edition_id: str
     _previous: str | None
     _lifecycle: Lifecycle
+    _kind: Kind
     _closed: str | None
     _rebuild_index: Callable[[], int] | None
 
@@ -348,6 +581,7 @@ class WorkingCopy:
         self._edition_id = _parts.registry.edition_dir.name
         self._previous = _parts.previous
         self._lifecycle = _parts.lifecycle
+        self._kind = _parts.kind
         self._closed = None
         self._rebuild_index = None
 
@@ -358,6 +592,7 @@ class WorkingCopy:
         product_id: str,
         *,
         lifecycle: Lifecycle,
+        kind: Kind | None,
         resume: bool,
         embedding_model: EmbeddingModel | None,
         document_prefix: str,
@@ -373,6 +608,8 @@ class WorkingCopy:
             writer: The catalog's Inventory writer.
             product_id: The product.
             lifecycle: The product's lifecycle.
+            kind: The product's kind; ``None`` takes the recorded kind, or
+                ``data`` for a new product.
             resume: Reopen the unsealed edition in place of starting one.
             embedding_model: The encoder the seal embeds with.
             document_prefix: Prepended to every document before embedding.
@@ -383,7 +620,8 @@ class WorkingCopy:
 
         Raises:
             InventoryRuleError: The product is recorded with another lifecycle
-                (``rule="lifecycle"``).
+                (``rule="lifecycle"``), or recorded or resumed with another
+                kind (``rule="kind"``).
         """
         product_dir = writer.root / "products" / product_id
         settle_journal(writer, product_dir, product_id, lifecycle)
@@ -395,6 +633,13 @@ class WorkingCopy:
                 f"{lifecycle}; changing a product's lifecycle is not supported before Phase 4"
             )
             raise InventoryRuleError(msg, rule="lifecycle", product=product_id, edition=None)
+        if leaf is not None and kind is not None and leaf.kind != kind:
+            msg = (
+                f"{product_id} is recorded as a {leaf.kind} product, and working_copy() asked for kind={kind!r}; "
+                "a product keeps the kind it was first recorded with"
+            )
+            raise InventoryRuleError(msg, rule="kind", product=product_id, edition=None)
+        wanted: Kind | None = leaf.kind if leaf is not None else kind
         live = head(leaf, SCHEMA_VERSION)
         registry = _build(
             writer, product_dir, product_id, lifecycle, base=None if live is None else live.edition_id, resume=resume
@@ -411,6 +656,11 @@ class WorkingCopy:
                 # NOT EXISTS.
                 _refuse_statcat_schema_mismatch(registry.connection.cursor())
                 _catalog_schema.create_schema(registry.connection, registry.catalog_name).close()
+            cursor = _catalog_schema.use_statcat(registry.connection.cursor(), registry.catalog_name)
+            try:
+                resolved = _settle_kind(cursor, product_id, edition_dir.name, wanted, resume=resume)
+            finally:
+                cursor.close()
             store = _Store._over(
                 registry.connection.cursor,
                 catalog_name=registry.catalog_name,
@@ -436,6 +686,7 @@ class WorkingCopy:
                 product_id=product_id,
                 previous=previous,
                 lifecycle=lifecycle,
+                kind=resolved,
             )
         )
 
@@ -469,6 +720,11 @@ class WorkingCopy:
         return self._previous
 
     @property
+    def kind(self) -> Kind:
+        """The product's kind: ``data``, or ``structure`` for a product of full artefacts only."""
+        return self._kind
+
+    @property
     def registry(self) -> sdmxlib.LocalRegistry:
         """The writable sdmxlib registry over the edition: SDMX structures and observations.
 
@@ -484,6 +740,58 @@ class WorkingCopy:
         return EditionView._over(self._live())
 
     # -- writes ----------------------------------------------------------
+
+    def fill_structures(
+        self,
+        source: EditionRegistry,
+        *,
+        families: Collection[type[MaintainableArtefact]] = (),
+        agency: str | None = None,
+        ids: Collection[str] = (),
+        artefacts: Collection[SdmxUrn[MaintainableArtefact] | str] = (),
+    ) -> tuple[str, ...]:
+        """Copy full artefacts from *source* into a structure product's working copy.
+
+        It calls `sdmxlib.edition.fill_structures`. An artefact is selected
+        when *artefacts* names its URN, or when its class is one of
+        *families*, its agency is *agency* (any when ``None``) and its id
+        matches one of the *ids* patterns (``SGC*``; any id when empty).
+        Nothing is added for what a selected artefact references, so a
+        reference into another structure product stays open; the seal's
+        publish check resolves it there. An artefact the working copy holds at
+        a selected URN is replaced.
+
+        Args:
+            source: The registry holding the full artefacts, such as a
+                scratch `sdmxlib.LocalRegistry` an FMR's structures were
+                ingested into.
+            families: The artefact classes to select, such as
+                `sdmxlib.Codelist` or `sdmxlib.ConceptScheme`.
+            agency: The maintenance agency of the artefacts *families* selects.
+            ids: Patterns the id of an artefact *families* selects must match.
+            artefacts: More artefacts, by URN.
+
+        Returns:
+            The URNs copied, sorted.
+
+        Raises:
+            TypeError: The working copy is a data product's.
+
+        sdmxlib raises `TypeError` for a family that is `Dataflow`,
+        `DataflowBinding` or a class the store does not hold, and
+        `ValueError` for a URN that names a dataflow, a binding, a partial or
+        nothing *source* holds, or when nothing is selected.
+        """
+        self._live()
+        if self._kind != "structure":
+            msg = (
+                f"{self._product_id} is a {self._kind} product, and fill_structures fills a structure product: "
+                "start one with working_copy(kind='structure')"
+            )
+            raise TypeError(msg)
+        return _edition.fill_structures(
+            self._registry, source, families=families, agency=agency, ids=ids, artefacts=artefacts
+        )
 
     def put(self, obj: Dataset | ConceptScheme | Sequence[Dataset | ConceptScheme]) -> None:
         """Add or update a dataset, a concept scheme, or a sequence of either.
@@ -712,9 +1020,10 @@ class WorkingCopy:
         The steps: settle the journal; run *checks*; refuse when the base is
         no longer live; rebuild the search index; compute the ``statcat``
         section; close; seal with sdmxlib (journal entry, then manifest);
-        record the edition, ``live`` when the catalog's embargo is off; settle
-        the journal entry. `Catalog.seal` runs the same steps for several
-        working copies and records them in one Inventory version.
+        run the publish check on a structure edition; record the edition,
+        ``live`` when the catalog's embargo is off; settle the journal entry.
+        `Catalog.seal` runs the same steps for several working copies and
+        records them in one Inventory version.
 
         Args:
             checks: Seal checks (`statcatlib.checks.SealCheck`), run against
@@ -725,6 +1034,10 @@ class WorkingCopy:
             The edition.
 
         Raises:
+            EditionCheckError: The publish check of a structure edition found
+                something, such as a reference no other structure product's
+                live or embargoed edition resolves; the sealed edition stays
+                on disk unrecorded.
             InventoryRuleError: sdmxlib's rules refused the record after the
                 manifest was written, such as `NonFastForwardError` when a
                 rollback lands during the seal; the sealed edition stays on
@@ -733,7 +1046,8 @@ class WorkingCopy:
                 product's next ``working_copy()`` records the edition.
 
         Before anything is written, a check's finding raises `SealCheckError`
-        and a base that is no longer the live edition raises
+        (for a structure product, also each dataflow, binding or partial it
+        holds), and a base that is no longer the live edition raises
         `NonFastForwardError`; both leave the working copy open. A
         `ManifestError` means sdmxlib refused the edition, such as for a coded
         value outside its codelist, before writing the journal entry; the
@@ -741,6 +1055,15 @@ class WorkingCopy:
         """
         self._precheck(checks)
         sealed = self._seal_edition()
+        if self._kind == "structure":
+            structures = structure_editions(
+                self._writer.full(), self._writer.root, product_id=self._product_id, batch={}
+            )
+            try:
+                self._publish_check(structures)
+            except EditionCheckError as exc:
+                self._unrecorded(exc)
+                raise
         try:
             self._writer.commit(
                 lambda full: Change(leaves={self._product_id: self._next_leaf(full, sealed)}),
@@ -759,6 +1082,9 @@ class WorkingCopy:
     def _precheck(self, checks: Iterable[Callable[[EditionView], Iterable[Finding]]]) -> None:
         """Seal steps 0 to 2: settle the journal, run *checks*, and refuse a base that is no longer live.
 
+        A structure working copy is also checked for content a structure
+        product does not hold (`statcatlib.bundle.structure_content`).
+
         Args:
             checks: The seal checks, run against `view`.
 
@@ -766,9 +1092,11 @@ class WorkingCopy:
             SealCheckError: A check found something.
             NonFastForwardError: The base is no longer the live edition.
         """
-        self._live()
+        store = self._live()
         settle_journal(self._writer, self._product_dir, self._product_id, self._lifecycle)
         findings = [finding for check in checks for finding in check(self.view())]
+        if self._kind == "structure":
+            findings += structure_content(store._cursor())
         if findings:
             raise SealCheckError(findings)
         live = _live_head(self._writer, self._product_id)
@@ -791,7 +1119,7 @@ class WorkingCopy:
         """
         store = self._live()
         self._search(store)
-        section = catalog_section(store)
+        section = catalog_section(store, kind=self._kind)
         edition_dir = self._registry.edition_dir
         self._close(f"the working copy {self._edition_id} of {self._product_id} is sealed")
         try:
@@ -838,7 +1166,7 @@ class WorkingCopy:
             return record(
                 leaf,
                 product_id=product_id,
-                kind=_KIND,
+                kind=self._kind,
                 lifecycle=self._lifecycle,
                 edition_id=edition_id,
                 previous=self._previous,
@@ -851,12 +1179,22 @@ class WorkingCopy:
         except TransitionError as exc:
             raise InventoryRuleError.wrapping(exc, product=product_id, edition=edition_id) from exc
 
+    def _publish_check(self, structures: Sequence[Path]) -> None:
+        """Seal step 5b: the publish check of the sealed edition, with *structures* (`publish_check`).
+
+        Args:
+            structures: The structure editions its references resolve in.
+
+        A finding raises `EditionCheckError`.
+        """
+        publish_check(self._product_dir / self._edition_id, product_id=self._product_id, structures=structures)
+
     def _recorded(self) -> None:
         """After the record: clear the edition's journal entry."""
         _edition.clear_journal(self._product_dir, self._edition_id)
 
-    def _unrecorded(self, exc: InventoryRuleError) -> None:
-        """After a refused record: clear the journal entry, so no repair records it, and log a WARNING.
+    def _unrecorded(self, exc: InventoryRuleError | EditionCheckError) -> None:
+        """After a refused record or publish check: clear the journal entry, so no repair records it; log a WARNING.
 
         The edition stays sealed and unrecorded on disk.
         """

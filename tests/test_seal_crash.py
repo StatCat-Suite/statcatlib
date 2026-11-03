@@ -264,10 +264,10 @@ def test_a_duplicate_with_the_same_digest_is_settled() -> None:
     entry = JournalEntry(product_id="p", edition_id=edition, previous=None, sealed_at=now)
     common: dict[str, Any] = {"product_id": "p", "lifecycle": "revisable", "embargo": False, "retired": (), "now": now}
 
-    same, settled, refused = record_journalled(leaf, [(entry, "a" * 64, SCHEMA_VERSION)], **common)
+    same, settled, refused = record_journalled(leaf, [(entry, "a" * 64, SCHEMA_VERSION, "data")], **common)
     assert (same, settled, refused) == (None, [edition], {})
 
-    other, settled, refused = record_journalled(leaf, [(entry, "b" * 64, SCHEMA_VERSION)], **common)
+    other, settled, refused = record_journalled(leaf, [(entry, "b" * 64, SCHEMA_VERSION, "data")], **common)
     assert other is None
     assert settled == []
     assert refused[edition].rule == "duplicate"

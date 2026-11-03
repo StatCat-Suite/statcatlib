@@ -33,19 +33,25 @@ from typing import TYPE_CHECKING, NoReturn, Self
 
 import sdmxlib
 from attrs import frozen
-from sdmxlib.edition import ManifestError, read_manifest
+from sdmxlib.edition import Finding, ManifestError, read_manifest
 from sdmxlib.inventory import CATALOG_NAME, LiveEdition, LiveInventory, decode_root, local_fetch, root_path
 
 from statcatlib.bundle import description_from_root
 from statcatlib.store.inventory import Change, InventoryContentionError, InventoryRuleError, InventoryWriter
 from statcatlib.store.store import VIEW_ATTRIBUTES, EditionView, IncompatibleCatalogError, _Store
-from statcatlib.store.working_copy import Edition, SealCheckError, WorkingCopy
+from statcatlib.store.working_copy import (
+    Edition,
+    EditionCheckError,
+    SealCheckError,
+    WorkingCopy,
+    structure_editions,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from sdmxlib.edition import Finding, Lifecycle
-    from sdmxlib.inventory import FullInventory
+    from sdmxlib.edition import Lifecycle
+    from sdmxlib.inventory import FullInventory, Kind, Leaf
 
     from statcatlib.model.catalog import CatalogDescription
     from statcatlib.store.store import EmbeddingModel
@@ -79,10 +85,11 @@ class SealOutcomes:
             `NonFastForwardError` from the pre-check, or another
             `InventoryRuleError` from sdmxlib's rules leaves the working copy
             open; a `ManifestError` closes it, and
-            ``working_copy(resume=True)`` reopens it. An `InventoryRuleError`
-            at record time leaves the sealed edition on disk unrecorded, and an
-            `InventoryContentionError` at record time leaves it for the
-            product's next ``working_copy()`` to record.
+            ``working_copy(resume=True)`` reopens it. An `EditionCheckError`
+            from a structure edition's publish check, or an
+            `InventoryRuleError` at record time, leaves the sealed edition on
+            disk unrecorded, and an `InventoryContentionError` at record time
+            leaves it for the product's next ``working_copy()`` to record.
     """
 
     sealed: Mapping[str, Edition]
@@ -171,42 +178,146 @@ def _check_product_id(product_id: str) -> str:
     return product_id
 
 
+@frozen
+class _BatchSealed:
+    """A batch's sealed, unrecorded edition, with the batch structure editions its publish check was given."""
+
+    wc: WorkingCopy
+    sealed: _Sealed
+    given: frozenset[str] = frozenset()
+
+
 def _seal_each(
+    writer: InventoryWriter,
     batch: list[WorkingCopy],
     checks: tuple[Callable[[EditionView], Iterable[Finding]], ...],
     refused: dict[str, Exception],
-) -> list[tuple[WorkingCopy, _Sealed]]:
-    """`Catalog.seal`'s first two passes: pre-check every working copy, then seal each that passed.
+) -> list[_BatchSealed]:
+    """`Catalog.seal`'s passes before the record: the structure pass, the structure-check pass, the data pass.
+
+    1. Structure: pre-check and seal each structure working copy.
+    2. Structure check: run the publish check of each sealed structure
+       edition, given the batch's other structure editions in place of
+       their products' recorded ones. An edition with a finding is dropped,
+       and the pass repeats for the rest until a pass drops none, since a
+       reference may have resolved only in a dropped edition.
+    3. Data: pre-check every data working copy, then seal each that passed.
 
     Args:
+        writer: The catalog's Inventory writer.
         batch: The working copies.
         checks: The seal checks.
         refused: Filled with each refused product's error.
 
     Returns:
-        Each sealed working copy with its edition, not yet recorded.
+        Each sealed edition that passed, not yet recorded: the structure
+        editions first.
     """
+    structures = _seal_ready([wc for wc in batch if wc.kind == "structure"], checks, refused)
+    checked = _check_structures(writer, structures, refused)
+    data = _seal_ready([wc for wc in batch if wc.kind != "structure"], checks, refused)
+    return [*checked, *data]
+
+
+def _seal_ready(
+    working_copies: list[WorkingCopy],
+    checks: tuple[Callable[[EditionView], Iterable[Finding]], ...],
+    refused: dict[str, Exception],
+) -> list[_BatchSealed]:
+    """Pre-check every working copy, then seal each that passed."""
     ready: list[WorkingCopy] = []
-    for wc in batch:
+    for wc in working_copies:
         try:
             wc._precheck(checks)
         except (SealCheckError, InventoryRuleError, InventoryContentionError) as exc:
             refused[wc.product_id] = exc
         else:
             ready.append(wc)
-    sealed: list[tuple[WorkingCopy, _Sealed]] = []
+    sealed: list[_BatchSealed] = []
     for wc in ready:
         try:
-            sealed.append((wc, wc._seal_edition()))
+            sealed.append(_BatchSealed(wc=wc, sealed=wc._seal_edition()))
         except ManifestError as exc:
             refused[wc.product_id] = exc
     return sealed
 
 
+def _check_structures(
+    writer: InventoryWriter, sealed: list[_BatchSealed], refused: dict[str, Exception]
+) -> list[_BatchSealed]:
+    """The structure-check pass: each sealed structure edition's publish check, repeated until it drops none.
+
+    Args:
+        writer: The catalog's Inventory writer.
+        sealed: The batch's sealed structure editions.
+        refused: Filled with each dropped product's `EditionCheckError`.
+
+    Returns:
+        The editions that passed, each with the batch editions it was given.
+    """
+    surviving = list(sealed)
+    while surviving:
+        full = writer.full()
+        dirs = {
+            done.wc.product_id: writer.root / "products" / done.wc.product_id / done.wc.edition_id for done in surviving
+        }
+        kept: list[_BatchSealed] = []
+        for done in surviving:
+            product_id = done.wc.product_id
+            given = {other: path for other, path in dirs.items() if other != product_id}
+            try:
+                done.wc._publish_check(structure_editions(full, writer.root, product_id=product_id, batch=given))
+            except EditionCheckError as exc:
+                done.wc._unrecorded(exc)
+                refused[product_id] = exc
+            else:
+                kept.append(_BatchSealed(wc=done.wc, sealed=done.sealed, given=frozenset(given)))
+        if len(kept) == len(surviving):
+            return kept
+        surviving = kept
+    return surviving
+
+
+def _dropped_with(done: _BatchSealed, lost: _BatchSealed, exc: Exception) -> EditionCheckError:
+    """The error of *done*, whose publish check was given *lost*'s edition, which was refused at record time."""
+    finding = Finding(
+        "structures",
+        f"{lost.wc.product_id}/{lost.wc.edition_id}",
+        f"the publish check was given this batch edition, which was not recorded ({exc})",
+    )
+    return EditionCheckError([finding], product=done.wc.product_id, edition=done.wc.edition_id)
+
+
+def _drop_dependents(
+    sealed: list[_BatchSealed],
+    leaves: dict[str, Leaf],
+    at_record: dict[str, InventoryRuleError | EditionCheckError],
+) -> None:
+    """Move each structure edition whose publish check was given a refused one from *leaves* to *at_record*.
+
+    Repeats until a pass moves none, since a dropped edition can have been
+    given to another.
+    """
+    dropping = True
+    while dropping:
+        dropping = False
+        for done in sealed:
+            product_id = done.wc.product_id
+            lost = next((d for d in sealed if d.wc.product_id in done.given and d.wc.product_id in at_record), None)
+            if product_id in leaves and lost is not None:
+                at_record[product_id] = _dropped_with(done, lost, at_record[lost.wc.product_id])
+                del leaves[product_id]
+                dropping = True
+
+
 def _record_batch(
-    writer: InventoryWriter, sealed: list[tuple[WorkingCopy, _Sealed]], refused: dict[str, Exception]
+    writer: InventoryWriter, sealed: list[_BatchSealed], refused: dict[str, Exception]
 ) -> dict[str, Edition]:
     """`Catalog.seal`'s last pass: record every sealed edition sdmxlib's rules accept, in one commit.
+
+    A structure edition refused at record time also drops each batch
+    structure edition whose publish check was given it, until a pass drops
+    none.
 
     Args:
         writer: The catalog's Inventory writer.
@@ -216,40 +327,41 @@ def _record_batch(
     Returns:
         Each recorded product's edition.
     """
-    at_record: dict[str, InventoryRuleError] = {}
+    at_record: dict[str, InventoryRuleError | EditionCheckError] = {}
 
     def change(full: FullInventory | None) -> Change:
         at_record.clear()
-        leaves = {}
-        for wc, done in sealed:
+        leaves: dict[str, Leaf] = {}
+        for done in sealed:
             try:
-                leaves[wc.product_id] = wc._next_leaf(full, done)
+                leaves[done.wc.product_id] = done.wc._next_leaf(full, done.sealed)
             except InventoryRuleError as exc:
-                at_record[wc.product_id] = exc
+                at_record[done.wc.product_id] = exc
+        _drop_dependents(sealed, leaves, at_record)
         if not leaves:
             raise _NothingToRecordError
         return Change(leaves=leaves)
 
-    products = ", ".join(wc.product_id for wc, _ in sealed)
+    products = ", ".join(done.wc.product_id for done in sealed)
     try:
         writer.commit(change, kind="seal", reason=f"seal {products}")
     except _NothingToRecordError:
         pass
     except InventoryContentionError as exc:
         # The journal entries stay, so each product's next working_copy() records its edition.
-        for wc, _ in sealed:
-            msg = f"{exc}; the edition {wc.edition_id} is recorded at the next working_copy()"
-            refused[wc.product_id] = InventoryContentionError(msg)
+        for done in sealed:
+            msg = f"{exc}; the edition {done.wc.edition_id} is recorded at the next working_copy()"
+            refused[done.wc.product_id] = InventoryContentionError(msg)
         return {}
     recorded: dict[str, Edition] = {}
-    for wc, done in sealed:
-        exc = at_record.get(wc.product_id)
+    for done in sealed:
+        exc = at_record.get(done.wc.product_id)
         if exc is None:
-            wc._recorded()
-            recorded[wc.product_id] = done.edition
+            done.wc._recorded()
+            recorded[done.wc.product_id] = done.sealed.edition
         else:
-            wc._unrecorded(exc)
-            refused[wc.product_id] = exc
+            done.wc._unrecorded(exc)
+            refused[done.wc.product_id] = exc
     return recorded
 
 
@@ -454,14 +566,18 @@ class Catalog:
     ) -> SealOutcomes:
         """Seal several products' working copies and record them in one Inventory version.
 
-        It runs `WorkingCopy.seal`'s steps in three passes. First it settles
-        each product's journal, runs *checks* against each working copy's
-        view, and refuses each one whose base is no longer live, before any
-        sdmxlib seal. Then it seals each remaining working copy (search
-        index, section, sdmxlib's journal entry and manifest). Last it
-        records every sealed edition in one Inventory commit, leaving out
-        each product whose record sdmxlib's rules refuse. A refusal in one
-        product never stops another's seal.
+        It runs `WorkingCopy.seal`'s steps in four passes. The structure pass
+        pre-checks each structure product's working copy (journal, *checks*,
+        content, fast-forward) and seals each that passed. The
+        structure-check pass runs each sealed structure edition's publish
+        check, given the batch's other structure editions in place of their
+        products' recorded ones, and drops each edition with a finding until
+        a pass drops none. The data pass pre-checks every data product's
+        working copy before any of them is sealed, then seals each that
+        passed. Last it records every sealed edition in one Inventory commit,
+        leaving out each product whose record sdmxlib's rules refuse, and each
+        structure edition whose publish check was given a left-out one. A
+        refusal in one product never stops another's seal.
 
         A crash during the batch can leave its products recorded across
         several Inventory versions: each sealed, unrecorded edition keeps its
@@ -484,7 +600,7 @@ class Catalog:
         writer = self._require_writer()
         batch = self._check_batch(working_copies)
         refused: dict[str, Exception] = {}
-        sealed = _seal_each(batch, tuple(checks), refused)
+        sealed = _seal_each(writer, batch, tuple(checks), refused)
         recorded = _record_batch(writer, sealed, refused) if sealed else {}
         return SealOutcomes(sealed=recorded, refused=refused)
 
@@ -696,6 +812,7 @@ class Product:
     def working_copy(
         self,
         *,
+        kind: Kind | None = None,
         lifecycle: Lifecycle = "revisable",
         resume: bool = False,
         embedding_model: EmbeddingModel | None = None,
@@ -709,6 +826,11 @@ class Product:
         and unrecorded is recorded before the new one picks its base.
 
         Args:
+            kind: ``data``, or ``structure`` for a product of full artefacts
+                only (`WorkingCopy.fill_structures`). ``None`` takes the kind
+                the product is recorded with, or the one a resumed working
+                copy was started with, and ``data`` for a new product. A
+                product keeps the kind it was first recorded with.
             lifecycle: ``revisable`` or ``final``. A product keeps the
                 lifecycle it was first recorded with.
             resume: Reopen the product's unsealed edition in place of
@@ -722,14 +844,17 @@ class Product:
 
         A catalog opened read-only with `Catalog.open` raises `RuntimeError`.
         A product recorded with another lifecycle raises `InventoryRuleError`
-        (``rule="lifecycle"``), and one with an unsealed edition raises
-        `WorkingCopyExistsError` unless *resume* is true.
+        (``rule="lifecycle"``); one recorded with another kind, or resumed
+        with another kind than it was started with, raises it with
+        ``rule="kind"`` before anything is built; and one with an unsealed
+        edition raises `WorkingCopyExistsError` unless *resume* is true.
         """
         writer = self._catalog._require_writer()
         return WorkingCopy._start(
             writer,
             self._product_id,
             lifecycle=lifecycle,
+            kind=kind,
             resume=resume,
             embedding_model=embedding_model,
             document_prefix=document_prefix,

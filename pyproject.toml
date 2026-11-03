@@ -27,9 +27,9 @@ dependencies = [
     # by DuckDB 1.x, so by statcatlib 0.8 or earlier.
     "duckdb>=2.0.0",
     "httpx>=0.28",
-    # <0.83: every suite library is pre-1.0, so a minor bump may break
+    # <0.84: every suite library is pre-1.0, so a minor bump may break
     # (GH-67).
-    "sdmxlib>=0.82.0,<0.83",
+    "sdmxlib>=0.83,<0.84",
 ]
 
 [project.optional-dependencies]

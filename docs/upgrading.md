@@ -5,6 +5,51 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## 0.13.0: structure products, on sdmxlib 0.83
+
+statcatlib requires `sdmxlib>=0.83,<0.84`. sdmxlib's
+[upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists
+its own changes. No catalog is rebuilt: the store schema stays 2.52, the
+manifest 3.0, the Inventory 1.0, the `statcat` schema 2.2, the `statcat`
+section format 3 and the search index manifest 3. A 0.12 catalog opens and
+seals under 0.13.
+
+### Structure products
+
+A product is now a data product or a structure product
+([Structure products](api/store.md#structure-products)):
+
+- `Product.working_copy(kind=...)` takes `"data"` or `"structure"`. The
+  default, `None`, takes the kind the product is recorded with, or `"data"`
+  for a new product, so existing calls are unchanged. `WorkingCopy.kind`
+  returns it.
+- `WorkingCopy.fill_structures(source, *, families, agency, ids, artefacts)`
+  copies full artefacts into a structure product's working copy, through
+  `sdmxlib.edition.fill_structures`.
+- A product reopened with the other kind raises `InventoryRuleError` with
+  `rule="kind"` before anything is built, as one reopened with another
+  lifecycle does with `rule="lifecycle"`.
+- A structure working copy holding a dataflow, a binding or a partial fails
+  its seal with `SealCheckError`, and `check_catalog` reports each one in a
+  sealed structure edition.
+- A structure edition's seal runs `sdmxlib.edition.check_edition` at
+  `publish` against the catalog's other structure products before the
+  Inventory commit. A finding raises the new `EditionCheckError` (exported
+  from `statcatlib`) and leaves the sealed edition unrecorded. In
+  `Catalog.seal` the product goes to `SealOutcomes.refused`. The journal
+  repair runs the same check, and clears a failing edition's entry with a
+  WARNING.
+- `Catalog.seal` seals and checks the batch's structure products before its
+  data products, and drops a structure edition whose publish check was given
+  a batch edition that was not recorded.
+- `statcatlib.bundle.catalog_section(store, *, kind="data")` takes the kind
+  it writes.
+
+Write a catalog that holds a structure product with statcatlib 0.13 only. A
+0.12 writer records every edition as `kind: "data"`, so sdmxlib refuses its
+record of a structure product's edition after the seal, and the edition stays
+unrecorded.
+
 ## 0.12.0: catalogs of products and editions, on sdmxlib 0.81
 
 statcatlib requires `sdmxlib>=0.81.0,<0.82`. sdmxlib's

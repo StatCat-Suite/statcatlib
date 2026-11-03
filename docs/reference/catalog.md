@@ -63,6 +63,8 @@ the same surface with examples.
 
 ::: statcatlib.SealCheckError
 
+::: statcatlib.EditionCheckError
+
 ::: statcatlib.JournalError
 
 ::: statcatlib.InventoryRuleError
