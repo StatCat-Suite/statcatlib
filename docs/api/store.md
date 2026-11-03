@@ -108,6 +108,7 @@ Requires the `search` optional extra: `uv add 'statcatlib[search]'`, or
 ```python
 product.working_copy(
     *,
+    kind: str | None = None,
     lifecycle: str = "revisable",
     resume: bool = False,
     embedding_model: EmbeddingModel | None = None,
@@ -120,8 +121,12 @@ Start the product's working copy on its live edition. The working copy starts
 with the live edition's rows, so a seal records the next edition of the
 product. A product has one working copy at a time, and one writer.
 `working_copy()` raises `WorkingCopyExistsError` while one is unsealed, and
-`resume=True` reopens it. `lifecycle` is `"revisable"` or `"final"`; a product
-keeps the lifecycle it was first recorded with. `embedding_model` and the
+`resume=True` reopens it. `kind` is `"data"` or `"structure"` (see
+[Structure products](#structure-products)); `None` takes the kind the product
+is recorded with, or `"data"` for a new product. `lifecycle` is `"revisable"`
+or `"final"`. A product keeps the kind and the lifecycle it was first
+recorded with: another value raises `InventoryRuleError` with `rule="kind"`
+or `rule="lifecycle"` before anything is built. `embedding_model` and the
 prefixes are the encoder settings the seal's index rebuild uses.
 
 ```python
@@ -139,6 +144,7 @@ wc.seal(checks: Iterable[SealCheck] = ()) -> Edition
 wc.discard() -> None
 wc.close() -> None
 wc.registry -> sdmxlib.LocalRegistry
+wc.kind -> str
 wc.product_id -> str
 wc.edition_id -> str
 wc.previous -> str | None
@@ -179,16 +185,25 @@ cat.seal(working_copies: Iterable[WorkingCopy], *, checks: Iterable[SealCheck] =
 
 `Catalog.seal` seals one working copy per product and records every edition
 it can in one Inventory version, so a bulk ingest of N products writes N
-leaves and one root. It runs in three passes:
+leaves and one root. It runs in four passes:
 
-1. For every working copy, it settles the product's journal, runs `checks`
-   against the working copy's view, and refuses a working copy whose base is
-   no longer the live edition. Nothing is sealed until every working copy has
-   passed or been refused.
-2. It seals each working copy that passed: the search index, the `statcat`
-   section, and sdmxlib's journal entry and manifest.
-3. It records the sealed editions in one commit, leaving out each product
-   whose record sdmxlib's rules refuse.
+1. The structure pass. For every structure product's working copy, it
+   settles the product's journal, runs `checks` against the working copy's
+   view, refuses a dataflow, a binding or a partial, and refuses a working
+   copy whose base is no longer the live edition. Then it seals each one that
+   passed: the search index, the `statcat` section, and sdmxlib's journal
+   entry and manifest.
+2. The structure-check pass. It runs each sealed structure edition's publish
+   check, given the batch's other structure editions in place of their
+   products' recorded ones, and drops each edition with a finding. It repeats
+   until a pass drops none, since a reference may have resolved only in a
+   dropped edition.
+3. The data pass. It pre-checks every data product's working copy as in the
+   structure pass, and seals each that passed. No data working copy is sealed
+   until every one has passed or been refused.
+4. It records the sealed editions in one commit, leaving out each product
+   whose record sdmxlib's rules refuse, and each structure edition whose
+   publish check was given a left-out one.
 
 A refusal in one product never stops another's seal. `SealOutcomes.sealed`
 maps each recorded product to its `Edition`, and `SealOutcomes.refused` maps
@@ -199,6 +214,7 @@ each refused product to its error:
 | `SealCheckError` | a check found something | stays open |
 | `NonFastForwardError` | its base is no longer live, before the seal | stays open; `discard()` it |
 | `ManifestError` | sdmxlib refused the edition | closed; `working_copy(resume=True)` reopens it |
+| `EditionCheckError` | a structure edition's publish check found something | sealed and unrecorded, logged at WARNING |
 | `InventoryRuleError` | sdmxlib's rules refused the record, such as a rollback landing during the batch | sealed and unrecorded, logged at WARNING |
 | `InventoryContentionError` | the commit lost 8 races in a row | sealed; the product's next `working_copy()` records it |
 
@@ -220,6 +236,56 @@ crash during a batch can leave its products recorded across several Inventory
 versions: each sealed, unrecorded edition keeps its journal entry, and its
 product's next `working_copy()` records it in a version of its own. On a
 laptop catalog that is acceptable.
+
+### Structure products
+
+A structure product holds one agency's full codelists, concept schemes,
+category schemes and hierarchies, and no dataflow, binding, partial or
+observation. Start one with `working_copy(kind="structure")`; later working
+copies take the recorded kind. Fill it with `fill_structures`:
+
+```python
+wc.fill_structures(
+    source: sdmxlib.EditionRegistry,
+    *,
+    families: Collection[type[sdmxlib.MaintainableArtefact]] = (),
+    agency: str | None = None,
+    ids: Collection[str] = (),
+    artefacts: Collection[SdmxUrn | str] = (),
+) -> tuple[str, ...]
+```
+
+It calls `sdmxlib.edition.fill_structures` and returns the URNs it copied.
+An artefact is selected when `artefacts` names its URN, or when its class is
+one of `families`, its agency is `agency` and its id matches one of the `ids`
+patterns (`SGC*`). `source` is any `sdmxlib.EditionRegistry`, such as a
+scratch `LocalRegistry` an FMR's structures were ingested into. Nothing is
+copied for what a selected artefact references, so each full artefact has one
+structure home. On a data product's working copy it raises `TypeError`.
+
+StatCan splits its structures by change rate into three products. A
+hierarchy goes in the product of the codelist it is built on:
+
+```python
+geo = cat.product("structure-geo").working_copy(kind="structure")
+geo.fill_structures(fmr, families=[sl.Codelist, sl.Hierarchy], agency="STC", ids=["SGC*", "HCL_SGC*"])
+cls = cat.product("structure-classifications").working_copy(kind="structure")
+cls.fill_structures(fmr, artefacts=[naics, noc, unit_of_measure, scalar_factor])
+con = cat.product("structure-concepts").working_copy(kind="structure")
+con.fill_structures(fmr, families=[sl.ConceptScheme], agency="STC")
+outcomes = cat.seal([geo, cls, con])
+```
+
+The seal of a structure working copy refuses, with `SealCheckError`, a
+dataflow, a binding or a partial it holds, and the working copy stays open.
+After sdmxlib's seal, it runs `sdmxlib.edition.check_edition` at `publish`
+with the catalog's other structure products' live and embargoed editions as
+`structures=`, so a concept whose core representation names a codelist in
+`structure-classifications` resolves there. A finding raises
+`EditionCheckError` (with `findings`, `product` and `edition`) and leaves
+the sealed edition unrecorded; `statcat doctor` reports it. Seal the three
+products in one `Catalog.seal`, in any order, to record them in one Inventory
+version.
 
 ---
 

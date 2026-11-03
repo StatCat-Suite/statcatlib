@@ -125,6 +125,12 @@ to string.
   older store would otherwise fail later, on the first query that reads a
   column added since. `Product.view` and `Product.working_copy` raise
   `IncompatibleCatalogError`.
+- `statcat._meta` also records `product_kind`, `"data"` or `"structure"`,
+  which `Product.working_copy` writes on each new edition and reads on a
+  resume, so a resumed working copy keeps the kind it was started with. A
+  new edition also drops the `partial_of` and `fill_in_progress` keys the
+  previous edition's `metadata.duckdb` carries. Readers take the kind from
+  the manifest's `statcat` section (§3); the `_meta` keys are the writer's.
 - `statcat.language_alternate` records the language tags a source declares as
   alternates of a primary tag, such as `en-t-fr` for `en`, with the source,
   each tag lowercase as `sdmxlib.normalize_tag` spells it. Each alternate has
@@ -185,7 +191,7 @@ languages, the section is:
 | field | presence | meaning |
 | --- | --- | --- |
 | `format` | required | The section format: `3` for this page. |
-| `kind` | required | The product's kind: `"data"`, or `"structure"`, reserved for structure products (Phase 3). |
+| `kind` | required | The product's kind: `"data"`, or `"structure"` for a structure product, which holds full artefacts only (§3.2). |
 | `statcatlib_version` | required | The version of statcatlib that wrote the section. |
 | `datasets` | required | How many rows `statcat.dataset` holds. |
 | `search` | required | The search index: a `SearchSection`, or `null` when the edition has no `search/`. |
@@ -214,8 +220,27 @@ it reads, and statcatlib reads exactly `3`. A reader that only opens the
 catalog MAY ignore the section; `Product.view` does not read it.
 
 A `structure` edition holds full SDMX structures and no observations: a
-reader MUST refuse one whose manifest binds a dataflow to observations.
-statcatlib 0.12 seals `data` editions only.
+reader MUST refuse one whose manifest binds a dataflow to observations, or
+whose store holds a dataflow, a binding or a partial. statcatlib 0.12 seals
+`data` editions only; statcatlib 0.13 seals both.
+
+### 3.2 Structure products and the publish check
+
+A structure product (`Product.working_copy(kind="structure")`) holds one
+agency's full codelists, concept schemes, category schemes and hierarchies,
+copied by selection with `WorkingCopy.fill_structures`. Its leaf records
+`kind: "structure"`, and so does its section. A product keeps the kind it
+was first recorded with.
+
+A structure edition's references may name artefacts another structure
+product holds (sharded catalog specification §6.5 item 9). Its seal
+therefore runs `check_edition(at="publish", structures=[...],
+extensions={"statcat": check_catalog})` after sdmxlib's seal and before the
+Inventory commit, given the live and embargoed editions of the catalog's
+other structure products. `Catalog.seal` gives each structure edition of a
+batch the batch's other structure editions in place of their products'
+recorded ones. A finding leaves the edition sealed and unrecorded and raises
+`EditionCheckError`.
 
 ## 4. The search index
 
@@ -405,6 +430,7 @@ and otherwise reports every finding:
 | format | the section's `format` is `3` | stops |
 | kind | the section's `kind` is `data` or `structure` | stops |
 | structure bindings | a `structure` edition's manifest binds no dataflow | continues, one finding per binding |
+| structure content | a `structure` edition's store holds no dataflow, binding or partial (`structure_content`) | continues, one finding per artefact |
 | datasets | `statcat.dataset` holds the section's `datasets` | continues |
 | dataflow links | every `sdmx_dataflow_urn` names a stored dataflow | continues, one finding per dataset |
 | search present | `search/` holds an index exactly when the section declares one, and `index.json` exists | continues |
@@ -440,6 +466,12 @@ against the one the Inventory records, and refuses a mismatch with
    with embargo off, `embargoed` with it on. `CatalogAdmin.release` makes an
    embargoed edition live.
 5. Run `check_edition` on the result.
+
+A structure product's edition replaces step 2 with
+`wc.fill_structures(source, ...)` on a working copy from
+`working_copy(kind="structure")`, and step 4 refuses a dataflow, a binding or
+a partial before the seal and runs the publish check (§3.2) before the
+record.
 
 `statcatlib.testing.synthetic_catalog(path, shape, seed=...)` runs these
 steps over `sdmxlib.testing.synthetic_edition`, building a sealed statcat

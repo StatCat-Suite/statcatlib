@@ -129,15 +129,20 @@ with Catalog.open("catalog_dir") as cat:
   stays on that edition; a process that follows the live edition calls
   `view()` again. A product with no live edition raises
   `NoLiveEditionError`.
-- `Product.working_copy(*, lifecycle="revisable", resume=False,
+- `Product.working_copy(*, kind=None, lifecycle="revisable", resume=False,
   embedding_model=None, document_prefix="", query_prefix="")` returns a
   `WorkingCopy`. On a catalog from `open` it raises `RuntimeError`. A
   product with an unsealed edition raises `WorkingCopyExistsError` unless
   `resume=True`, and one recorded with another lifecycle raises
-  `InventoryRuleError(rule="lifecycle")`.
+  `InventoryRuleError(rule="lifecycle")`. `kind` is `"data"` or
+  `"structure"`; `None` takes the recorded kind (`statcat._meta.product_kind`
+  on a resume), or `"data"` for a new product. Another kind than the
+  recorded one raises `InventoryRuleError(rule="kind")` before the build.
 - `WorkingCopy` holds the write methods: `put`, `put_concept`,
-  `add_lineage`, `add_language_alternates`, `bulk_load`, `transaction` and
-  `build_index`. `wc.registry` is the edition's writable
+  `add_lineage`, `add_language_alternates`, `bulk_load`, `transaction`,
+  `build_index` and, on a structure product's, `fill_structures`
+  (`sdmxlib.edition.fill_structures`: full artefacts by family, agency, id
+  pattern and URN). `wc.registry` is the edition's writable
   `sdmxlib.LocalRegistry`: structures through `ingest`, observations through
   `write_observations`. `wc.view()` reads the working copy's own writes.
   `seal(checks=())` returns an `Edition`, `close()` leaves the edition
@@ -340,29 +345,41 @@ Inventory and seals editions:
   `fast-forward` refusal becomes `NonFastForwardError`. `Catalog.create`
   refuses a filesystem without hard links.
 - **Seal steps.** `WorkingCopy.seal(checks=())` settles the journal; runs
-  the checks against `wc.view()` (a finding raises `SealCheckError` and
-  leaves the working copy open); raises `NonFastForwardError` when its base
-  is no longer the live edition; rebuilds the search index from the
-  edition's rows and drops the carried tables; computes the `statcat`
-  section with `catalog_section(store)`; closes the store and registry;
-  calls `sdmxlib.edition.seal`, which writes the journal entry and then the
-  manifest; records the edition in one Inventory commit, live when the
-  catalog's embargo is off; and clears the journal entry.
+  the checks against `wc.view()`, and on a structure working copy
+  `bundle.structure_content` (a dataflow, binding or partial); a finding
+  raises `SealCheckError` and leaves the working copy open; raises
+  `NonFastForwardError` when its base is no longer the live edition;
+  rebuilds the search index from the edition's rows and drops the carried
+  tables; computes the `statcat` section with
+  `catalog_section(store, kind=...)`; closes the store and registry; calls
+  `sdmxlib.edition.seal`, which writes the journal entry and then the
+  manifest; on a structure edition runs the publish check
+  (`check_edition(at="publish", structures=...)` with `check_catalog`,
+  given the other structure products' live and embargoed editions; a
+  finding raises `EditionCheckError` and leaves the edition unrecorded);
+  records the edition in one Inventory commit, live when the catalog's
+  embargo is off; and clears the journal entry.
 - **The batched seal.** `Catalog.seal(working_copies, *, checks=())` runs
-  those steps for one working copy per product in three passes: every
-  pre-check (journal, checks, fast-forward) before any sdmxlib seal, then
-  each seal, then one Inventory commit that leaves out each product sdmxlib's
-  rules refuse. It returns `SealOutcomes(sealed, refused)`, keyed by product
-  id. A crash during a batch can leave its products recorded across several
-  versions, each by its product's next `working_copy()`.
+  those steps for one working copy per product in four passes: the
+  structure pass (pre-check, then seal, each structure working copy); the
+  structure-check pass (each structure edition's publish check, given the
+  batch's other structure editions in place of their products' recorded
+  ones, repeated until it drops none); the data pass (every data pre-check
+  before any data seal); then one Inventory commit that leaves out each
+  product sdmxlib's rules refuse, and each structure edition whose check was
+  given a left-out one. It returns `SealOutcomes(sealed, refused)`, keyed by
+  product id. A crash during a batch can leave its products recorded across
+  several versions, each by its product's next `working_copy()`.
 - **The journal rule.** `settle_journal` (`store/working_copy.py`; its
   module docstring has the table) runs when a working copy starts or
   resumes, at the start of a seal and after its record. Against the newest
   root it clears an entry whose edition the root names or tombstones, or
-  whose edition has no manifest; it records a sealed, unrecorded edition and
-  clears the entry; it clears the entry of a refused record with a WARNING;
-  and it keeps the entry on `InventoryContentionError`. An unreadable entry
-  raises `JournalError`.
+  whose edition has no manifest; it records a sealed, unrecorded edition
+  with the kind its manifest's `statcat` section names, after a structure
+  edition's publish check passes, and clears the entry; it clears the entry
+  of a refused record or a failed check with a WARNING; and it keeps the
+  entry on `InventoryContentionError`. An unreadable entry raises
+  `JournalError`.
 - **One seal per edition.** A product has one working copy at a time, and
   each working copy seals once into one edition. Nothing writes to a sealed edition: a
   `_Store` over one is not writable, every write method (`add_lineage`
@@ -386,13 +403,15 @@ Inventory and seals editions:
   tombstone. It returns a `PruneReport`.
 - **Section format 3.** The manifest's `statcat` section
   (`bundle.STATCAT_SECTION_FORMAT`) holds `format`, `kind`,
-  `statcatlib_version`, `datasets` and `search`. `kind` is `"data"`;
-  `"structure"` is reserved for Phase 3, and `check_catalog` refuses a
-  structure edition that binds a dataflow to observations. `check_catalog`
-  runs as the `statcat` extension of `sdmxlib.edition.check_edition`.
+  `statcatlib_version`, `datasets` and `search`. `kind` is `"data"` or
+  `"structure"`, and `check_catalog` refuses a structure edition that binds
+  a dataflow to observations or holds a dataflow, binding or partial
+  (`structure_content`). `check_catalog` runs as the `statcat` extension of
+  `sdmxlib.edition.check_edition`.
 
 `docs/catalog-format.md` specifies the layout and the section, and
-`docs/design/phase-2a-catalog-editions.md` is the design.
+`docs/design/phase-2a-catalog-editions.md` and
+`docs/design/phase-3-structure-products.md` are the designs.
 
 **Annotation overlays and search** — `build_index()` reads
 `SEARCH_ANNOTATION_TYPES` (`statcat:searchExclude`, `statcat:searchContext`,
