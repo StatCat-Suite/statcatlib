@@ -452,10 +452,13 @@ def verify_catalog(
     """Check a catalog's integrity: its Inventory and every edition it records.
 
     It reads the newest valid Inventory version and checks every leaf, every
-    manifest's SHA-256, and every file each manifest lists, the shared
-    ``data/`` files included (`statcatlib.diagnostics.verify_catalog`). It
-    writes nothing. It exits 0 when everything checks, 1 on any finding, each
-    printed with the file it names, and 2 when the catalog cannot be read.
+    manifest's SHA-256, every file each manifest lists, the shared ``data/``
+    files included, each partial against its structure edition, and each
+    structure edition's references (`statcatlib.diagnostics.verify_catalog`).
+    It writes nothing. It exits 0 when everything checks, 1 on any finding,
+    each printed with the file it names, and 2 when the catalog cannot be
+    read. Each stale data edition is printed as a ``STALE`` line, with the
+    fix; a stale edition is no finding, so it leaves the exit code alone.
     """
     try:
         report = diagnostics.verify_catalog(path)
@@ -467,10 +470,14 @@ def verify_catalog(
         return
     for finding in report.findings:
         _say(f"FAIL {finding}", style="red")
+    for stale in report.stale:
+        _say(f"STALE {stale}", style="yellow")
     summary = (
         f"Inventory version {report.seq}: {len(report.editions)} edition(s) checked, "
         f"{len(report.findings)} problem(s) found."
     )
+    if report.stale:
+        summary += f" {len(report.stale)} stale data edition item(s); republish each product named."
     if report.findings:
         _say(summary, style="red")
         raise typer.Exit(code=1)
@@ -485,7 +492,7 @@ def doctor(
 
     The report covers a synced-folder path, the layout, ``catalog.json``,
     ``CURRENT`` against the newest valid root, root and leaf validation,
-    unsealed editions with their start times, seal journal entries, sealed
+    stale data editions, unsealed editions with their start times, seal journal entries, sealed
     editions no Inventory version names, and files a writer staged in
     ``inventory/`` and left behind (`statcatlib.diagnostics.doctor`). It exits
     0 when it reports no warning and 1 when it reports one.

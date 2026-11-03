@@ -8,13 +8,16 @@ Two functions, each run by a ``statcat`` command:
   hold, the ``manifest_sha256`` the Inventory records. It then runs
   `sdmxlib.edition.check_edition` at the ``publish`` profile with
   `statcatlib.bundle.check_catalog`, which checks every file the manifest
-  lists, the shared ``data/`` files included. A catalog it cannot read at all
-  raises `CatalogUnreadableError`.
+  lists, the shared ``data/`` files included, each partial against the
+  structure edition it was cut from, and each structure edition's references
+  in the other structure products. It also lists the stale data editions
+  (specification §6.5 item 4), which are no finding. A catalog it cannot read
+  at all raises `CatalogUnreadableError`.
 - `doctor` (``statcat doctor PATH``) reports on a catalog for support: the
   layout, ``catalog.json``, ``CURRENT`` against the newest root, root and leaf
-  validation, unsealed editions, seal journal entries, sealed editions no
-  version names, files a writer staged and left behind, and a synced-folder
-  path.
+  validation, stale data editions, unsealed editions, seal journal entries,
+  sealed editions no version names, files a writer staged and left behind,
+  and a synced-folder path.
 
 Both only read. Neither repairs, records or deletes anything: the journal
 rule (`statcatlib.store.working_copy.settle_journal`) repairs a crashed seal
@@ -41,6 +44,7 @@ from sdmxlib.inventory import (
 
 from statcatlib.bundle import STATCAT_SECTION, check_catalog
 from statcatlib.catalog import _refuse_legacy_layout
+from statcatlib.store.cross_product import StaleEdition, stale_editions
 from statcatlib.store.inventory import InventoryWriter
 from statcatlib.store.store import IncompatibleCatalogError
 from statcatlib.store.working_copy import manifest_sha256
@@ -51,10 +55,13 @@ if TYPE_CHECKING:
     from sdmxlib.edition import EditionInfo, Finding, JournalEntry
     from sdmxlib.inventory import LeafEntry
 
+    from statcatlib.store.cross_product import Artefacts
+
 __all__ = [
     "CatalogUnreadableError",
     "DoctorItem",
     "DoctorReport",
+    "StaleEdition",
     "VerifyFinding",
     "VerifyReport",
     "doctor",
@@ -115,12 +122,19 @@ class VerifyReport:
             version yet, which has nothing to verify.
         editions: Each edition checked, as ``<product>/<edition_id>``.
         findings: Everything found wrong, in the order found.
+        stale: Each stale data edition, one item per edition and URN: a live
+            or embargoed data edition holding a copy of a structure that no
+            live or embargoed edition of its structure home holds
+            (specification §6.5 item 4). A stale edition is a state the
+            specification allows until its product is republished, so it is
+            no finding and leaves `ok` alone.
     """
 
     root: Path
     seq: int | None
     editions: tuple[str, ...]
     findings: tuple[VerifyFinding, ...]
+    stale: tuple[StaleEdition, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -134,8 +148,9 @@ class DoctorItem:
 
     Attributes:
         topic: What it is about: ``layout``, ``synced folder``,
-            ``catalog.json``, ``CURRENT``, ``inventory``, ``working copy``,
-            ``journal``, ``unrecorded edition`` or ``leftover file``.
+            ``catalog.json``, ``CURRENT``, ``inventory``,
+            ``stale data editions``, ``working copy``, ``journal``,
+            ``unrecorded edition`` or ``leftover file``.
         level: ``warning`` for something support acts on, ``info`` for state
             worth knowing.
         detail: The report.
@@ -238,8 +253,34 @@ def _edition_findings(edition_rel: str, findings: tuple[Finding, ...]) -> Iterat
             yield VerifyFinding(file=edition_rel, detail=f"[{finding.check}] {finding.subject}: {finding.detail}")
 
 
-def _verify_edition(root: Path, product_id: str, entry: LeafEntry) -> list[VerifyFinding]:
-    """Check one recorded edition: its manifest's SHA-256, then `check_edition` at ``publish``."""
+def _structures_for(full: FullInventory, root: Path, product_id: str) -> list[Path]:
+    """The structure editions an edition of *product_id* is verified with.
+
+    For a data product, every recorded edition of every structure product:
+    sdmxlib checks each partial against the edition with its ``partial_of``,
+    so a superseded data edition verifies against the superseded structure
+    edition it was cut from. For a structure product, the other structure
+    products' live and embargoed editions, where its references resolve.
+    """
+    structure = full.leaf(product_id).kind == "structure"
+    found: list[Path] = []
+    for other in full.products():
+        if other == product_id:
+            continue
+        with contextlib.suppress(InventoryError):
+            leaf = full.leaf(other)
+            if leaf.kind != "structure":
+                continue
+            found += [
+                root / "products" / other / e.edition_id
+                for e in leaf.editions
+                if not structure or e.state in {"live", "embargoed"}
+            ]
+    return found
+
+
+def _verify_edition(root: Path, product_id: str, entry: LeafEntry, structures: list[Path]) -> list[VerifyFinding]:
+    """Check one recorded edition: its manifest's SHA-256, then `check_edition` at ``publish`` with *structures*."""
     edition_rel = f"products/{product_id}/{entry.edition_id}"
     edition_dir = root / edition_rel
     manifest_rel = f"{edition_rel}/{MANIFEST_NAME}"
@@ -250,7 +291,9 @@ def _verify_edition(root: Path, product_id: str, entry: LeafEntry) -> list[Verif
     if digest != entry.manifest_sha256:
         detail = f"SHA-256 {digest}, the Inventory records {entry.manifest_sha256}"
         found.append(VerifyFinding(file=manifest_rel, detail=detail))
-    report = check_edition(edition_dir, at="publish", extensions={STATCAT_SECTION: check_catalog})
+    report = check_edition(
+        edition_dir, at="publish", structures=structures or None, extensions={STATCAT_SECTION: check_catalog}
+    )
     found += _edition_findings(edition_rel, report.findings)
     return found
 
@@ -266,7 +309,12 @@ def verify_catalog(path: str | Path) -> VerifyReport:
     ``check_edition(at="publish", extensions={"statcat": check_catalog})``,
     which checks the size and digests of every file the manifest lists,
     ``data/`` files included, the lake, the bindings and the ``statcat``
-    section. It writes nothing.
+    section. It gives the check the catalog's structure editions: for a data
+    edition every recorded structure edition, so each partial is checked
+    against the edition it was cut from; for a structure edition the other
+    structure products' live and embargoed editions, where its references
+    resolve. Last it lists the stale data editions (`VerifyReport.stale`).
+    It writes nothing.
 
     Args:
         path: The catalog directory.
@@ -292,10 +340,23 @@ def verify_catalog(path: str | Path) -> VerifyReport:
         except InventoryError as exc:
             findings.append(VerifyFinding(file=ref.leaf, detail=f"{product_id}'s leaf: {exc}"))
             continue
+        structures = _structures_for(full, root, product_id)
         for entry in leaf.editions:
             editions.append(f"{product_id}/{entry.edition_id}")
-            findings += _verify_edition(root, product_id, entry)
-    return VerifyReport(root=root, seq=full.root.seq, editions=tuple(editions), findings=tuple(findings))
+            findings += _verify_edition(root, product_id, entry, structures)
+    stale, unread = _stale(full, InventoryWriter(root).artefacts)
+    findings += unread
+    return VerifyReport(
+        root=root, seq=full.root.seq, editions=tuple(editions), findings=tuple(findings), stale=tuple(stale)
+    )
+
+
+def _stale(full: FullInventory, artefacts: Artefacts) -> tuple[list[StaleEdition], list[VerifyFinding]]:
+    """The stale data editions, or a finding when a manifest the list needs cannot be read."""
+    try:
+        return stale_editions(full, artefacts), []
+    except (ManifestError, InventoryError) as exc:
+        return [], [VerifyFinding(file="inventory", detail=f"the stale data editions cannot be listed: {exc}")]
 
 
 # -- doctor ------------------------------------------------------------------
@@ -443,6 +504,18 @@ def _editions(product_dir: Path, product_id: str, full: FullInventory | None) ->
             yield DoctorItem("unrecorded edition", "warning", detail)
 
 
+def _stale_items(root: Path, full: FullInventory) -> Iterator[DoctorItem]:
+    """One ``stale data editions`` warning per stale data edition and URN."""
+    stale, unread = _stale(full, InventoryWriter(root).artefacts)
+    for finding in unread:
+        yield DoctorItem("stale data editions", "warning", finding.detail)
+    for item in stale:
+        detail = str(item)
+        if item.state == "embargoed":
+            detail += "; its release is refused until then"
+        yield DoctorItem("stale data editions", "warning", detail)
+
+
 def _leftovers(root: Path) -> Iterator[DoctorItem]:
     """Files the Inventory writer staged and never linked or unlinked: in ``inventory/`` and the catalog root."""
     staged = sorted(root.glob(".*.tmp"))
@@ -458,7 +531,9 @@ def doctor(path: str | Path) -> DoctorReport:
 
     The report covers, in order: a synced-folder path (Dropbox, OneDrive,
     iCloud Drive or Google Drive), the layout, ``catalog.json``, ``CURRENT``
-    against the newest valid root, root and leaf validation, and for each
+    against the newest valid root, root and leaf validation, each stale data
+    edition (specification §6.5 item 4, with the fix: republish the
+    product), and for each
     product its unsealed editions with their start times, its seal journal
     entries (empty ones included), and its sealed editions that the newest
     version neither names nor tombstones. Last come files in ``inventory/``
@@ -492,7 +567,7 @@ def doctor(path: str | Path) -> DoctorReport:
     if full is None and not InventoryWriter(root).has_version():
         items.append(DoctorItem("inventory", "info", "no Inventory version yet; the first seal writes version 1"))
     elif full is not None:
-        items += [_current(root, full), *_inventory(full)]
+        items += [_current(root, full), *_inventory(full), *_stale_items(root, full)]
     products = root / "products"
     product_dirs = sorted(p for p in products.iterdir() if p.is_dir()) if products.is_dir() else []
     for product_dir in product_dirs:

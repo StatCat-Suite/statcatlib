@@ -24,7 +24,14 @@ skewed times.
 2a S4). It also deletes files: the directories of editions tombstoned longer
 than its window, and ``data/`` files no manifest on disk lists. It never
 touches a product with a working copy or a seal journal entry, and deletes no
-Inventory root or leaf.
+Inventory root or leaf. It keeps a structure edition that a live or embargoed
+data edition's ``partial_of`` cites (specification §11.4), so a stale data
+edition's partials still verify.
+
+`CatalogAdmin.release` and `CatalogAdmin.rollback` make an edition live, so
+the Inventory writer runs the cross-product rules on their version
+(`statcatlib.store.cross_product`): a refusal raises `CrossProductRuleError`
+and writes nothing.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from sdmxlib.storage.schema import SCHEMA_VERSION
 
 from statcatlib.bundle import ROOT_SECTION_FORMAT, STATCAT_SECTION, description_to_json
 from statcatlib.catalog import _refuse_legacy_layout
+from statcatlib.store.cross_product import cited_structures
 from statcatlib.store.inventory import Change, InventoryRuleError, InventoryWriter, NonFastForwardError
 
 if TYPE_CHECKING:
@@ -146,8 +154,21 @@ def _busy(product_dir: Path, tombstoned: Collection[str]) -> str | None:
     return None
 
 
-def _retirable(full: FullInventory | None, cutoff: datetime, skipped: Collection[str]) -> dict[str, list[str]]:
-    """The superseded and withdrawn editions that entered their state before *cutoff*, by product."""
+def _retirable(
+    full: FullInventory | None, cutoff: datetime, skipped: Collection[str], kept: Collection[tuple[str, str]]
+) -> dict[str, list[str]]:
+    """The superseded and withdrawn editions that entered their state before *cutoff*, by product.
+
+    Args:
+        full: The head, or ``None``.
+        cutoff: The window's start; older entries retire.
+        skipped: The products prune leaves alone.
+        kept: ``(product, edition)`` pairs to keep: the structure editions
+            a live or embargoed data edition's ``partial_of`` cites.
+
+    Returns:
+        The edition ids to retire, by product.
+    """
     if full is None:
         return {}
     found: dict[str, list[str]] = {}
@@ -157,7 +178,9 @@ def _retirable(full: FullInventory | None, cutoff: datetime, skipped: Collection
         ids = [
             e.edition_id
             for e in full.entries(product_id)
-            if e.state in {"superseded", "withdrawn"} and e.state_changed_at < cutoff
+            if e.state in {"superseded", "withdrawn"}
+            and e.state_changed_at < cutoff
+            and (product_id, e.edition_id) not in kept
         ]
         if ids:
             found[product_id] = ids
@@ -331,6 +354,13 @@ class CatalogAdmin:
                 other than *if_live* (``rule="if-live"``), or *to* is not a
                 superseded edition (``rule="state"`` or ``"unknown"``).
 
+        An edition made live that breaks a cross-product rule raises
+        `CrossProductRuleError` and writes nothing: a data edition cut from a
+        structure edition that is neither live nor embargoed
+        (``rule="full-artefacts"``), or a structure edition holding a full
+        artefact another structure product holds live
+        (``rule="structure-home"``).
+
         An empty *reason* raises `ValueError`. It acts on the live edition at
         this sdmxlib's store schema; rolling back another schema's live
         edition arrives in Phase 4.
@@ -363,6 +393,15 @@ class CatalogAdmin:
 
         Returns:
             The Inventory version written (``event.kind`` ``release``).
+
+        A release that breaks a cross-product rule raises
+        `CrossProductRuleError` and writes nothing: a data edition whose
+        partial or full artefact matches only an embargoed structure edition
+        (``rule="publish-order"``; release that one first); a stale data
+        edition, or one whose full artefact with no structure home differs
+        from another data product's live copy (``rule="full-artefacts"``); a
+        structure edition holding a full artefact another structure product
+        holds live (``rule="structure-home"``).
 
         An edition built on an edition that is no longer live raises
         `NonFastForwardError`, whose message names both and the fix. An edition
@@ -498,7 +537,11 @@ class CatalogAdmin:
         so is one with an edition whose manifest cannot be read. Prune
         deletes no Inventory root or leaf, never expires a tombstone, and
         never deletes an edition the Inventory does not tombstone, so a
-        live, embargoed or unrecorded edition stays. An edition retired in
+        live, embargoed or unrecorded edition stays. It never retires a
+        structure edition that a live or embargoed data edition's
+        ``partial_of`` cites (specification §11.4); when a manifest that
+        decision needs cannot be read, it retires no structure edition. An
+        edition retired in
         step 1 keeps its directory until a run after its tombstone has aged
         past the window.
 
@@ -596,12 +639,12 @@ class CatalogAdmin:
         """
         stones: tuple[Tombstone, ...] = () if full is None else full.root.retired
         if dry_run:
-            planned = _retirable(full, cutoff, skipped)
+            planned = _retirable(full, cutoff, skipped, self._cited(full))
             return [f"{p}/{e}" for p, ids in planned.items() for e in ids], None, stones
         retired: list[str] = []
 
         def change(head_now: FullInventory | None) -> Change:
-            planned = _retirable(head_now, cutoff, skipped)
+            planned = _retirable(head_now, cutoff, skipped, self._cited(head_now))
             if head_now is None or not planned:
                 raise _NothingToRetireError
             now = datetime.now(UTC)
@@ -621,6 +664,22 @@ class CatalogAdmin:
         except _NothingToRetireError:
             return [], None, stones
         return retired, written.seq, written.retired
+
+    def _cited(self, full: FullInventory | None) -> set[tuple[str, str]]:
+        """The structure editions prune keeps: those a live or embargoed data edition's ``partial_of`` cites.
+
+        When a manifest the answer needs cannot be read, every structure
+        edition is kept.
+        """
+        try:
+            return cited_structures(full, self._writer.artefacts)
+        except ManifestError as exc:
+            log.warning("prune keeps every structure edition: a manifest cannot be read (%s)", exc)
+            if full is None:
+                return set()
+            return {
+                (p, e.edition_id) for p in full.products() if full.leaf(p).kind == "structure" for e in full.entries(p)
+            }
 
     def _prune_data(
         self, product_dir: Path, cutoff: datetime, gone: Collection[str], *, dry_run: bool, failed: dict[str, str]
