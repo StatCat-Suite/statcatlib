@@ -6,7 +6,8 @@
     answered the open questions on 2026-11-02 (Recorded answers). Aligned on
     2026-11-03, before slice S3, with the specification as amended by
     StatCat-Suite/sdmxlib#355 (sdmxlib `dd0cdbdf`: §6.5 items 4, 7 and 8,
-    §8, §11.2 and §11.4) and with the owner's answers on S1.
+    §8, §11.2 and §11.4) and with the owner's answers on S1. Slices S1 to
+    S4 are built; S4 follows the owner's decisions on S3 (GH-121).
 *   **Date:** 2026-11-02
 *   **Issue:** GH-51. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#19.
@@ -486,6 +487,13 @@ stays at `publish`; the owner revisits `at="receive"`, which runs the partial
 and references checks with `structures=`, only if S2's measurement shows the
 check is slow (A2).
 
+From S4, on sdmxlib 0.84, the seal passes `fingerprints=False` (sdmxlib
+GH-357): the seal computed the manifest's fingerprints from this store a
+moment earlier, so the check skips recomputing them and still hashes every
+file. On the census edition sdmxlib measured the check at 46 s in place of
+774 s. The journal repair checks an edition another process sealed, and
+`verify-catalog` checks recorded editions; both recompute.
+
 ### The cross-product rules
 
 `src/statcatlib/store/cross_product.py` (new) holds pure functions:
@@ -759,10 +767,23 @@ the manifests:
   embargoed edition's item is level `warning` and says its release is
   refused until the republish.
 
-One report waits for slice S4, which the owner may drop: a `verify-catalog`
-finding for a URN two structure products' live editions hold (a state only a
-writer other than statcatlib can produce). It calls `cross_product`
-functions.
+Slice S4 adds a `doctor` topic, `partials with no structure home`
+(owner decision 5 on GH-121). A structure product can drop a codelist that a
+live or embargoed data edition holds as a partial. The URN then has no
+structure home, so `stale_editions` skips it, and item 4 refuses the data
+edition's release. `cross_product.homeless_partials(full, artefacts)` lists
+each such partial (`HomelessPartial`: product, edition, state, URN and
+`partial_of`), and `doctor` reports each as a `warning`, live or embargoed,
+naming the product, the edition, the URN and the fix: seal a structure
+edition that holds the URN full and republish the product from it, or
+republish the product with `partials=False`. The item has its own topic,
+since `stale data editions` lists what specification §6.5 item 4 calls
+stale and `VerifyReport.stale` mirrors it. `verify-catalog` reports nothing
+new, and its exit code is unchanged.
+
+The first plan put a `verify-catalog` finding for a URN two structure
+products' live editions hold (a state only a writer other than statcatlib
+can produce) in S4. S4 leaves it for the owner to schedule.
 
 ### The CODR generator
 
@@ -996,7 +1017,7 @@ when the count changes, and runs `just docs-build`.
 | S1 | sdmxlib 0.83 pin; the product kind; `fill_structures`; `structure_content`; the batch's structure passes; the publish check for structure editions; `EditionCheckError`; the journal repair's kind and publish check | nothing |
 | S2 | `fill_dataflows`, `_meta.partial_of` and `fill_in_progress`, `ingest_dataflows`; the publish check for editions with partials; the partials the seal cannot vouch for; the CODR generator; the cost measurement | S1 |
 | S3 | `cross_product.py`; the rules in `commit`, the pre-check, the batch and the catalog-wide journal repair; `CrossProductRuleError`; `verify-catalog`'s `structures=` and its stale report; `doctor`'s `stale data editions`; `prune`'s guard | S2 |
-| S4 (optional) | `verify-catalog`'s second-home finding | S3 |
+| S4 | sdmxlib 0.84 pin; `fingerprints=False` on the seal's publish check; `doctor`'s `partials with no structure home` | S3 |
 
 ### Slice S1: the pin and structure products
 
@@ -1216,10 +1237,25 @@ when the count changes, and runs `just docs-build`.
 *   `docs/catalog-format.md` (the rules), `docs/api/admin.md`,
     `docs/upgrading.md`, `CLAUDE.md`, the `EGM.md` files.
 
-### Slice S4 (optional): reports
+### Slice S4: the sdmxlib 0.84 pin and the homeless-partial report
 
-*   `verify_catalog` adds a finding for a URN two structure products' live
-    editions hold. Tests in `tests/test_cli_verify_doctor.py`.
+Built. The owner set its scope in the decisions on GH-121.
+
+*   `pyproject.toml`: `sdmxlib>=0.84,<0.85`. sdmxlib 0.84 quotes the DuckDB
+    catalog name in the SQL it writes (sdmxlib GH-356); statcatlib compares
+    no plan or SQL string with a catalog name.
+*   `store/working_copy.py`: `publish_check(..., fingerprints=True)` passes
+    the flag to `check_edition`; `WorkingCopy._publish_check`, which the
+    seal and both passes of `Catalog.seal` call, passes `False`. The journal
+    repair calls `publish_check` with the default, and `verify_catalog`
+    calls `check_edition` with sdmxlib's default; both recompute.
+    `tests/test_structure_products.py::TestFingerprintRecompute`.
+*   `store/cross_product.py`: `HomelessPartial`, `homeless_partials`.
+    `diagnostics.py`: the `partials with no structure home` topic.
+    `tests/test_cross_product_rules.py::TestHomelessPartials` (unit) and
+    `tests/test_cross_product.py::TestHomelessPartials` (integration: a
+    live and an embargoed edition each get a warning, and a healthy catalog
+    none).
 
 ### As built in S3
 
@@ -1274,6 +1310,8 @@ tests, as restated against `41d4b88` and sdmxlib 0.83.0:
 | A full artefact with two structure homes is refused (item 7) | S3 | `test_cross_product.py` |
 | A data edition is refused `live` while its structure edition is not live, and released once it is (item 8) | S3 | `test_cross_product.py` (partials, and full artefacts with a home) |
 | A stale data edition stays live, is reported, and a stale embargoed one is refused at release (item 4) | S3 | `test_cross_product.py`, `test_cli_verify_doctor.py` |
+| A data edition whose partial's URN no structure edition holds full gets a `doctor` warning, live or embargoed | S4 | `test_cross_product.py`, `test_cross_product_rules.py` |
+| The seal's publish check skips the fingerprint recompute, and the journal repair and `verify-catalog` keep it | S4 | `test_structure_products.py` |
 | A republish of a data product through a working copy keeps its partials cut | S2 | `test_partials.py` |
 | A product generated with two tables vendors each shared partial once | S2 | `test_codr.py` |
 | Dropped: a structure edition with a binding fails `check_catalog` | — | Passes on main: `tests/test_bundle_manifest.py:113` (`test_a_structure_kind_with_bindings_is_refused`), run at `41d4b88` with sdmxlib 0.82.0 (2 passed with its companion, `:107`). S1 adds a sealed structure edition to the same file. |

@@ -130,9 +130,9 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   structure products' live and embargoed editions (every structure
   product's, for a data product), with each `batch` product's batch edition
   in their place. `publish_check(edition_dir, *, product_id, structures,
-  partials=())` runs `check_edition(at="publish", structures=...,
-  extensions={"statcat": check_catalog})`, passing `None` for an empty
-  list, adds a `partials` finding for each of *partials* when *structures*
+  partials=(), fingerprints=True)` runs `check_edition(at="publish",
+  structures=..., extensions={"statcat": check_catalog}, fingerprints=...)`,
+  passing `None` for an empty list, adds a `partials` finding for each of *partials* when *structures*
   is empty, and raises `EditionCheckError`. `cut_partials(manifest)` lists
   the partials a manifest records a `partial_of` for.
 - `PARTIAL_OF_KEY` (`"partial_of"`) and `FILL_IN_PROGRESS_KEY`
@@ -188,6 +188,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
 - `StaleEdition` and `stale_editions(full, artefacts)`: each live or
   embargoed data edition and URN whose fingerprint (a partial's
   `partial_of`) no live or embargoed edition of its structure home holds.
+- `HomelessPartial` and `homeless_partials(full, artefacts)`: each partial
+  of a live or embargoed data edition whose URN no live or embargoed
+  structure edition holds full, as after its home drops the URN.
+  `stale_editions` skips a URN with no home; item 4 refuses the edition's
+  release, and `doctor` warns.
 - `cited_structures(full, artefacts)`: the structure editions, any state, a
   live or embargoed data edition's `partial_of` cites (prune keeps them).
 - `ACTIVE` (`live`, `embargoed`), `CrossRule`.
@@ -291,7 +296,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
   partial the map does not name; on a structure edition, or one whose
   manifest lists a partial with `partial_of`, `_publish_check(structures,
   partials=...)` (step 5b; a finding raises `EditionCheckError` and leaves
-  the edition unrecorded);
+  the edition unrecorded). `_publish_check` passes `fingerprints=False`:
+  the seal just wrote the manifest's fingerprints from this store, so
+  sdmxlib skips recomputing them (sdmxlib GH-357) and still hashes every
+  file. The journal repair's `publish_check` and `verify_catalog` check an
+  edition another process sealed, and recompute;
   commit the record (`kind="seal"`, `_record_change`), live when the
   catalog's embargo is off, the cross-product rules running in `commit` (an
   edition the head records already with its `manifest_sha256`, by another
@@ -396,12 +405,12 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite). The cross-product rules: `tests/test_cross_product_rules.py` (unit,
   `refusals` over built leaves) and `tests/test_cross_product.py`
-  (integration: seals, batches, releases, rollbacks, stale editions, the
-  committed sabotage test). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`
+  (integration: seals, batches, releases, rollbacks, stale editions,
+  partials with no structure home, the committed sabotage test). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`
   and `tests/test_concurrent_seal.py`; the batched seal in
   `tests/test_catalog_model.py::TestBatchSeal`. Structure products, their
-  publish check, batch and journal repair:
-  `tests/test_structure_products.py`. Partials in data products
+  publish check (and which checks skip the fingerprint recompute), batch
+  and journal repair: `tests/test_structure_products.py`. Partials in data products
   (`fill_dataflows`, `_meta.partial_of`, the pre-check, the publish check,
   resume, batch and repair): `tests/test_partials.py`. Views:
   `tests/test_edition_view.py`. Embedding reuse:

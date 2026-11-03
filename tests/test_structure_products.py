@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 import sdmxlib as sl
-from sdmxlib.edition import Finding, read_manifest
+from sdmxlib.edition import Finding, check_edition, read_manifest
 from sdmxlib.inventory import FullInventory, local_fetch
 
 import statcatlib as sc
@@ -339,28 +339,29 @@ class TestBatch:
         assert _full(root).leaf("table").kind == "data"
 
 
+def _crash_before_the_check(root: Path, source: sl.EditionRegistry, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Seal structure-concepts and kill the writer after sdmxlib's seal, before the publish check."""
+
+    def killed(*_args: object, **_kwargs: object) -> None:
+        raise Killed
+
+    with monkeypatch.context() as mp, sc.Catalog.create(root, exist_ok=True) as cat:
+        mp.setattr(working_copy_module, "publish_check", killed)
+        wc = _structure_wc(cat, CONCEPTS_PRODUCT, source)
+        with pytest.raises(Killed):
+            wc.seal()
+    assert _journal(root, CONCEPTS_PRODUCT) == [f"{wc.edition_id}.json"]
+    return wc.edition_id
+
+
 class TestJournalRepair:
-    def _crash_before_the_check(self, root: Path, source: sl.EditionRegistry, monkeypatch: pytest.MonkeyPatch) -> str:
-        """Seal structure-concepts and kill the writer after sdmxlib's seal, before the publish check."""
-
-        def killed(*_args: object, **_kwargs: object) -> None:
-            raise Killed
-
-        with monkeypatch.context() as mp, sc.Catalog.create(root, exist_ok=True) as cat:
-            mp.setattr(working_copy_module, "publish_check", killed)
-            wc = _structure_wc(cat, CONCEPTS_PRODUCT, source)
-            with pytest.raises(Killed):
-                wc.seal()
-        assert _journal(root, CONCEPTS_PRODUCT) == [f"{wc.edition_id}.json"]
-        return wc.edition_id
-
     def test_the_next_working_copy_checks_and_records_it_as_a_structure_edition(
         self, root: Path, source: sl.EditionRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         with sc.Catalog.create(root) as cat:
             _seal_structure(cat, GEO_PRODUCT, source)
             _seal_structure(cat, CLASSIFICATIONS, source)
-        edition_id = self._crash_before_the_check(root, source, monkeypatch)
+        edition_id = _crash_before_the_check(root, source, monkeypatch)
         checked: list[Path] = []
         real = working_copy_module.publish_check
 
@@ -386,7 +387,7 @@ class TestJournalRepair:
     ) -> None:
         with sc.Catalog.create(root) as cat:
             _seal_structure(cat, GEO_PRODUCT, source)
-        edition_id = self._crash_before_the_check(root, source, monkeypatch)
+        edition_id = _crash_before_the_check(root, source, monkeypatch)
 
         with caplog.at_level(logging.WARNING), sc.Catalog.create(root, exist_ok=True) as cat:
             wc = cat.product(CONCEPTS_PRODUCT).working_copy(kind="structure")
@@ -397,3 +398,48 @@ class TestJournalRepair:
         assert "publish check" in caplog.text
         assert CONCEPTS_PRODUCT not in _full(root).products()
         assert _journal(root, CONCEPTS_PRODUCT) == []
+
+
+class TestFingerprintRecompute:
+    """The seal skips recomputing the fingerprints it just wrote; every other check recomputes them (sdmxlib GH-357)."""
+
+    @staticmethod
+    def _record(monkeypatch: pytest.MonkeyPatch, module: object) -> list[object]:
+        """Record the ``fingerprints`` argument of each `check_edition` call *module* makes."""
+        given: list[object] = []
+        real = check_edition
+
+        def recording(path: Path, **kwargs: Any) -> Any:
+            given.append(kwargs.get("fingerprints"))
+            return real(path, **kwargs)
+
+        monkeypatch.setattr(module, "check_edition", recording)
+        return given
+
+    def test_the_seal_and_the_batched_seal_skip_it(
+        self, root: Path, source: sl.EditionRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        given = self._record(monkeypatch, working_copy_module)
+        with sc.Catalog.create(root) as cat:
+            _seal_structure(cat, GEO_PRODUCT, source)
+            outcomes = cat.seal([_structure_wc(cat, p, source) for p in (CLASSIFICATIONS, CONCEPTS_PRODUCT)])
+
+        assert outcomes.refused == {}
+        assert given == [False, False, False]
+
+    def test_the_journal_repair_and_verify_catalog_recompute_it(
+        self, root: Path, source: sl.EditionRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with sc.Catalog.create(root) as cat:
+            _seal_structure(cat, GEO_PRODUCT, source)
+            _seal_structure(cat, CLASSIFICATIONS, source)
+        _crash_before_the_check(root, source, monkeypatch)
+        repaired = self._record(monkeypatch, working_copy_module)
+        with sc.Catalog.create(root, exist_ok=True) as cat:
+            cat.product(CONCEPTS_PRODUCT).working_copy().discard()
+        verified = self._record(monkeypatch, diagnostics)
+
+        assert diagnostics.verify_catalog(root).ok
+
+        assert repaired == [True]
+        assert verified == [None, None, None], "None is sdmxlib's default: publish recomputes"

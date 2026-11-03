@@ -359,6 +359,38 @@ class TestStale:
         assert (caught.value.rule, caught.value.urn) == ("full-artefacts", GEO_URN)
 
 
+class TestHomelessPartials:
+    """A data edition whose partial's URN its structure home dropped: no stale edition, a doctor warning (GH-51, S4)."""
+
+    TOPIC = "partials with no structure home"
+
+    def test_a_healthy_catalog_gets_no_item(self, root: Path) -> None:
+        assert diagnostics.doctor(root).about(self.TOPIC) == ()
+
+    def test_a_live_and_an_embargoed_edition_each_get_a_warning(self, root: Path) -> None:
+        live = _live(root, TABLE)
+        _set_embargo(root, on=True)
+        with sc.Catalog.create(root, exist_ok=True) as cat:
+            table = _table_wc(cat, TABLE, _edited()).seal()
+            wc = cat.product(CLASSIFICATIONS).working_copy()
+            assert wc.registry.drop(sl.SdmxUrn.parse(CLASS_URN))
+            dropped = wc.seal()
+        admin = CatalogAdmin.open(root)
+        admin.release(CLASSIFICATIONS, dropped.edition_id, reason=REASON)
+
+        report = diagnostics.doctor(root)
+
+        items = report.about(self.TOPIC)
+        assert [item.level for item in items] == ["warning", "warning"]
+        assert [item.detail.split(" ", 1)[0] for item in items] == [f"{TABLE}/{live}", f"{TABLE}/{table.edition_id}"]
+        assert all(CLASS_URN in item.detail and "partials=False" in item.detail for item in items)
+        assert "its release is refused" in items[1].detail
+        assert diagnostics.verify_catalog(root).stale == (), "a URN with no structure home is not stale"
+        with pytest.raises(sc.CrossProductRuleError, match="has no structure home") as caught:
+            admin.release(TABLE, table.edition_id, reason=REASON)
+        assert caught.value.urn == CLASS_URN
+
+
 class TestBatch:
     def test_a_structure_edit_and_a_table_cut_from_it_go_live_in_one_version(self, root: Path) -> None:
         seq = _full(root).seq

@@ -5,9 +5,9 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## 0.13.0: structure products, on sdmxlib 0.83
+## 0.13.0: structure products, on sdmxlib 0.84
 
-statcatlib requires `sdmxlib>=0.83,<0.84`. sdmxlib's
+statcatlib requires `sdmxlib>=0.84,<0.85`. sdmxlib's
 [upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists
 its own changes. No catalog is rebuilt: the store schema stays 2.52, the
 manifest 3.0, the Inventory 1.0, the `statcat` schema 2.2, the `statcat`
@@ -122,7 +122,10 @@ product is republished, and a stale embargoed edition is refused at release.
 `statcat verify-catalog` prints each as a `STALE` line
 (`VerifyReport.stale`, of `statcatlib.diagnostics.StaleEdition`) without
 counting it as a finding, and `statcat doctor` reports it under
-`stale data editions`. `verify-catalog` also checks each data edition's
+`stale data editions`. `statcat doctor` also warns, under `partials with no
+structure home`, about each data edition holding a partial whose URN no
+structure edition holds full any more; item 4 refuses its release.
+`verify-catalog` also checks each data edition's
 partials against the structure editions they were cut from, and each
 structure edition's references in the other structure products' live and
 embargoed editions. `CatalogAdmin.prune` keeps a structure edition that a

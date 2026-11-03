@@ -364,7 +364,9 @@ Inventory and seals editions:
   and SHA); a partial with no `partial_of` is skipped. Stale data editions
   (live or embargoed, holding a copy no live or embargoed home edition
   holds) are allowed and derived, never recorded: `stale_editions` lists
-  them for `verify-catalog` and `doctor`. `cross_product` imports only
+  them for `verify-catalog` and `doctor`. `homeless_partials` lists, for
+  `doctor`'s `partials with no structure home` warning, each partial of a
+  live or embargoed data edition whose URN no structure edition holds full. `cross_product` imports only
   sdmxlib; `refusals` returns `Refusal` values, which the writer turns into
   `CrossProductRuleError` (defined in `store/inventory.py`).
 - **Seal steps.** `WorkingCopy.seal(checks=())` settles the journal; runs
@@ -385,8 +387,11 @@ Inventory and seals editions:
   the URNs the store holds as partials, which writes the journal entry and
   then the manifest; on a structure edition, or one whose manifest lists a
   partial with `partial_of`, runs the publish check
-  (`check_edition(at="publish", structures=...)` with `check_catalog`,
-  given the other structure products' live and embargoed editions; a
+  (`check_edition(at="publish", structures=..., fingerprints=False)` with
+  `check_catalog`, given the other structure products' live and embargoed
+  editions; `fingerprints=False` skips recomputing the fingerprints the
+  seal just wrote, where the journal repair and `verify-catalog` recompute
+  them; a
   partial with no structure edition in the catalog is a finding; a finding
   raises `EditionCheckError` and leaves the edition unrecorded); records
   the edition in one Inventory commit, live when the catalog's embargo is
@@ -695,7 +700,7 @@ stating it.
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
-  caps each suite dependency below its next minor (`sdmxlib>=0.83,<0.84`),
+  caps each suite dependency below its next minor (`sdmxlib>=0.84,<0.85`),
   and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.

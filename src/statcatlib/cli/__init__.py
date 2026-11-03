@@ -492,7 +492,8 @@ def doctor(
 
     The report covers a synced-folder path, the layout, ``catalog.json``,
     ``CURRENT`` against the newest valid root, root and leaf validation,
-    stale data editions, unsealed editions with their start times, seal journal entries, sealed
+    stale data editions, partials with no structure home, unsealed editions with their start
+    times, seal journal entries, sealed
     editions no Inventory version names, and files a writer staged in
     ``inventory/`` and left behind (`statcatlib.diagnostics.doctor`). It exits
     0 when it reports no warning and 1 when it reports one.
