@@ -86,7 +86,8 @@ class SealOutcomes:
             `InventoryRuleError` from sdmxlib's rules leaves the working copy
             open; a `ManifestError` closes it, and
             ``working_copy(resume=True)`` reopens it. An `EditionCheckError`
-            from a structure edition's publish check, or an
+            from the publish check of a structure edition or of an edition
+            with partials, or an
             `InventoryRuleError` at record time, leaves the sealed edition on
             disk unrecorded, and an `InventoryContentionError` at record time
             leaves it for the product's next ``working_copy()`` to record.
@@ -201,7 +202,11 @@ def _seal_each(
        their products' recorded ones. An edition with a finding is dropped,
        and the pass repeats for the rest until a pass drops none, since a
        reference may have resolved only in a dropped edition.
-    3. Data: pre-check every data working copy, then seal each that passed.
+    3. Data: pre-check every data working copy, then seal each that passed,
+       then run the publish check of each data edition whose partials
+       record a ``partial_of``, given every structure product's live and
+       embargoed editions with the batch's structure editions in their
+       place.
 
     Args:
         writer: The catalog's Inventory writer.
@@ -216,7 +221,7 @@ def _seal_each(
     structures = _seal_ready([wc for wc in batch if wc.kind == "structure"], checks, refused)
     checked = _check_structures(writer, structures, refused)
     data = _seal_ready([wc for wc in batch if wc.kind != "structure"], checks, refused)
-    return [*checked, *data]
+    return [*checked, *_check_partials(writer, data, checked, refused)]
 
 
 def _seal_ready(
@@ -278,6 +283,44 @@ def _check_structures(
     return surviving
 
 
+def _check_partials(
+    writer: InventoryWriter, sealed: list[_BatchSealed], structures: list[_BatchSealed], refused: dict[str, Exception]
+) -> list[_BatchSealed]:
+    """The data pass's publish check: each sealed data edition whose partials record a ``partial_of``.
+
+    Args:
+        writer: The catalog's Inventory writer.
+        sealed: The batch's sealed data editions.
+        structures: The batch's structure editions that passed their check.
+        refused: Filled with each dropped product's `EditionCheckError`.
+
+    Returns:
+        The editions that passed or needed no check, each checked one with the
+        batch structure editions it was given.
+    """
+    full = writer.full()
+    given = {
+        done.wc.product_id: writer.root / "products" / done.wc.product_id / done.wc.edition_id for done in structures
+    }
+    kept: list[_BatchSealed] = []
+    for done in sealed:
+        if not done.sealed.partials:
+            kept.append(done)
+            continue
+        product_id = done.wc.product_id
+        try:
+            done.wc._publish_check(
+                structure_editions(full, writer.root, product_id=product_id, batch=given),
+                partials=done.sealed.partials,
+            )
+        except EditionCheckError as exc:
+            done.wc._unrecorded(exc)
+            refused[product_id] = exc
+        else:
+            kept.append(_BatchSealed(wc=done.wc, sealed=done.sealed, given=frozenset(given)))
+    return kept
+
+
 def _dropped_with(done: _BatchSealed, lost: _BatchSealed, exc: Exception) -> EditionCheckError:
     """The error of *done*, whose publish check was given *lost*'s edition, which was refused at record time."""
     finding = Finding(
@@ -293,7 +336,7 @@ def _drop_dependents(
     leaves: dict[str, Leaf],
     at_record: dict[str, InventoryRuleError | EditionCheckError],
 ) -> None:
-    """Move each structure edition whose publish check was given a refused one from *leaves* to *at_record*.
+    """Move each edition whose publish check was given a refused structure edition from *leaves* to *at_record*.
 
     Repeats until a pass moves none, since a dropped edition can have been
     given to another.
@@ -316,8 +359,7 @@ def _record_batch(
     """`Catalog.seal`'s last pass: record every sealed edition sdmxlib's rules accept, in one commit.
 
     A structure edition refused at record time also drops each batch
-    structure edition whose publish check was given it, until a pass drops
-    none.
+    edition whose publish check was given it, until a pass drops none.
 
     Args:
         writer: The catalog's Inventory writer.
@@ -574,10 +616,12 @@ class Catalog:
         products' recorded ones, and drops each edition with a finding until
         a pass drops none. The data pass pre-checks every data product's
         working copy before any of them is sealed, then seals each that
-        passed. Last it records every sealed edition in one Inventory commit,
-        leaving out each product whose record sdmxlib's rules refuse, and each
-        structure edition whose publish check was given a left-out one. A
-        refusal in one product never stops another's seal.
+        passed, and runs the publish check of each data edition with
+        partials, given the batch's structure editions in place of their
+        products' recorded ones. Last it records every sealed edition in one
+        Inventory commit, leaving out each product whose record sdmxlib's
+        rules refuse, and each edition whose publish check was given a
+        left-out one. A refusal in one product never stops another's seal.
 
         A crash during the batch can leave its products recorded across
         several Inventory versions: each sealed, unrecorded edition keeps its
