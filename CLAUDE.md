@@ -60,7 +60,7 @@ src/
     │   └── xhtml.py         # XHTML → markdown for reference metadata
     ├── sources/        # Connectors that ingest into the catalog
     │   ├── __init__.py
-    │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_data()
+    │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_dataflows(); ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
     ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune
     │   └── __init__.py
@@ -71,7 +71,7 @@ src/
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
     ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog
-    ├── testing.py      # temporary_catalog(); synthetic_catalog() -> a sealed Edition
+    ├── testing.py      # temporary_catalog(); synthetic_catalog(); the CODR generator (codr_structures, codr_product)
     ├── urn.py          # Convenience URN builders for SDMX artefacts
     └── __init__.py     # Public API re-exports
 ```
@@ -140,9 +140,13 @@ with Catalog.open("catalog_dir") as cat:
   recorded one raises `InventoryRuleError(rule="kind")` before the build.
 - `WorkingCopy` holds the write methods: `put`, `put_concept`,
   `add_lineage`, `add_language_alternates`, `bulk_load`, `transaction`,
-  `build_index` and, on a structure product's, `fill_structures`
+  `build_index`; on a structure product's, `fill_structures`
   (`sdmxlib.edition.fill_structures`: full artefacts by family, agency, id
-  pattern and URN). `wc.registry` is the edition's writable
+  pattern and URN); and on a data product's, `fill_dataflows`
+  (`sdmxlib.edition.fill_edition`: dataflow closures and observations, each
+  codelist cut to a partial, the map of cuts merged into
+  `statcat._meta.partial_of` between two writes of
+  `statcat._meta.fill_in_progress`). `wc.registry` is the edition's writable
   `sdmxlib.LocalRegistry`: structures through `ingest`, observations through
   `write_observations`. `wc.view()` reads the working copy's own writes.
   `seal(checks=())` returns an `Edition`, `close()` leaves the edition
@@ -345,29 +349,36 @@ Inventory and seals editions:
   `fast-forward` refusal becomes `NonFastForwardError`. `Catalog.create`
   refuses a filesystem without hard links.
 - **Seal steps.** `WorkingCopy.seal(checks=())` settles the journal; runs
-  the checks against `wc.view()`, and on a structure working copy
-  `bundle.structure_content` (a dataflow, binding or partial); a finding
-  raises `SealCheckError` and leaves the working copy open; raises
-  `NonFastForwardError` when its base is no longer the live edition;
-  rebuilds the search index from the edition's rows and drops the carried
-  tables; computes the `statcat` section with
+  the checks against `wc.view()`, on a structure working copy
+  `bundle.structure_content` (a dataflow, binding or partial), and on a data
+  working copy `unvouched_partials` (a fill that stopped before its record,
+  or a partial cut outside `fill_dataflows` that would carry the previous
+  manifest's `partial_of`); a finding raises `SealCheckError` and leaves the
+  working copy open; raises `NonFastForwardError` when its base is no
+  longer the live edition; rebuilds the search index from the edition's
+  rows and drops the carried tables; computes the `statcat` section with
   `catalog_section(store, kind=...)`; closes the store and registry; calls
-  `sdmxlib.edition.seal`, which writes the journal entry and then the
-  manifest; on a structure edition runs the publish check
+  `sdmxlib.edition.seal(partial_of=...)` with `_meta.partial_of` kept to
+  the URNs the store holds as partials, which writes the journal entry and
+  then the manifest; on a structure edition, or one whose manifest lists a
+  partial with `partial_of`, runs the publish check
   (`check_edition(at="publish", structures=...)` with `check_catalog`,
   given the other structure products' live and embargoed editions; a
-  finding raises `EditionCheckError` and leaves the edition unrecorded);
-  records the edition in one Inventory commit, live when the catalog's
-  embargo is off; and clears the journal entry.
+  partial with no structure edition in the catalog is a finding; a finding
+  raises `EditionCheckError` and leaves the edition unrecorded); records
+  the edition in one Inventory commit, live when the catalog's embargo is
+  off; and clears the journal entry.
 - **The batched seal.** `Catalog.seal(working_copies, *, checks=())` runs
   those steps for one working copy per product in four passes: the
   structure pass (pre-check, then seal, each structure working copy); the
   structure-check pass (each structure edition's publish check, given the
   batch's other structure editions in place of their products' recorded
   ones, repeated until it drops none); the data pass (every data pre-check
-  before any data seal); then one Inventory commit that leaves out each
-  product sdmxlib's rules refuse, and each structure edition whose check was
-  given a left-out one. It returns `SealOutcomes(sealed, refused)`, keyed by
+  before any data seal, then the publish check of each data edition with
+  partials, given the batch's structure editions in place of their
+  products' recorded ones); then one Inventory commit that leaves out each
+  product sdmxlib's rules refuse, and each edition whose check was given a
+  left-out one. It returns `SealOutcomes(sealed, refused)`, keyed by
   product id. A crash during a batch can leave its products recorded across
   several versions, each by its product's next `working_copy()`.
 - **The journal rule.** `settle_journal` (`store/working_copy.py`; its
@@ -375,8 +386,9 @@ Inventory and seals editions:
   resumes, at the start of a seal and after its record. Against the newest
   root it clears an entry whose edition the root names or tombstones, or
   whose edition has no manifest; it records a sealed, unrecorded edition
-  with the kind its manifest's `statcat` section names, after a structure
-  edition's publish check passes, and clears the entry; it clears the entry
+  with the kind its manifest's `statcat` section names, after the publish
+  check of a structure edition or of an edition with partials passes, and
+  clears the entry; it clears the entry
   of a refused record or a failed check with a WARNING; and it keeps the
   entry on `InventoryContentionError`. An unreadable entry raises
   `JournalError`.
@@ -518,6 +530,15 @@ Under the hood:
 
 `ingest_data(wc, reg, identifier)` writes one dataflow's observations through
 `wc.registry.write_observations` into the edition's DuckLake.
+
+`ingest_dataflows(wc, source, dataflows, *, observations=None,
+partials=True)` is the partial path: `wc.fill_dataflows` copies each
+dataflow's closure and observations and cuts each codelist to the codes the
+product uses, then it stores a dataset for each given dataflow. Every cut
+codelist needs a structure home (design D11, enforced in Phase 3's S3). Fill
+a data product through `fill_dataflows` or `ingest_dataflows`, never with
+`sdmxlib.edition.fill_edition` on `wc.registry`: the map of cuts the seal
+passes as `partial_of` is kept only by `fill_dataflows`.
 
 Where statcatlib uses sdmxlib:
 

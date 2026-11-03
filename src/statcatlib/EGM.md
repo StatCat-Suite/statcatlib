@@ -62,11 +62,13 @@ and test catalogs (`testing.py`).
     copy), the structure-check pass (`_check_structures`: each structure
     edition's `_publish_check`, given the batch's other structure editions,
     repeated until it drops none) and the data pass (every data
-    `_precheck`, then each `_seal_edition`). `_record_batch` records every
+    `_precheck`, then each `_seal_edition`, then `_check_partials`: the
+    `_publish_check` of each data edition whose partials record a
+    `partial_of`, given every structure product's editions with the batch's
+    structure editions in their place). `_record_batch` records every
     sealed edition in one `InventoryWriter.commit`, leaving out each product
-    whose `_next_leaf` raises `InventoryRuleError`, and each structure
-    edition whose publish check was given a left-out one
-    (`_drop_dependents`). `RuntimeError` on a catalog from `open`.
+    whose `_next_leaf` raises `InventoryRuleError`, and each edition whose
+    publish check was given a left-out one (`_drop_dependents`). `RuntimeError` on a catalog from `open`.
   - `search` and `facets` raise `NotImplementedError` naming
     `product(id).view()`. `__getattr__` raises `AttributeError` naming
     `cat.product(id).view().<name>` for every name in
@@ -255,6 +257,24 @@ read.
   product's directory, resumes it as a working copy, stores one
   `AggregateDataset` per dataflow (`prepare_sdmx(wc.registry)`), and seals.
   The seal builds the search index when `statcatlib[search]` is installed.
+- The CODR generator (design decision O6): `CodrShape(geography_codes=6000,
+  geography_depth=5, classification_codes=(900, 500, 300),
+  observations=2000)`; `STRUCTURE_PRODUCTS` (`structure-geo`,
+  `structure-classifications`, `structure-concepts`); `CODR_AGENCY`;
+  `codr_structures(catalog, *, seed=0, shape=...) -> dict[str, Edition]`,
+  which builds the structures from the seed alone (agency `CODR`, version
+  `1.0`, names `"<id> en"` and `"<id> fr"`) into a scratch `LocalRegistry`,
+  fills the three structure working copies by URN and seals them in one
+  `Catalog.seal`, raising `RuntimeError` on a refusal; and `codr_product(catalog,
+  product_id, *, tables=1, seed=0, shape=...) -> Edition`, which seals the
+  structure products first unless all three are live, writes one DSD and
+  dataflow per table and the rows from `(seed, product_id)`, fills with
+  `ingest_dataflows(..., partials=True)`, indexes `CL_GEO`'s codes with an
+  `fts_only` `CodelistIndexPolicy` when lancedb is installed, and seals.
+  `structure-classifications` holds `CL_CLASS_*`, `CL_UNIT` and the
+  SDMX-agency `CL_OBS_STATUS`, so every codelist a table cuts has a
+  structure home (A5). The draws are SplitMix64 seeded by SHA-256, so they
+  do not depend on Python's `random`.
 
 ## Invariants
 

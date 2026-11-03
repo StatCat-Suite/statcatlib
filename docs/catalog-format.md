@@ -131,6 +131,17 @@ to string.
   new edition also drops the `partial_of` and `fill_in_progress` keys the
   previous edition's `metadata.duckdb` carries. Readers take the kind from
   the manifest's `statcat` section (§3); the `_meta` keys are the writer's.
+- `statcat._meta.partial_of` is a JSON object from a codelist URN to the
+  fingerprint of the full codelist `WorkingCopy.fill_dataflows` cut it from,
+  merged over every fill of the edition, the later fill's value winning. The
+  seal passes the entries whose URN `sdmx.artefact` holds as a partial to
+  `sdmxlib.edition.seal` as `partial_of`. The key stays in the sealed
+  `metadata.duckdb` and can name a URN the manifest lists as full; a reader
+  takes `partial_of` from the manifest's artefact entries.
+- `statcat._meta.fill_in_progress` holds the time a `fill_dataflows` call
+  started, and that call deletes it in the transaction that writes
+  `partial_of`. A working copy holding it refuses its seal, since its map
+  may miss a cut.
 - `statcat.language_alternate` records the language tags a source declares as
   alternates of a primary tag, such as `en-t-fr` for `en`, with the source,
   each tag lowercase as `sdmxlib.normalize_tag` spells it. Each alternate has
