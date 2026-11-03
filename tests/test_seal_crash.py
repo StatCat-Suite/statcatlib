@@ -180,7 +180,8 @@ def test_a_seal_on_a_base_no_longer_live_is_refused_before_the_manifest(tmp_path
     with sc.Catalog.create(root, exist_ok=True) as cat:
         wc = cat.product("p").working_copy()
         wc.put(_dataset("b"))
-        writer = InventoryWriter(root)
+        # The edition this writer records has no manifest on disk, so its rules read no artefacts.
+        writer = InventoryWriter(root, artefacts=lambda *_args: {})
 
         def supersede(full: FullInventory | None) -> Change:
             assert full is not None

@@ -9,9 +9,11 @@ names, and a file a writer staged in ``inventory/`` and left behind.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
+import attrs
 import polars as pl
 import pytest
 import sdmxlib
@@ -21,8 +23,9 @@ from sdmxlib.inventory import Current, encode, sha256_hex
 from typer.testing import CliRunner
 
 import statcatlib as sc
-from statcatlib import diagnostics
+from statcatlib import diagnostics, testing
 from statcatlib.cli import app
+from statcatlib.testing import STRUCTURE_PRODUCTS, CodrShape
 from tests.conftest import concept_of
 
 pytestmark = pytest.mark.unit
@@ -206,6 +209,11 @@ def broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str, 
         raise Killed
 
     with sc.Catalog.create(root, exist_ok=True) as cat:
+        # q's working copy starts first: a later start would repair p's
+        # crashed seal, since the journal repair is catalog-wide.
+        stale = cat.product("q").working_copy()
+        stale_id = stale.edition_id
+        stale.close()
         wc = cat.product("p").working_copy()
         wc.put(_dataset("b"))
         unrecorded = wc.edition_id
@@ -213,9 +221,6 @@ def broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str, 
             mp.setattr("sdmxlib.edition.seal", killed)
             with pytest.raises(Killed):
                 wc.seal()
-        stale = cat.product("q").working_copy()
-        stale_id = stale.edition_id
-        stale.close()
     journal = root / "products" / "r" / "journal"
     journal.mkdir(parents=True)
     (journal / "01a18e00-0000-7000-8000-000000000042.json").write_bytes(b"")
@@ -313,3 +318,113 @@ def test_doctor_on_a_catalog_with_no_inventory_version(tmp_path: Path) -> None:
 )
 def test_synced_folder(tmp_path: Path, parts: tuple[str, ...], client: str | None) -> None:
     assert diagnostics.synced_folder(tmp_path.joinpath(*parts)) == client
+
+
+# -- structure products and stale data editions (GH-51, S3) --------------------
+
+_SHAPE = CodrShape(geography_codes=200, geography_depth=3, classification_codes=(40, 20), observations=200)
+_SEED = 3
+_GEO_URN = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=CODR:CL_GEO(1.0)"
+_UNIT_URN = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=CODR:CL_UNIT(1.0)"
+
+
+class _Ahead:
+    """Stands in for `datetime` in `statcatlib.admin`, whose only call is ``datetime.now(UTC)``."""
+
+    def __init__(self, ahead: timedelta) -> None:
+        self.ahead = ahead
+
+    def now(self, tz: tzinfo | None = None) -> datetime:
+        return datetime.now(tz) + self.ahead
+
+
+def _seal_structure(
+    cat: sc.Catalog,
+    product_id: str,
+    artefacts: list[sdmxlib.MaintainableArtefact],
+    drop: list[sdmxlib.MaintainableArtefact] | None = None,
+) -> str:
+    """Seal a new edition of structure product *product_id* holding *artefacts*, without *drop*."""
+    held = [a for found in testing._structures(_SEED, _SHAPE).by_product().values() for a in found]
+    wc = cat.product(product_id).working_copy(kind="structure")
+    with testing._scratch([*held, *artefacts]) as scratch:
+        wc.fill_structures(scratch, artefacts=[a.urn for a in artefacts])
+    for artefact in drop or []:
+        wc.registry.drop(artefact.urn)
+    return wc.seal().edition_id
+
+
+@pytest.fixture
+def edited(tmp_path: Path) -> tuple[Path, str, str, str]:
+    """A generated catalog whose ``structure-geo`` was edited after table ``table-a`` was cut from it.
+
+    Returns:
+        The catalog, the stale table edition, the superseded ``structure-geo``
+        edition it was cut from, and the live one.
+    """
+    root = tmp_path / "catalog"
+    with sc.Catalog.create(root) as cat:
+        table = testing.codr_product(cat, "table-a", seed=_SEED, shape=_SHAPE).edition_id
+        cat.refresh()
+        (old,) = [e.edition_id for e in cat.product(STRUCTURE_PRODUCTS[0]).editions()]
+        structures = testing._structures(_SEED, _SHAPE)
+        added = sdmxlib.Code(id="GXTRA", name={"en": "added", "fr": "ajouté"})
+        geography = attrs.evolve(structures.geography, codes=[*structures.geography.codes, added])
+        new = _seal_structure(cat, STRUCTURE_PRODUCTS[0], [geography, structures.hierarchy])
+    return root, table, old, new
+
+
+def test_verify_lists_a_stale_data_edition_and_finds_nothing(edited: tuple[Path, str, str, str]) -> None:
+    root, table, old, new = edited
+    report = diagnostics.verify_catalog(root)
+
+    assert report.ok, report.findings
+    (stale,) = report.stale
+    assert (stale.product_id, stale.edition_id, stale.state, stale.urn) == ("table-a", table, "live", _GEO_URN)
+    manifest = sdmxlib.edition.read_manifest(root / "products" / STRUCTURE_PRODUCTS[0] / old)
+    assert stale.fingerprint == next(a.fingerprint for a in manifest.artefacts if a.urn == _GEO_URN)
+    assert (stale.home, stale.home_live) == (STRUCTURE_PRODUCTS[0], new)
+
+    code, out = _verify(root)
+    assert code == 0, out
+    assert f"STALE table-a/{table} (live) holds {_GEO_URN}" in out
+    assert f"(live edition: {new}); republish the product" in out
+
+
+def test_doctor_reports_a_stale_data_edition(edited: tuple[Path, str, str, str]) -> None:
+    root, table, _, _ = edited
+    (item,) = diagnostics.doctor(root).about("stale data editions")
+    assert item.level == "warning"
+    assert f"table-a/{table} (live)" in item.detail
+    assert "republish the product" in item.detail
+
+
+def test_prune_keeps_the_structure_edition_a_stale_table_was_cut_from(
+    edited: tuple[Path, str, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, old, _ = edited
+    monkeypatch.setattr("statcatlib.admin.datetime", _Ahead(timedelta(days=30)))
+
+    report = sc.CatalogAdmin.open(root).prune(older_than=timedelta(days=1), reason="reclaim disk", dry_run=False)
+
+    assert f"{STRUCTURE_PRODUCTS[0]}/{old}" not in report.retired
+    assert diagnostics.verify_catalog(root).ok
+
+
+def test_a_structure_reference_only_a_superseded_edition_resolves_is_a_finding(tmp_path: Path) -> None:
+    root = tmp_path / "catalog"
+    with sc.Catalog.create(root) as cat:
+        testing.codr_structures(cat, seed=_SEED, shape=_SHAPE)
+        structures = testing._structures(_SEED, _SHAPE)
+        _seal_structure(
+            cat, STRUCTURE_PRODUCTS[1], [*structures.classifications, structures.status], drop=[structures.unit]
+        )
+        cat.refresh()
+        (concepts,) = [e.edition_id for e in cat.product(STRUCTURE_PRODUCTS[2]).editions()]
+
+    report = diagnostics.verify_catalog(root)
+
+    assert not report.ok
+    assert any(
+        f.file == f"products/{STRUCTURE_PRODUCTS[2]}/{concepts}" and _UNIT_URN in f.detail for f in report.findings
+    ), report.findings

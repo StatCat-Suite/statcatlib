@@ -18,7 +18,7 @@ from sdmxlib import InternationalString
 from sdmxlib.model.in_memory_registry import InMemoryRegistry
 
 import statcatlib as sc
-from statcatlib.store import lance
+from statcatlib.store import cross_product, lance
 from statcatlib.store.store import SEARCH_ANNOTATION_TYPES, IncompatibleCatalogError, annotation_fingerprint
 from tests.conftest import concept_of
 
@@ -51,9 +51,17 @@ def _registry(label: str, *, excluded: bool) -> InMemoryRegistry:
 
 
 @pytest.fixture
-def two(tmp_path: Path) -> Iterator[tuple[sc.EditionView, sc.EditionView]]:
-    """Views of two products' editions, in one catalog and so one engine: the same URNs, other labels."""
+def two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[sc.EditionView, sc.EditionView]]:
+    """Views of two products' editions, in one catalog and so one engine: the same URNs, other labels.
+
+    Two live data editions holding one full artefact with two fingerprints
+    break specification §6.5 item 4, so the cross-product rules are turned
+    off while the fixture seals: names must resolve per edition whatever the
+    editions hold.
+    """
     root = tmp_path / "cat"
+    monkeypatch.setattr(cross_product, "refusals", lambda *_args: {})
+    monkeypatch.setattr(sc.WorkingCopy, "_cross_precheck", lambda _self: None)
     with sc.Catalog.create(root) as cat:
         for product, label, excluded in (("north", "Nord", False), ("south", "Sud", True)):
             wc = cat.product(product).working_copy()
@@ -66,6 +74,7 @@ def two(tmp_path: Path) -> Iterator[tuple[sc.EditionView, sc.EditionView]]:
                 )
             )
             wc.seal()
+    monkeypatch.undo()
     with sc.Catalog.open(root) as cat:
         yield cat.product("north").view(), cat.product("south").view()
 
