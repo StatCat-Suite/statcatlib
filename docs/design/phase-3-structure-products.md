@@ -1,9 +1,9 @@
 # Phase 3: structure products and partial codelists
 
 *   **Author:** Gabriel Gellner
-*   **Status:** Draft for the owner's review. The EGM review (five reviewers,
-    one resolution round) is in `docs/design/egm/phase-3-structure-products/`.
-    Code waits for the owner's approval.
+*   **Status:** Accepted. The EGM review (five reviewers, one resolution
+    round) is in `docs/design/egm/phase-3-structure-products/`. The owner
+    answered the open questions on 2026-11-02 (Recorded answers).
 *   **Date:** 2026-11-02
 *   **Issue:** GH-51. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#19.
@@ -151,8 +151,8 @@ slice's test list covers its goals.
 *   **Routing fields** (`full_artefacts`, `dataflows`, `pull_bytes` in the
     leaf): Phase 4, plan Q7.
 *   **Writing the leaf's optional `artefacts` field.** RFC decision 25 has
-    the rules read manifests; Open Question 1 asks whether Phase 4 changes
-    that.
+    the rules read manifests; Phase 4 decides the field with the routing
+    fields (Recorded answers, A1).
 *   **The release job, `release_due` and `supersede_pending`**: Phase 5.
 *   **Catalog-level search over structure products** (specification §12):
     Phase 7. A structure edition's seal builds its per-edition search index
@@ -163,8 +163,6 @@ slice's test list covers its goals.
     the edition that drops it first (see Item 7).
 *   **Moving `ingest_sdmx` onto partials.** `ingest_sdmx` keeps copying an
     in-memory registry whole; `ingest_dataflows` is the partial path.
-*   **Comparing full artefacts across data products that have no structure
-    home** (Open Question 4).
 
 ## Decisions
 
@@ -179,7 +177,8 @@ Owner decisions of 2026-11-02, recorded on GH-51:
 | O5 | The pin becomes `sdmxlib>=0.83,<0.84`. | G1. |
 | O6 | The CODR generator is written in `statcatlib.testing`, with a seed and a tables-per-product parameter. Phase 4's corpus builds on it. | G8. |
 
-Settled by this design (each is a candidate for the owner's review):
+Settled by this design; the owner accepted each on 2026-11-02 (Recorded
+answers):
 
 | ID | Decision | Consequence |
 |---|---|---|
@@ -193,7 +192,7 @@ Settled by this design (each is a candidate for the owner's review):
 | D8 | An item-8 refusal under embargo off is raised by the pre-check, before sdmxlib's seal, so the working copy stays open. A refusal at the Inventory commit, after another writer changed the head, leaves the edition unrecorded, as a late fast-forward refusal does. | Settles case A of sdmxlib's plan. |
 | D9 | `Catalog.seal` seals and checks the batch's structure working copies first, then pre-checks, seals and checks each data working copy against them. The Inventory commit runs the rules on the whole version and drops refused products until a pass drops none. | Settles case B of sdmxlib's plan: a structure edition and its data editions go live in one version. |
 | D10 | Item 7 is checked as the specification states it: on entry to `live`, against the other structure products' live editions. | A second home under embargo is refused at its release. |
-| D11 | Every codelist `fill_edition` cuts needs a structure home. A partial whose URN no structure product holds is refused by the pre-check, naming the URN and the fix. | A producer puts every cut codelist (unit, status and scale codelists included) in a structure product, or fills with `partials=False`. Open Question 5. |
+| D11 | Every codelist `fill_edition` cuts needs a structure home. A partial whose URN no structure product holds is refused by the pre-check, naming the URN and the fix. | A producer puts every cut codelist (unit, status and scale codelists included) in a structure product, or fills with `partials=False`. Unit, status and SDMX-agency codelists get a home, mostly in `structure-classifications` (A5). |
 
 ## Critical User Journeys (CUJs)
 
@@ -465,9 +464,10 @@ tells the producer to start a new working copy from the live edition. In
 The check runs at `publish`, as O4 states: it re-hashes every file and
 recomputes every fingerprint. GH-248 measured a CODR seal at 1.6 s. Slice S2
 measures the check's addition on a generated product and on a census-sized
-edition (`$SDMXLIB_BENCH_BUNDLE`), and records both in its PR. Open Question
-2 asks whether `at="receive"`, which runs the partial and references checks
-with `structures=`, would do.
+edition (`$SDMXLIB_BENCH_BUNDLE`), and records both in its PR. The check
+stays at `publish`; the owner revisits `at="receive"`, which runs the partial
+and references checks with `structures=`, only if S2's measurement shows the
+check is slow (A2).
 
 ### The cross-product rules
 
@@ -488,7 +488,7 @@ def refusals(
 edition's artefacts as `sdmxlib.inventory.PartialRecord` values
 (`inventory/_format.py:182`): `fingerprint`, and `partial_of` for a partial.
 That is the type of the leaf's optional `LeafEntry.artefacts`, so Phase 4
-can swap the reader for the leaf field (Open Question 1). The result maps
+can swap the reader for the leaf field (A1). The result maps
 each refused product to its error.
 
 Two readers implement `Artefacts`:
@@ -524,6 +524,7 @@ edition replaces its own product's live edition at release. For each `e` in
 | 7 | `e` in a structure product, entering `live` | a full artefact of `e` is a full artefact of an entry of `S_live` in another product | `structure-home` |
 | 4 | `e` in a data product, full artefact `u` with fingerprint `f` | entries of `S` hold `u` full, and none with `f` | `full-artefacts` |
 | 4 | `e` in a data product, partial `u` with `partial_of` `f` | no entry of `S` holds `u` full with fingerprint `f` | `full-artefacts` |
+| 4 | `e` in a data product, full artefact `u` with fingerprint `f`, no entry of `S` holding `u` | an entry of `A` in another data product holds `u` full with another fingerprint | `full-artefacts` |
 | 8 | `e` in a data product entering `live`, partial `u` with `partial_of` `f` | an embargoed entry of `S` holds `u` with `f`, and no live one does | `publish-order` |
 
 `commit` skips `refusals` when the planned change has no incoming entry, so
@@ -625,9 +626,17 @@ republish. Under both refusals neither the edit nor the republish can go
 live. D7 makes the structure home authoritative: the structure edition is
 accepted, the data editions holding the old copy stay live and stale, and
 each republish must match the new home. Item 8 already treats partials this
-way: it holds back a data product "until that product is republished". Open
-Question 3 asks the owner to confirm D7 and to amend the specification's
-wording.
+way: it holds back a data product "until that product is republished". The
+owner accepted D7 (A3); the specification's wording is amended in
+StatCat-Suite/sdmxlib#354 before S3.
+
+A full artefact with no structure home, such as a DSD shared by two data
+products or an agency scheme, is compared across the data products that hold
+it, as item 4 states (A4). An incoming data edition whose copy differs from
+another data product's live or embargoed copy is refused with
+`full-artefacts`. An in-place edit at the source then blocks each product's
+republish until the products agree; the fix is a structure home for the
+artefact.
 
 #### Item 8 under embargo off (case A of sdmxlib's plan)
 
@@ -821,7 +830,7 @@ GH-51's body names `tests/support/codr.py`, which does not exist at
     RFC decision 25 assigns the rules to manifests.
 *   **Reason for Rejection**: the manifest cache bounds the reads to one per
     edition per writer process, and a Phase 3 test catalog holds tens of
-    entries. Phase 4 times the 7,000-entry read (Open Question 1).
+    entries. Phase 4 times the 7,000-entry read (A1).
 
 ### Alternative E: Run the publish check on every seal
 
@@ -858,46 +867,31 @@ GH-51's body names `tests/support/codr.py`, which does not exist at
 
 | Risk | Mitigation |
 |---|---|
+| A full artefact with no structure home, edited in place at the source, blocks the republish of every data product that holds it (A4) | The refusal names the URN and the editions; the fix is a structure home for the artefact |
 | A publish-check finding leaves a sealed edition unrecorded, and a rebuild costs a full ingest | The pre-check catches items 4, 7 and 8 before the seal. The remaining findings (a partial's codes, a structure reference) point at a producer error. `doctor` reports the unrecorded edition |
 | A 0.12 writer on a catalog with structure products records `kind: "data"` for a structure product (refused after sdmxlib's seal, so unrecorded) and applies none of the cross-product rules | `docs/upgrading.md`: write such a catalog with 0.13 only |
 | A caller fills `wc.registry` with `fill_edition` directly | The pre-check refuses a re-cut partial the map does not name (Partials the seal cannot vouch for). The guide names `fill_dataflows` |
-| A source's own unit, status or SDMX-agency codelists are cut and have no structure home | D11 refuses them with the fix in the message; Open Question 5 |
+| A source's own unit, status or SDMX-agency codelists are cut and have no structure home | D11 refuses them with the fix in the message; the producer gives them a home, mostly in `structure-classifications` (A5) |
 | A stale data edition serves an old copy of a structure | Specification §6.5 item 8 allows it. S4's `doctor` topic lists stale editions |
 | A rollback of a structure product strands data editions cut from the withdrawn edition | Stated in `docs/api/admin.md` |
-| The first commit of a process on Phase 4's 7,000 entries reads 7,000 manifests | Phase 4 measures it (Open Question 1) |
+| The first commit of a process on Phase 4's 7,000 entries reads 7,000 manifests | Phase 4 measures it (A1) |
 | Two generator calls with different seeds produce mismatching structures | The refusal names `full-artefacts`; the generator's docstring states the seed rule |
 
-## Open Questions
+## Recorded answers
 
-1.  **The leaf's `artefacts` field.** Phase 3 reads manifests (RFC decision
-    25). Should Phase 4 write each edition's artefacts into its leaf entry,
-    so the writer and the release job read leaves only? It changes what
-    statcatlib writes into a shared document, though not its format.
-2.  **The publish check's profile.** O4 names `at="publish"`. The `receive`
-    profile also runs the partial and references checks with `structures=`
-    (`_check.py:101-115`), and checks `data/` files by size. Keep `publish`,
-    or use `receive` after S2's measurement?
-3.  **Item 4 and a structure edit (D7).** Confirm that a structure edition is
-    accepted when a data edition holds an older full copy, and that the
-    specification's item 4 is amended to say so.
-4.  **Full artefacts shared by data products with no structure home** (a DSD
-    shared by two products, an agency scheme). Item 4 read literally compares
-    them, and an in-place edit at FMR then deadlocks the products as in D7.
-    This design leaves them uncompared (Non-Goals). Compare them, give them
-    D7's stale rule against the newest, or require a structure home?
-5.  **Cut codelists with no structure home (D11).** Refuse them (this
-    design), keep them full (an sdmxlib option to `fill_edition` to cut only
-    named codelists), or record them ungated?
-6.  **Item 8 under embargo off (D8).** Refuse before the seal (this design),
-    or record the edition `embargoed` (Alternative B)?
-7.  **Item 7 timing (D10).** The specification checks among live editions.
-    Should the writer also refuse a second home at an embargoed seal, at the
-    cost of the two-release move in Item 7 needing the drop released first
-    even under embargo?
-8.  **Release cadence.** One 0.13.0 release after S3, or a release per slice?
-    S2 without S3 cuts partials that the writer does not check against items
-    4 and 8; the publish check still checks them against the structure
-    editions.
+The owner answered the draft's eight open questions on 2026-11-02, in the
+latest comment on GH-51:
+
+| ID | Question | Answer |
+|---|---|---|
+| A1 | Should Phase 4 write each edition's artefacts into the leaf's `artefacts` field? | Phase 4 decides it with the routing fields (StatCat-Suite/sdmxlib#348). Phase 3 reads manifests (RFC decision 25). |
+| A2 | The publish check's profile: `publish` or `receive`? | The seal's check stays at `at="publish"`. The owner revisits it only if S2's measurement shows it is slow. |
+| A3 | Item 4 and a structure edit (D7) | D7 accepted: the structure home is authoritative, a structure edit is accepted, and data editions holding the old copy become stale. The specification's amendment is StatCat-Suite/sdmxlib#354, needed before S3. |
+| A4 | Full artefacts shared by data products with no structure home | Compared, as specification item 4 states (Item 4 and a structure edit). The rule is S3 work, in `cross_product.refusals`. |
+| A5 | Cut codelists with no structure home (D11) | D11 accepted: the pre-check refuses them. Unit, status and SDMX-agency codelists get a home, mostly in `structure-classifications`. |
+| A6 | Item 8 under embargo off (D8) | D8 accepted: the pre-check refuses before the seal. |
+| A7 | Item 7 timing (D10) | Item 7 stays at release, among live editions, as the specification states. |
+| A8 | Release cadence | One 0.13.0 release after S3, together with StatCat-Suite/sdmxlib-rest#90. |
 
 ## Detailed Implementation Plan
 
@@ -1079,7 +1073,8 @@ when the count changes, and runs `just docs-build`.
     - item 4: a data edition whose full `CS_CODR` differs from
       `structure-concepts` is refused, naming the URN and both editions; a
       structure edit is accepted and the data edition holding the old copy
-      stays live;
+      stays live; a data edition whose full DSD with no structure home
+      differs from another data product's live copy is refused (A4);
     - item 7: under embargo off, a second home is refused by the pre-check
       (working copy open) and at the Inventory commit (a race simulated by
       committing the first home between the pre-check and the commit); under
@@ -1132,7 +1127,7 @@ tests, as restated against `41d4b88` and sdmxlib 0.83.0:
 | A CODR-shaped data product's `metadata.duckdb` is under 10 MB | S2 | `test_codr.py` |
 | A partial with a code its full artefact lacks is a `check_edition` finding naming the code | S2 | `test_partials.py` (at seal, through `EditionCheckError`) |
 | A partial whose full artefact is in a second structure product passes `check_edition` given both | S2 | `test_partials.py` (`CL_GEO` in `structure-geo`, `CL_CLASS_*` in `structure-classifications`) |
-| Two editions holding one URN as a full artefact with different fingerprints are refused, naming the URN and both editions (item 4) | S3 | `test_cross_product.py` (a data edition against its structure home) |
+| Two editions holding one URN as a full artefact with different fingerprints are refused, naming the URN and both editions (item 4) | S3 | `test_cross_product.py` (a data edition against its structure home; two data products' copies of a full artefact with no structure home, A4) |
 | A full artefact with two structure homes is refused (item 7) | S3 | `test_cross_product.py` |
 | A data edition is refused `live` while its structure edition is not live, and released once it is (item 8) | S3 | `test_cross_product.py` |
 | A republish of a data product through a working copy keeps its partials cut | S2 | `test_partials.py` |
