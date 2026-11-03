@@ -350,6 +350,10 @@ class TestStale:
 
         stale = {(s.edition_id, s.state) for s in diagnostics.verify_catalog(root).stale}
         assert (table.edition_id, "embargoed") in stale
+        items = diagnostics.doctor(root).about("stale data editions")
+        levels = {item.detail.split(" ", 1)[0]: item.level for item in items}
+        assert levels[f"{TABLE}/{table.edition_id}"] == "warning"
+        assert levels[f"{TABLE}/{_live(root, TABLE)}"] == "info"
         with pytest.raises(sc.CrossProductRuleError) as caught:
             admin.release(TABLE, table.edition_id, reason=REASON)
         assert (caught.value.rule, caught.value.urn) == ("full-artefacts", GEO_URN)

@@ -391,12 +391,19 @@ def test_verify_lists_a_stale_data_edition_and_finds_nothing(edited: tuple[Path,
     assert f"(live edition: {new}); republish the product" in out
 
 
-def test_doctor_reports_a_stale_data_edition(edited: tuple[Path, str, str, str]) -> None:
+def test_doctor_reports_a_stale_live_data_edition_as_info_and_exits_0(edited: tuple[Path, str, str, str]) -> None:
     root, table, _, _ = edited
-    (item,) = diagnostics.doctor(root).about("stale data editions")
-    assert item.level == "warning"
+    report = diagnostics.doctor(root)
+    (item,) = report.about("stale data editions")
+    assert item.level == "info"
     assert f"table-a/{table} (live)" in item.detail
     assert "republish the product" in item.detail
+    assert report.warnings == ()
+
+    result = runner.invoke(app, ["doctor", str(root)])
+    assert result.exit_code == 0, result.output
+    assert f"ok stale data editions: table-a/{table} (live)" in result.output
+    assert "No warnings." in result.output
 
 
 def test_prune_keeps_the_structure_edition_a_stale_table_was_cut_from(

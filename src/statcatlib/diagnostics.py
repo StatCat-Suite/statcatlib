@@ -505,15 +505,21 @@ def _editions(product_dir: Path, product_id: str, full: FullInventory | None) ->
 
 
 def _stale_items(root: Path, full: FullInventory) -> Iterator[DoctorItem]:
-    """One ``stale data editions`` warning per stale data edition and URN."""
+    """One ``stale data editions`` item per stale data edition and URN.
+
+    A stale ``live`` edition keeps serving its own closure and is the normal
+    state right after a structure edit, so its item is ``info``. A stale
+    ``embargoed`` edition's release is refused, so its item is a
+    ``warning``, as is a manifest the list cannot read.
+    """
     stale, unread = _stale(full, InventoryWriter(root).artefacts)
     for finding in unread:
         yield DoctorItem("stale data editions", "warning", finding.detail)
     for item in stale:
-        detail = str(item)
         if item.state == "embargoed":
-            detail += "; its release is refused until then"
-        yield DoctorItem("stale data editions", "warning", detail)
+            yield DoctorItem("stale data editions", "warning", f"{item}; its release is refused until then")
+        else:
+            yield DoctorItem("stale data editions", "info", str(item))
 
 
 def _leftovers(root: Path) -> Iterator[DoctorItem]:
@@ -533,7 +539,8 @@ def doctor(path: str | Path) -> DoctorReport:
     iCloud Drive or Google Drive), the layout, ``catalog.json``, ``CURRENT``
     against the newest valid root, root and leaf validation, each stale data
     edition (specification §6.5 item 4, with the fix: republish the
-    product), and for each
+    product; ``info`` for a live edition, ``warning`` for an embargoed one),
+    and for each
     product its unsealed editions with their start times, its seal journal
     entries (empty ones included), and its sealed editions that the newest
     version neither names nor tombstones. Last come files in ``inventory/``

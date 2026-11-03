@@ -752,9 +752,12 @@ the manifests:
   republish the product. `statcat verify-catalog` prints each as a `STALE`
   line. A stale edition is a state the specification allows, so it is no
   finding: it leaves `VerifyReport.ok` and the exit code alone.
-- `doctor` adds the topic `stale data editions` (level `warning`), one item
-  per stale edition and URN, with the same fields and fix. A stale embargoed
-  edition's item says its release is refused until the republish.
+- `doctor` adds the topic `stale data editions`, one item per stale edition
+  and URN, with the same fields and fix. A stale live edition's item is
+  level `info`: the state is normal right after a structure edit, and the
+  edition keeps serving, so it leaves `doctor`'s exit code at 0. A stale
+  embargoed edition's item is level `warning` and says its release is
+  refused until the republish.
 
 One report waits for slice S4, which the owner may drop: a `verify-catalog`
 finding for a URN two structure products' live editions hold (a state only a
@@ -1203,8 +1206,10 @@ when the count changes, and runs `just docs-build`.
     generated catalog with a structure edit and a stale data edition, and
     after a `prune`, and reports the stale edition with its URN, fingerprint
     and the home's live edition; `doctor` reports it under `stale data
-    editions`; a structure reference only a superseded edition resolves is a
-    finding.
+    editions` at level `info` and exits 0; a structure reference only a
+    superseded edition resolves is a finding. `TestStale` in
+    `tests/test_cross_product.py` shows `doctor` reporting a stale
+    embargoed edition at level `warning`.
 
 #### 18. Docs (Modify)
 

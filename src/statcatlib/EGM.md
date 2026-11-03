@@ -228,7 +228,8 @@ read.
   and `items`, each a `DoctorItem(topic, level, detail)` with level `info` or
   `warning`; `warnings` and `about(topic)` filter them. Topics: `synced
   folder`, `layout`, `catalog.json`, `CURRENT`, `inventory`, `stale data
-  editions` (a warning per stale data edition and URN), `working copy`
+  editions` (an item per stale data edition and URN: `info` for a live
+  edition, `warning` for an embargoed one), `working copy`
   (`list_editions`), `journal` (empty entries included), `unrecorded edition`
   (sealed, and neither named nor tombstoned by the newest version) and
   `leftover file` (`*.tmp` in `inventory/` and `.*.tmp` in the root).
