@@ -95,6 +95,7 @@ from statcatlib.store.inventory import (
 )
 from statcatlib.store.sentinel import NotLoadedError, is_unloaded
 from statcatlib.store.working_copy import (
+    EditionCheckError,
     JournalError,
     SealCheckError,
     WorkingCopyClosedError,
@@ -141,6 +142,7 @@ __all__ = [
     "DimensionsScope",
     "Distribution",
     "Edition",
+    "EditionCheckError",
     "EditionView",
     "EmbeddingMetadata",
     "ExistsExpr",

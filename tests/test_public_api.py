@@ -168,6 +168,7 @@ class TestStoreExports:
             "WorkingCopyExistsError",
             "WorkingCopyClosedError",
             "SealCheckError",
+            "EditionCheckError",
             "JournalError",
             "NoLiveEditionError",
         )

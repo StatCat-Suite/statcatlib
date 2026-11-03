@@ -95,7 +95,8 @@ class InventoryRuleError(Exception):
     """A change sdmxlib's Inventory rules refuse, or a lifecycle change statcatlib refuses.
 
     Attributes:
-        rule: The rule broken: one of sdmxlib's `Rule` values, or
+        rule: The rule broken: one of sdmxlib's `Rule` values, ``"kind"``
+            also for a product reopened with another kind, or
             ``"lifecycle"`` for a product reopened with another lifecycle.
         product: The product.
         edition: The edition, where one is concerned.

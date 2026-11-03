@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import sdmxlib as sl
 from sdmxlib import InternationalString, Ref
+from sdmxlib.edition import Producer
+from sdmxlib.edition import seal as seal_edition
 from sdmxlib.model.concept import Concept
 from sdmxlib.model.urn import SdmxUrn
 
@@ -354,3 +357,77 @@ def store(tmp_path: Path) -> Iterator[ScratchStore]:
     with scratch_store(tmp_path / "catalog") as s:
         s.put(FIXTURE_DATASETS)
         yield s
+
+
+# -- structure products (Phase 3) ----------------------------------------------
+
+#: A geography codelist of three codes in two levels, the hierarchy built on it,
+#: an industry classification, and a concept scheme whose coded concepts name
+#: the two codelists: the three structure products of design CUJ 1, in small.
+GEO = sl.Codelist(
+    id="CL_GEO",
+    maintainer="T",
+    version="1.0",
+    name={"en": "geography"},
+    codes=[
+        sl.Code(id="CA", name={"en": "Canada"}),
+        sl.Code(id="ON", name={"en": "Ontario"}, parent_id="CA"),
+        sl.Code(id="QC", name={"en": "Quebec"}, parent_id="CA"),
+    ],
+)
+GEO_HIERARCHY = sl.Hierarchy(
+    id="HCL_GEO",
+    maintainer="T",
+    version="1.0",
+    name={"en": "geography hierarchy"},
+    tree=[
+        sl.HierarchicalCode(
+            id="CA",
+            code=GEO.ref_to("CA"),
+            children=[
+                sl.HierarchicalCode(id="ON", code=GEO.ref_to("ON")),
+                sl.HierarchicalCode(id="QC", code=GEO.ref_to("QC")),
+            ],
+        )
+    ],
+)
+NAICS = sl.Codelist(
+    id="CL_NAICS",
+    maintainer="T",
+    version="1.0",
+    name={"en": "industries"},
+    codes=[sl.Code(id="11", name={"en": "Agriculture"}), sl.Code(id="21", name={"en": "Mining"})],
+)
+CONCEPTS = sl.ConceptScheme(
+    id="CS_CODR",
+    maintainer="T",
+    version="1.0",
+    name={"en": "concepts"},
+    concepts=[
+        sl.Concept(id="GEO", name={"en": "geography"}, core_representation=sl.Ref.to(GEO)),
+        sl.Concept(id="INDUSTRY", name={"en": "industry"}, core_representation=sl.Ref.to(NAICS)),
+        sl.Concept(id="OBS_VALUE", name={"en": "value"}),
+    ],
+)
+GEO_DSD = sl.DataStructure(
+    id="DSD_GEO",
+    maintainer="T",
+    version="1.0",
+    name={"en": "by geography"},
+    dimensions=[sl.Dimension(id="GEO", concept=CONCEPTS.ref_to("GEO"), representation=sl.Ref.to(GEO))],
+    measures=[sl.Measure(id="OBS_VALUE", concept=CONCEPTS.ref_to("OBS_VALUE"))],
+)
+GEO_FLOW = sl.Dataflow(id="DF_GEO", maintainer="T", version="1.0", name={"en": "by geography"}, structure=GEO_DSD)
+
+
+def structure_source(root: Path) -> sl.EditionRegistry:
+    """A sealed edition standing for an FMR's structures, open read-only; the caller closes it.
+
+    It holds `GEO`, `GEO_HIERARCHY`, `NAICS`, `CONCEPTS`, `GEO_DSD` and `GEO_FLOW`.
+    """
+    root.mkdir(parents=True)
+    with sl.LocalRegistry.build(root) as builder:
+        builder.add_all([GEO, GEO_HIERARCHY, NAICS, CONCEPTS, GEO_DSD, GEO_FLOW])
+        edition_dir = builder.edition_dir
+    seal_edition(edition_dir, product_id="source", producer=Producer(name="tests", version="1"))
+    return sl.LocalRegistry.edition(edition_dir)

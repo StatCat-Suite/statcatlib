@@ -7,7 +7,7 @@
 `SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
 `InventoryContentionError`, `InventoryRuleError` and `NonFastForwardError`
 from `store/inventory.py`, and `WorkingCopyExistsError`,
-`WorkingCopyClosedError`, `SealCheckError` and `JournalError` from
+`WorkingCopyClosedError`, `SealCheckError`, `EditionCheckError` and `JournalError` from
 `store/working_copy.py`; `NotLoadedError` and `is_unloaded` from the store's
 sentinel module; and part of `expr` (listed below). It exposes `checks`,
 `query` and `urn` as submodules (`sc.checks`, `sc.query`, `sc.urn`). The
@@ -57,11 +57,16 @@ and test catalogs (`testing.py`).
   - `seal(working_copies, *, checks=()) -> SealOutcomes`: the batched seal.
     It refuses, with `ValueError`, a working copy of another catalog or two
     of one product, and raises `WorkingCopyClosedError` for a closed one,
-    before sealing anything. Then it runs `WorkingCopy._precheck` (journal,
-    checks, fast-forward) for every working copy, `_seal_edition` for each
-    that passed, and records every sealed edition in one
-    `InventoryWriter.commit`, leaving out each product whose `_next_leaf`
-    raises `InventoryRuleError`. `RuntimeError` on a catalog from `open`.
+    before sealing anything. `_seal_each` then runs the structure pass
+    (`WorkingCopy._precheck` and `_seal_edition` for each structure working
+    copy), the structure-check pass (`_check_structures`: each structure
+    edition's `_publish_check`, given the batch's other structure editions,
+    repeated until it drops none) and the data pass (every data
+    `_precheck`, then each `_seal_edition`). `_record_batch` records every
+    sealed edition in one `InventoryWriter.commit`, leaving out each product
+    whose `_next_leaf` raises `InventoryRuleError`, and each structure
+    edition whose publish check was given a left-out one
+    (`_drop_dependents`). `RuntimeError` on a catalog from `open`.
   - `search` and `facets` raise `NotImplementedError` naming
     `product(id).view()`. `__getattr__` raises `AttributeError` naming
     `cat.product(id).view().<name>` for every name in
@@ -69,8 +74,9 @@ and test catalogs (`testing.py`).
 - `Product`: `product_id`; `view(*, embedding_model=None, query_prefix="")
   -> EditionView`; `editions() -> list[Edition]` (the live head, with the
   `previous` its manifest records; empty without one); `working_copy(*,
-  lifecycle="revisable", resume=False, embedding_model=None,
-  document_prefix="", query_prefix="") -> WorkingCopy`; `rollback()`, which
+  kind=None, lifecycle="revisable", resume=False, embedding_model=None,
+  document_prefix="", query_prefix="") -> WorkingCopy` (`kind` is `"data"`
+  or `"structure"`; `None` takes the recorded one, or `"data"`); `rollback()`, which
   raises `AttributeError` naming `CatalogAdmin.rollback`.
   `Catalog.product` is the only constructor.
 - `NoLiveEditionError` (`LookupError`): `view()` on a product with no live
@@ -78,7 +84,8 @@ and test catalogs (`testing.py`).
 - `SealOutcomes`: a frozen attrs value with `sealed` (product id to
   `Edition`, all recorded in one version) and `refused` (product id to the
   error: `SealCheckError`, `NonFastForwardError` or another
-  `InventoryRuleError`, `ManifestError`, or `InventoryContentionError`).
+  `InventoryRuleError`, `ManifestError`, `EditionCheckError`, or
+  `InventoryContentionError`).
 - `Edition` is re-exported from `store/working_copy.py`.
 
 ### `admin.py`
@@ -150,16 +157,22 @@ are imported from `statcatlib.admin`.
 The module keeps its 0.11 name and describes editions. Imported from
 `statcatlib.bundle`; nothing here is re-exported from `statcatlib`:
 
-- `catalog_section(store: _Store) -> dict`: builds the `statcat` manifest
-  section (format 3: `format`, `kind`, `statcatlib_version`, `datasets`,
-  `search`) from a working copy's open store. `WorkingCopy.seal` passes it to
+- `catalog_section(store: _Store, *, kind="data") -> dict`: builds the
+  `statcat` manifest section (format 3: `format`, `kind`,
+  `statcatlib_version`, `datasets`, `search`) from a working copy's open
+  store. `WorkingCopy.seal` passes it to
   `sdmxlib.edition.seal(..., extensions={"statcat": ...})`. It raises
   `ValueError` when `search/` holds files and no `index.json`.
 - `check_catalog(root, manifest, reg, profile) -> list[Finding]`: the
   `statcat` check, with sdmxlib 0.80's `Check` signature, run as an extension
   of `sdmxlib.edition.check_edition`. It refuses a section format other than
   3, a `kind` outside `PRODUCT_KINDS`, and a `structure` edition whose
-  manifest binds a dataflow.
+  manifest binds a dataflow or whose store holds a dataflow, binding or
+  partial.
+- `structure_content(conn) -> list[Finding]`: one finding per `Dataflow`,
+  `DataflowBinding` and partial artefact in `sdmx.artefact`. `check_catalog`
+  runs it on a structure edition, and `WorkingCopy._precheck` on a
+  structure working copy's store.
 - `overlay_affects_search(overlay, types=None)`: lists overlay entries that
   change search results.
 - `description_to_json(description) -> dict[str, object]` and
@@ -172,7 +185,7 @@ The module keeps its 0.11 name and describes editions. Imported from
   of an Inventory root, or returns `None`.
 - `ROOT_SECTION_FORMAT = "3"`: the root section's `format_version`.
 - `STATCAT_SECTION = "statcat"`, `STATCAT_SECTION_FORMAT = 3`,
-  `PRODUCT_KINDS = ("data", "structure")`. Phase 2a seals `data` only.
+  `PRODUCT_KINDS = ("data", "structure")`.
 
 ### `diagnostics.py`
 
@@ -283,8 +296,9 @@ read.
   `sdmxlib.EditionEngine`, and `Catalog.close` closes them all.
 - A seal check only reads: `seal` runs every check against `wc.view()`
   before writing anything, and any finding raises `SealCheckError`.
-- `Catalog.seal` runs every pre-check before any sdmxlib seal, and writes at
-  most one Inventory version; a batch whose products are all refused writes
+- `Catalog.seal` seals and checks the batch's structure products before
+  any data product, runs every data pre-check before any data seal, and
+  writes at most one Inventory version; a batch whose products are all refused writes
   none. A refusal in one product never stops another's. A crash during the
   batch leaves each sealed, unrecorded edition's journal entry, so its
   product's next `working_copy()` records it, in a version of its own.

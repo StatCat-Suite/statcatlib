@@ -88,24 +88,38 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 - `WorkingCopy`: a product's one unsealed edition, built only by
   `Product.working_copy`; direct construction raises `TypeError`.
   - Properties: `product_id`, `edition_id` (a UUIDv7), `previous` (the base
-    edition, or `None` for the product's first), `registry` (the writable
+    edition, or `None` for the product's first), `kind` (`"data"` or
+    `"structure"`), `registry` (the writable
     `sdmxlib.LocalRegistry`: `ingest` for structures, `write_observations`
     for observations).
   - `view() -> EditionView` over the same store, which sees the writes as
     they are made.
   - Writes: `put(obj)`, `put_concept(scheme_uri, concept)`,
     `add_lineage(...)`, `add_language_alternates(pairs, *, source)`,
-    `bulk_load()`, `transaction()`, `build_index(...) -> int`.
+    `bulk_load()`, `transaction()`, `build_index(...) -> int`, and on a
+    structure product's working copy `fill_structures(source, *, families,
+    agency, ids, artefacts) -> tuple[str, ...]`
+    (`sdmxlib.edition.fill_structures`; `TypeError` on a data product's).
   - Ending: `seal(checks=()) -> Edition`, `close()` (leaves the edition
     unsealed for `working_copy(resume=True)`; also the context manager's
     exit), `discard()` (`sdmxlib.edition.discard`).
 - `Edition`: a frozen attrs value with `edition_id`, `product_id`,
   `previous` and `manifest_sha256`.
 - `settle_journal(writer, product_dir, product_id, lifecycle)` applies the
-  journal rule; `record_journalled(...)` is its pure part.
-  `manifest_sha256(edition_dir)` hashes an edition's `manifest.json`.
+  journal rule; `record_journalled(...)` is its pure part, taking each entry
+  as `(JournalEntry, manifest_sha256, schema_version, kind)`.
+  `manifest_sha256(edition_dir)` hashes an edition's `manifest.json`, and
+  `edition_kind(manifest)` reads the kind its `statcat` section names.
+- `structure_editions(full, catalog_root, *, product_id, batch)` lists the
+  structure editions a structure edition's publish check is given: the other
+  structure products' live and embargoed editions, with each `batch`
+  product's batch edition in their place. `publish_check(edition_dir, *,
+  product_id, structures)` runs `check_edition(at="publish",
+  structures=..., extensions={"statcat": check_catalog})`, passing `None`
+  for an empty list, and raises `EditionCheckError`.
 - Errors: `WorkingCopyExistsError`, `WorkingCopyClosedError`
-  (`RuntimeError`), `SealCheckError` (with `findings`), `JournalError`.
+  (`RuntimeError`), `SealCheckError` (with `findings`), `EditionCheckError`
+  (with `findings`, `product`, `edition`), `JournalError`.
 
 ### `inventory.py`
 
@@ -191,25 +205,36 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `RuntimeError`.
 - A product has one unsealed edition. `WorkingCopy._start` settles the
   journal, refuses a product recorded with another lifecycle
-  (`InventoryRuleError`, `rule="lifecycle"`), takes the live edition at
+  (`InventoryRuleError`, `rule="lifecycle"`) or another kind
+  (`rule="kind"`), takes the live edition at
   sdmxlib's store `SCHEMA_VERSION` as its base, and calls
   `LocalRegistry.build(previous=)` or, with `resume=True`,
   `LocalRegistry.build(resume=)`. An existing unsealed edition raises
   `WorkingCopyExistsError` without `resume`, and `resume` with none raises
   `FileNotFoundError`. A new edition whose store fails to open is discarded.
+  It then writes `statcat._meta.product_kind`: a new edition takes the
+  leaf's kind, the caller's, or `"data"`, and drops the `partial_of` and
+  `fill_in_progress` keys carried from the previous edition; a resumed one
+  keeps the stored kind and refuses another (`rule="kind"`), after closing
+  the registry.
 - `WorkingCopy.seal` runs these steps: settle the journal; run each check
-  against `view()` (any finding raises `SealCheckError` and leaves the
-  working copy open); raise `NonFastForwardError` when the base is no longer
-  the live edition; rebuild the search index and `drop_carried`;
-  `catalog_section(store)`; close the store and registry;
+  against `view()`, and on a structure working copy
+  `bundle.structure_content` (any finding raises `SealCheckError` and leaves
+  the working copy open); raise `NonFastForwardError` when the base is no
+  longer the live edition; rebuild the search index and `drop_carried`;
+  `catalog_section(store, kind=...)`; close the store and registry;
   `sdmxlib.edition.seal`, which writes the journal entry and then the
-  manifest; commit the record (`kind="seal"`), live when the catalog's
+  manifest; on a structure edition `_publish_check(structures)` (step 5b; a
+  finding raises `EditionCheckError` and leaves the edition unrecorded);
+  commit the record (`kind="seal"`), live when the catalog's
   embargo is off; clear the journal entry. The steps are split for
   `Catalog.seal`: `_precheck(checks)` (steps 0 to 2), `_seal_edition()`
   (steps 3 to 5, returning a private `_Sealed` with the edition and its
   manifest's store schema), `_next_leaf(full, sealed)` (the record's leaf;
-  `InventoryRuleError` on a refusal), `_recorded()` and `_unrecorded(exc)`
-  (clear the journal entry; the second also logs the WARNING).
+  `InventoryRuleError` on a refusal), `_publish_check(structures)`,
+  `_recorded()` and `_unrecorded(exc)` (clear the journal entry; the second
+  also logs the WARNING, for an `InventoryRuleError` or an
+  `EditionCheckError`).
 - The seal's index rebuild reuses the arguments of the last
   `WorkingCopy.build_index` call on that object, or the defaults when there
   was none. Without lancedb installed it deletes `search/`, so a carried
@@ -227,9 +252,13 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   module docstring) runs when a working copy starts or resumes, at the start
   of a seal and after its record, against the newest root. An entry whose
   edition the root names or tombstones, or whose edition has no manifest, is
-  cleared. A sealed, unrecorded edition is recorded in one commit and its
-  entry cleared; a `duplicate` refusal with the same `manifest_sha256` counts
-  as recorded. Any other refusal clears the entry and logs a WARNING.
+  cleared. A sealed, unrecorded edition is recorded in one commit, with the
+  kind its manifest's `statcat` section names, and its entry cleared; a
+  `duplicate` refusal with the same `manifest_sha256` counts as recorded. A
+  structure edition is first given the publish check, with the other
+  structure products' live and embargoed editions and each other product's
+  journalled structure edition in their place. Any other refusal, and a
+  failed check, clears the entry and logs a WARNING.
   `InventoryContentionError` keeps the entry for the next working copy. An
   unreadable entry raises `JournalError`.
 - A refusal after the manifest (a rollback landing during the seal) raises
@@ -292,6 +321,8 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`
   and `tests/test_concurrent_seal.py`; the batched seal in
-  `tests/test_catalog_model.py::TestBatchSeal`. Views:
+  `tests/test_catalog_model.py::TestBatchSeal`. Structure products, their
+  publish check, batch and journal repair:
+  `tests/test_structure_products.py`. Views:
   `tests/test_edition_view.py`. Embedding reuse:
   `tests/test_embedding_reuse.py`.

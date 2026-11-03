@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     import duckdb
     from sdmxlib import EditionRegistry
     from sdmxlib.edition import Profile
+    from sdmxlib.inventory import Kind
 
     from statcatlib.store.lance import LanceIndex, LanguageLayout
     from statcatlib.store.store import _Store
@@ -54,6 +55,7 @@ __all__ = [
     "description_from_root",
     "description_to_json",
     "overlay_affects_search",
+    "structure_content",
 ]
 
 #: The manifest's extension section statcatlib owns.
@@ -64,9 +66,9 @@ STATCAT_SECTION = "statcat"
 #: 3 added ``kind``, the product's kind (Phase 2a).
 STATCAT_SECTION_FORMAT = 3
 
-#: The product kinds format 3 names. Phase 2a seals ``data`` products only;
-#: ``structure`` is reserved for structure products (Phase 3), whose editions
-#: hold no observations, so `check_catalog` refuses a binding in one.
+#: The product kinds format 3 names. A ``structure`` product's editions hold
+#: full artefacts and no dataflow, binding or partial (`structure_content`), so
+#: `check_catalog` refuses each of those, and a manifest binding, in one.
 PRODUCT_KINDS: tuple[str, ...] = ("data", "structure")
 
 _SEARCH_DIRNAME = "search"
@@ -108,11 +110,10 @@ def _search_section(store: _Store, search_dir: Path) -> dict[str, object] | None
     }
 
 
-def catalog_section(store: _Store) -> dict[str, object]:
+def catalog_section(store: _Store, *, kind: Kind = "data") -> dict[str, object]:
     """Describe a working copy's edition, as its manifest's ``statcat`` section (format 3).
 
-    The section records the product's kind (``data``; Phase 2a seals no other),
-    the number of catalog datasets and, when a search index is built, its
+    The section records the product's kind, the number of catalog datasets and, when a search index is built, its
     index format version, embedding model, each language's row count and
     stemmer, and the annotations it was built from. `WorkingCopy.seal`
     computes it after rebuilding the index and before closing the store, and
@@ -120,6 +121,7 @@ def catalog_section(store: _Store) -> dict[str, object]:
 
     Args:
         store: The working copy's store, open.
+        kind: The product's kind, ``data`` or ``structure``.
 
     Returns:
         The section, ready for ``seal(extensions=...)``.
@@ -131,11 +133,40 @@ def catalog_section(store: _Store) -> dict[str, object]:
     search_dir = store._search_dir
     return {
         "format": STATCAT_SECTION_FORMAT,
-        "kind": "data",
+        "kind": kind,
         "statcatlib_version": metadata.version("statcatlib"),
         "datasets": row[0] if row else 0,
         "search": _search_section(store, search_dir) if search_dir is not None else None,
     }
+
+
+def structure_content(conn: duckdb.DuckDBPyConnection) -> list[Finding]:
+    """What a structure product's edition may not hold: each dataflow, binding and partial in its store.
+
+    A structure product holds full artefacts only. `check_catalog` runs this
+    on a sealed structure edition, and `WorkingCopy.seal` on a structure
+    working copy before anything is sealed.
+
+    Args:
+        conn: A connection whose current catalog is the edition's, so
+            ``sdmx.artefact`` names its table.
+
+    Returns:
+        One finding per such artefact, by URN.
+    """
+    rows = conn.execute(
+        """
+        SELECT urn, artefact_type, is_partial FROM sdmx.artefact
+        WHERE artefact_type IN ('Dataflow', 'DataflowBinding') OR is_partial
+        ORDER BY urn
+        """
+    ).fetchall()
+    findings: list[Finding] = []
+    for urn, artefact_type, is_partial in rows:
+        held = f"a partial {artefact_type}" if is_partial else f"a {artefact_type}"
+        detail = f"{held}, which a structure product does not hold: it holds full artefacts only"
+        findings.append(Finding(STATCAT_SECTION, urn, detail))
+    return findings
 
 
 def _check_catalog_rows(conn: duckdb.DuckDBPyConnection, section: Mapping[str, object]) -> Iterator[Finding]:
@@ -244,7 +275,8 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
       reads, and the manifest has a ``statcat`` section in a format this
       build reads;
     - the section's ``kind`` is one of `PRODUCT_KINDS`, and a ``structure``
-      edition binds no dataflow to observations;
+      edition binds no dataflow to observations and holds no dataflow,
+      binding or partial (`structure_content`);
     - the catalog holds the datasets the section counts, and every dataset
       linked to a dataflow names one the registry holds;
     - ``search/`` is present exactly when the section declares an index;
@@ -299,6 +331,7 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
             Finding(STATCAT_SECTION, binding.dataflow, "a structure product's edition binds a dataflow to observations")
             for binding in manifest.bindings
         ]
+        findings += structure_content(conn)
     findings += [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
     search = section.get("search")
     if isinstance(search, Mapping):
