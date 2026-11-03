@@ -35,6 +35,10 @@ design decisions in full. This file indexes the code contracts.
   package indexes, prose and the `Any` ratchet.
 - `tests`, `docs`, `design`: test suite, mkdocs site, and historical design
   specs. They hold no production code and carry no contract.
+- `bench`: `corpus.py`, the Phase 4 corpus build and measurement of the
+  cross-product rules (GH-124), run by hand outside `just ci`, and
+  `corpus-results.md`, its results. `tests/test_codr_corpus.py` runs it at
+  two products.
 
 ## Global Invariants
 

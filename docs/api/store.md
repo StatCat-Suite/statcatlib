@@ -346,7 +346,10 @@ batch's structure editions, so a structure product and the tables cut from
 it go live in one Inventory version.
 
 `statcatlib.testing.codr_structures` and `codr_product` build such a catalog
-from a seed, for tests and benchmarks.
+from a seed, for tests and benchmarks. `codr_working_copy` fills a data
+product's working copy without sealing it, for a `Catalog.seal` batch, and
+`codr_corpus` seals groups of one-table and multi-table products, a share of
+them under embargo; `bench/corpus.py` builds the Phase 4 corpus with it.
 
 ---
 

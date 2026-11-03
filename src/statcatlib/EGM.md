@@ -295,6 +295,17 @@ read.
   dataflow per table and the rows from `(seed, product_id)`, fills with
   `ingest_dataflows(..., partials=True)`, indexes `CL_GEO`'s codes with an
   `fts_only` `CodelistIndexPolicy` when lancedb is installed, and seals.
+  `codr_product` is `codr_working_copy(...).seal()`: `codr_working_copy`
+  takes the same arguments and returns the filled, indexed working copy,
+  unsealed. `codr_corpus(catalog, groups=(CorpusGroup(7000),), *, seed=0,
+  shape=..., embargoed=0.1, on_sealed=None) -> list[str]` seals each
+  `CorpusGroup(products, tables=1)`'s products, named by
+  `corpus_product_id` (`codr-<tables>t-<index:05d>`), through
+  `codr_product`, skipping products the Inventory records and discarding a
+  working copy a crash left; it seals the share `corpus_embargoed` picks (a
+  SplitMix64 draw per product id) between two `CatalogAdmin.set_embargo`
+  versions, turns the embargo off first and leaves it off, and returns the
+  products it sealed. `bench/corpus.py` (GH-124) drives it.
   `structure-classifications` holds `CL_CLASS_*`, `CL_UNIT` and the
   SDMX-agency `CL_OBS_STATUS`, so every codelist a table cuts has a
   structure home (A5). The draws are SplitMix64 seeded by SHA-256, so they

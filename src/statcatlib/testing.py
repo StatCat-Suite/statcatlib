@@ -43,23 +43,30 @@ import sdmxlib as sl
 from attrs import field, frozen
 from sdmxlib.testing import synthetic_edition
 
+from statcatlib.admin import CatalogAdmin
 from statcatlib.catalog import Catalog
 from statcatlib.sources.sdmx import ingest_dataflows, prepare_sdmx
 from statcatlib.store.store import CodelistIndexPolicy
+from statcatlib.store.working_copy import WorkingCopyExistsError
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Sequence
+    from collections.abc import Callable, Generator, Sequence
 
     from sdmxlib.testing import Shape
 
-    from statcatlib.store.working_copy import Edition
+    from statcatlib.store.working_copy import Edition, WorkingCopy
 
 __all__ = [
     "CODR_AGENCY",
     "STRUCTURE_PRODUCTS",
     "CodrShape",
+    "CorpusGroup",
+    "codr_corpus",
     "codr_product",
     "codr_structures",
+    "codr_working_copy",
+    "corpus_embargoed",
+    "corpus_product_id",
     "synthetic_catalog",
     "temporary_catalog",
 ]
@@ -425,27 +432,29 @@ def codr_structures(catalog: Catalog, *, seed: int = 0, shape: CodrShape = _DEFA
     return dict(outcomes.sealed)
 
 
-def codr_product(
+def codr_working_copy(
     catalog: Catalog,
     product_id: str,
     *,
     tables: int = 1,
     seed: int = 0,
     shape: CodrShape = _DEFAULT_SHAPE,
-) -> Edition:
-    """Seal a CODR-shaped data product of *tables* tables into *catalog*, with its codelists cut to partials.
+) -> WorkingCopy:
+    """Fill a CODR-shaped data product's working copy of *tables* tables, with its codelists cut to partials.
 
-    It seals the three structure products first (`codr_structures`) unless all
-    three are live. Each table ``n`` gets a data structure,
-    ``DSD_<product_id>_<n>`` (dimensions ``GEO`` and ``CLASS_1`` onward, then
-    ``TIME_PERIOD``; attributes ``UNIT_MEASURE`` and ``OBS_STATUS``; measure
-    ``OBS_VALUE``), a dataflow ``DF_<product_id>_<n>``, and
-    ``shape.observations`` rows over a share of each codelist's codes: 5 % of
-    the geography's leaves with their ancestors, a quarter of each
-    classification, two units and two statuses. `ingest_dataflows` fills the
-    product's working copy with ``partials=True``, and the seal records each
-    partial's ``partial_of``. No hierarchy association names a table, so
-    ``CL_GEO`` is cut. The search index takes the geography's codes with
+    `codr_product` seals what this returns; a caller sealing several products
+    in one `Catalog.seal` takes the working copies from here. It seals the
+    three structure products first (`codr_structures`) unless all three are
+    live. Each table ``n`` gets a data structure, ``DSD_<product_id>_<n>``
+    (dimensions ``GEO`` and ``CLASS_1`` onward, then ``TIME_PERIOD``;
+    attributes ``UNIT_MEASURE`` and ``OBS_STATUS``; measure ``OBS_VALUE``), a
+    dataflow ``DF_<product_id>_<n>``, and ``shape.observations`` rows over a
+    share of each codelist's codes: 5 % of the geography's leaves with their
+    ancestors, a quarter of each classification, two units and two statuses.
+    `ingest_dataflows` fills the product's working copy with
+    ``partials=True``, so the seal records each partial's ``partial_of``. No
+    hierarchy association names a table, so ``CL_GEO`` is cut. When lancedb
+    is installed, the search index takes the geography's codes with
     ``CodelistIndexPolicy`` in ``fts_only`` mode.
 
     The structures depend on *seed* alone, and the rows on *seed* and
@@ -461,7 +470,7 @@ def codr_product(
         shape: The sizes.
 
     Returns:
-        The sealed edition.
+        The filled working copy, unsealed.
     """
     catalog.refresh()
     if not set(STRUCTURE_PRODUCTS) <= set(catalog.products()):
@@ -480,7 +489,154 @@ def codr_product(
         # The geography's codes go in the search index whatever their number,
         # without embeddings, as a CODR producer indexes them.
         wc.build_index(codelist_policies=[CodelistIndexPolicy(urns=(str(structures.geography.urn),))])
-    return wc.seal()
+    return wc
+
+
+def codr_product(
+    catalog: Catalog,
+    product_id: str,
+    *,
+    tables: int = 1,
+    seed: int = 0,
+    shape: CodrShape = _DEFAULT_SHAPE,
+) -> Edition:
+    """Seal a CODR-shaped data product of *tables* tables into *catalog*, with its codelists cut to partials.
+
+    `codr_working_copy` fills the working copy, and this seals it.
+
+    Args:
+        catalog: A writable catalog.
+        product_id: The data product.
+        tables: The tables, one dataflow each.
+        seed: Chooses the structures and the rows.
+        shape: The sizes.
+
+    Returns:
+        The sealed edition.
+    """
+    return codr_working_copy(catalog, product_id, tables=tables, seed=seed, shape=shape).seal()
+
+
+@frozen
+class CorpusGroup:
+    """One group of a `codr_corpus`: *products* data products of *tables* tables each.
+
+    Attributes:
+        products: The data products in the group.
+        tables: The tables of each, one dataflow each.
+    """
+
+    products: int
+    tables: int = 1
+
+    def __attrs_post_init__(self) -> None:
+        """Refuse a negative product count and a product of no table.
+
+        Raises:
+            ValueError: *products* is negative or *tables* is below 1.
+        """
+        if self.products < 0 or self.tables < 1:
+            msg = f"a corpus group holds zero or more products of one or more tables, not {self!r}"
+            raise ValueError(msg)
+
+
+def corpus_product_id(group: CorpusGroup, index: int) -> str:
+    """The id of the *index*-th product of *group*: ``codr-<tables>t-<index, five digits>``.
+
+    Args:
+        group: The group.
+        index: The product's place in the group, from 0.
+
+    Returns:
+        The product id.
+    """
+    return f"codr-{group.tables}t-{index:05d}"
+
+
+def corpus_embargoed(product_id: str, *, seed: int = 0, embargoed: float = 0.1) -> bool:
+    """Whether `codr_corpus` seals *product_id* under embargo: a seeded draw below the share *embargoed*.
+
+    Args:
+        product_id: The product.
+        seed: The corpus seed.
+        embargoed: The share of products sealed under embargo.
+
+    Returns:
+        Whether the product seals under embargo.
+    """
+    return _Draws(seed, f"embargo/{product_id}").below(1_000_000) < round(embargoed * 1_000_000)
+
+
+def _corpus_product(catalog: Catalog, product_id: str, *, tables: int, seed: int, shape: CodrShape) -> Edition:
+    """`codr_product`, after discarding an unsealed working copy a crash left."""
+    try:
+        return codr_product(catalog, product_id, tables=tables, seed=seed, shape=shape)
+    except WorkingCopyExistsError:
+        catalog.product(product_id).working_copy(resume=True).discard()
+        return codr_product(catalog, product_id, tables=tables, seed=seed, shape=shape)
+
+
+def codr_corpus(
+    catalog: Catalog,
+    groups: Sequence[CorpusGroup] = (CorpusGroup(7000),),
+    *,
+    seed: int = 0,
+    shape: CodrShape = _DEFAULT_SHAPE,
+    embargoed: float = 0.1,
+    on_sealed: Callable[[str, Edition], None] | None = None,
+) -> list[str]:
+    """Seal a corpus of CODR data products into *catalog*, with the structure products they are cut from.
+
+    Each group's products are named by `corpus_product_id` and built by
+    `codr_product` with *seed* and *shape*, so every product cuts its
+    codelists from the same structure editions, and each product's rows come
+    from its id. A product the Inventory records already, in any state, is
+    skipped, so a call with larger groups grows a corpus a smaller call
+    built, and a call after a crash resumes it, discarding the unsealed
+    working copy the crash left. A share *embargoed* of the products, chosen
+    by `corpus_embargoed`, seals with the catalog's embargo on, at the cost
+    of two ``embargo-change`` versions each, so the corpus holds live and
+    embargoed data entries. The embargo is off when the call returns.
+
+    Args:
+        catalog: A writable catalog.
+        groups: The groups, sealed in order.
+        seed: Chooses the structures and every product's rows.
+        shape: The sizes.
+        embargoed: The share of products sealed under embargo, from 0 to 1.
+        on_sealed: Called with each product id and edition after its seal.
+
+    Returns:
+        The products this call sealed, in order.
+
+    Raises:
+        ValueError: *embargoed* is outside 0 to 1.
+    """
+    if not 0 <= embargoed <= 1:
+        msg = f"embargoed is a share from 0 to 1, not {embargoed}"
+        raise ValueError(msg)
+    admin = CatalogAdmin.open(catalog._root)
+    if admin.embargo:
+        admin.set_embargo(on=False, reason="codr_corpus: seal the corpus with the embargo off")
+    recorded = set(admin.products())
+    sealed: list[str] = []
+    for group in groups:
+        for index in range(group.products):
+            product_id = corpus_product_id(group, index)
+            if product_id in recorded:
+                continue
+            under_embargo = corpus_embargoed(product_id, seed=seed, embargoed=embargoed)
+            if under_embargo:
+                admin.set_embargo(on=True, reason=f"codr_corpus: seal {product_id} under embargo")
+            try:
+                edition = _corpus_product(catalog, product_id, tables=group.tables, seed=seed, shape=shape)
+            finally:
+                if under_embargo:
+                    admin.set_embargo(on=False, reason=f"codr_corpus: {product_id} sealed")
+            sealed.append(product_id)
+            if on_sealed is not None:
+                on_sealed(product_id, edition)
+    return sealed
 
 
 def synthetic_catalog(path: str | Path, shape: Shape, *, product_id: str = "synthetic", seed: int = 0) -> Edition:
