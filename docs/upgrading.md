@@ -5,6 +5,41 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## 0.14.0: Inventory history fields, on sdmxlib 0.85
+
+statcatlib requires `sdmxlib>=0.85,<0.86`. sdmxlib's
+[upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists
+its own changes. No catalog is rebuilt: a 0.13 catalog opens and seals under
+0.14, and its next version carries the history fields. The Inventory format
+becomes 1.2, which every reader of an Inventory 1.x reads. The store schema, the
+manifest, the `statcat` schema, the `statcat` section format and the search
+index manifest stay as they were.
+
+`InventoryWriter` writes `previous_root_sha256` and `changes` in every root,
+computed from root `seq - 1` and its leaves. Nothing expires yet.
+
+Two commits that used to land are now refused with the new
+`InventoryWriteRefusedError`, a subclass of `sdmxlib.inventory.InventoryError`
+exported from `statcatlib`:
+
+- A base version whose `created_at` is more than 5 minutes ahead of this
+  machine's clock. The message names the base version's time and this
+  machine's. Fix the clock that is wrong. A clock behind by less than that
+  writes the base version's time plus 1 ms.
+- A `catalog.json` at format 2.x, which marks a catalog opted in to expiry.
+  A later statcatlib writes to it. Readers, `Catalog.open`, `CatalogAdmin.open`
+  and `statcat verify-catalog` still read it.
+
+`WorkingCopy.seal` raises it before it writes anything, and leaves the working
+copy open. Raised at the record, it keeps the journal entry for a later
+`working_copy()`, as `InventoryContentionError` does. `Catalog.seal` reports it
+in `SealOutcomes.refused`, and `statcat prune` prints it and exits 1. Code that
+catches `InventoryRuleError` around a commit also needs to catch it.
+
+`InventoryWriter.try_commit` takes `built_from=` and `now=`, and `Change` takes
+`built_from`, for a correction built from an older version.
+`InventoryWriter.check_writable(base)` runs the two refusals alone.
+
 ## 0.13.0: structure products, on sdmxlib 0.84
 
 statcatlib requires `sdmxlib>=0.84,<0.85`. sdmxlib's

@@ -76,3 +76,5 @@ the same surface with examples.
 ::: statcatlib.InventoryConflictError
 
 ::: statcatlib.InventoryContentionError
+
+::: statcatlib.InventoryWriteRefusedError

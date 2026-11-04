@@ -221,6 +221,7 @@ each refused product to its error:
 | `EditionCheckError` | a structure edition's publish check found something | sealed and unrecorded, logged at WARNING |
 | `InventoryRuleError` | sdmxlib's rules or the cross-product rules refused the record, such as a rollback landing during the batch | sealed and unrecorded, logged at WARNING |
 | `InventoryContentionError` | the commit lost 8 races in a row | sealed; the product's next `working_copy()` records it |
+| `InventoryWriteRefusedError` | the catalog has opted in to expiry, or the newest Inventory version is more than 5 minutes ahead of this machine's clock | stays open when the pre-check refuses it; sealed, with its journal entry kept, when the record does |
 
 ```python
 with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
