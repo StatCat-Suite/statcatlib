@@ -48,14 +48,13 @@ from typing import TYPE_CHECKING, Literal
 
 from attrs import frozen
 from sdmxlib.edition import MANIFEST_NAME, ManifestError, read_manifest
-from sdmxlib.inventory import PartialRecord
+from sdmxlib.inventory import manifest_records
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
-    from sdmxlib.edition import Manifest
-    from sdmxlib.inventory import FullInventory, Kind, Leaf, LeafEntry, State
+    from sdmxlib.inventory import FullInventory, Kind, Leaf, LeafEntry, PartialRecord, State
 
 __all__ = [
     "ACTIVE",
@@ -69,7 +68,6 @@ __all__ = [
     "cited_structures",
     "homeless_partials",
     "incoming",
-    "manifest_records",
     "refusals",
     "stale_editions",
 ]
@@ -122,17 +120,6 @@ class _Held:
     product: str
     entry: LeafEntry
     fingerprint: str
-
-
-def manifest_records(manifest: Manifest) -> dict[str, PartialRecord]:
-    """A sealed edition's artefacts as the rules read them (see `Artefacts`)."""
-    found: dict[str, PartialRecord] = {}
-    for artefact in manifest.artefacts:
-        if not artefact.partial:
-            found[artefact.urn] = PartialRecord(fingerprint=artefact.fingerprint)
-        elif artefact.partial_of is not None:
-            found[artefact.urn] = PartialRecord(fingerprint=artefact.fingerprint, partial_of=artefact.partial_of)
-    return found
 
 
 class ManifestArtefacts:
