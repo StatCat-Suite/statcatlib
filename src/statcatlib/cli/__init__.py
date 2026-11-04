@@ -452,8 +452,8 @@ def verify_catalog(
     """Check a catalog's integrity: its Inventory and every edition it records.
 
     It reads the newest valid Inventory version and checks every leaf, every
-    manifest's SHA-256, every file each manifest lists, the shared ``data/``
-    files included, each partial against its structure edition, and each
+    manifest's SHA-256, each entry's routing fields and artefact records, every
+    file each manifest lists, the shared ``data/`` files included, each partial against its structure edition, and each
     structure edition's references (`statcatlib.diagnostics.verify_catalog`).
     It writes nothing. It exits 0 when everything checks, 1 on any finding,
     each printed with the file it names, and 2 when the catalog cannot be

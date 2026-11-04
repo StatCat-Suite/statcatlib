@@ -69,7 +69,7 @@ import sdmxlib.edition as _edition
 from attrs import frozen
 from sdmxlib import SdmxUrn
 from sdmxlib.edition import MANIFEST_NAME, Finding, ManifestError, canonical_json, check_edition
-from sdmxlib.inventory import FullInventory, Leaf, PartialRecord, TransitionError, head, record
+from sdmxlib.inventory import FullInventory, Leaf, PartialRecord, TransitionError, head, record, routing_fields
 from sdmxlib.storage.schema import SCHEMA_VERSION, meta_value
 
 from statcatlib.bundle import STATCAT_SECTION, catalog_section, check_catalog, structure_content
@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     import duckdb
     from sdmxlib import Dataflow, EditionRegistry, MaintainableArtefact, RestRegistry, WriteSource
     from sdmxlib.edition import JournalEntry, Lifecycle, Manifest
-    from sdmxlib.inventory import Kind
+    from sdmxlib.inventory import Kind, RoutingFields
 
     from statcatlib.model.dataset import Dataset
     from statcatlib.model.skos import Concept, ConceptScheme
@@ -319,6 +319,24 @@ def _named(full: FullInventory | None, product_id: str, edition_id: str) -> bool
     return any(e.edition_id == edition_id for e in full.entries(product_id))
 
 
+def recorded_routing(fields: RoutingFields | None, kind: Kind) -> _Routing:
+    """What a leaf entry records of *fields*: both routing fields, and the artefact records of a structure edition.
+
+    Phase 5 extends the artefact records to data editions (GH-125 part 4).
+
+    Args:
+        fields: The edition's `sdmxlib.inventory.routing_fields`, or ``None``
+            to record none.
+        kind: The product's kind.
+
+    Returns:
+        ``record``'s ``dataflows``, ``pull_bytes`` and ``artefacts``.
+    """
+    if fields is None:
+        return None, None, None
+    return fields.dataflows, fields.pull_bytes, fields.artefacts if kind == "structure" else None
+
+
 def record_journalled(
     leaf: Leaf | None,
     entries: Sequence[tuple[JournalEntry, str, str, Kind]],
@@ -328,6 +346,7 @@ def record_journalled(
     embargo: bool,
     retired: Iterable[str],
     now: datetime,
+    routing: Mapping[str, RoutingFields] | None = None,
 ) -> tuple[Leaf | None, list[str], dict[str, TransitionError]]:
     """Record each journalled edition in *leaf*, by the journal rule.
 
@@ -340,6 +359,8 @@ def record_journalled(
         embargo: The head's embargo setting.
         retired: The edition ids the head tombstones for the product.
         now: The record time.
+        routing: Each edition's routing fields, by edition id; an edition
+            not in it is recorded without them.
 
     Returns:
         The next leaf (``None`` when nothing changed), the edition ids that are
@@ -352,6 +373,7 @@ def record_journalled(
     refused: dict[str, TransitionError] = {}
     gone = set(retired)
     for entry, sha, schema_version, kind in entries:
+        dataflows, pull_bytes, artefacts = recorded_routing((routing or {}).get(entry.edition_id), kind)
         try:
             current = record(
                 current,
@@ -365,6 +387,9 @@ def record_journalled(
                 embargo=embargo,
                 now=now,
                 retired=gone,
+                artefacts=artefacts,
+                dataflows=dataflows,
+                pull_bytes=pull_bytes,
             )
         except TransitionError as exc:
             held = next((e for e in (current.editions if current else ()) if e.edition_id == entry.edition_id), None)
@@ -459,6 +484,10 @@ type _Journalled = tuple[JournalEntry, str, str, Kind]
 """A journal entry with its edition's ``manifest_sha256``, ``schema_version`` and product kind."""
 
 
+type _Routing = tuple[tuple[str, ...] | None, int | None, Mapping[str, PartialRecord] | None]
+"""``record``'s ``dataflows``, ``pull_bytes`` and ``artefacts``."""
+
+
 def _other_journals(products_dir: Path, product_id: str, exclude: Collection[str]) -> dict[str, list[JournalEntry]]:
     """The journal entries of every product but *product_id* and *exclude*; an unreadable journal is skipped."""
     found: dict[str, list[JournalEntry]] = {}
@@ -490,6 +519,11 @@ class _Repair:
         self._failed: dict[tuple[str, str], Exception] = {}
         self._refused: dict[tuple[str, str], Exception] = {}
         self._given: dict[tuple[str, str], frozenset[str]] = {}
+        self._routing = {
+            entry.edition_id: routing_fields(_edition.read_manifest(self._dir(product_id, entry.edition_id)))
+            for product_id, items in pending.items()
+            for entry, _, _, _ in items
+        }
         self._structures = self._journalled_structures()
         self._check(full)
 
@@ -554,6 +588,7 @@ class _Repair:
                 embargo=head_now.embargo if head_now is not None else False,
                 retired=retired,
                 now=datetime.now(UTC),
+                routing=self._routing,
             )
             for edition_id, exc in found.items():
                 self._refused[product_id, edition_id] = exc
@@ -780,11 +815,13 @@ class _Sealed:
     Attributes:
         edition: The edition.
         schema_version: Its store schema.
+        routing: Its manifest's routing fields, which the record writes.
         partials: The partials its manifest records a ``partial_of`` for.
     """
 
     edition: Edition
     schema_version: str
+    routing: RoutingFields
     partials: tuple[str, ...] = ()
 
 
@@ -1721,7 +1758,12 @@ class WorkingCopy:
             previous=manifest.previous,
             manifest_sha256=manifest_sha256(edition_dir),
         )
-        return _Sealed(edition=edition, schema_version=manifest.schema_version, partials=cut_partials(manifest))
+        return _Sealed(
+            edition=edition,
+            schema_version=manifest.schema_version,
+            routing=routing_fields(manifest),
+            partials=cut_partials(manifest),
+        )
 
     def _next_leaf(self, full: FullInventory | None, sealed: _Sealed) -> Leaf:
         """Seal step 6's record: the product's next leaf in *full*, with *sealed* recorded.
@@ -1741,6 +1783,7 @@ class WorkingCopy:
         product_id, edition_id = self._product_id, self._edition_id
         leaf = full.leaf(product_id) if full is not None and product_id in full.products() else None
         retired = {t.edition_id for t in full.retired if t.product_id == product_id} if full else set()
+        dataflows, pull_bytes, artefacts = recorded_routing(sealed.routing, self._kind)
         try:
             return record(
                 leaf,
@@ -1754,6 +1797,9 @@ class WorkingCopy:
                 embargo=full.embargo if full is not None else False,
                 now=datetime.now(UTC),
                 retired=retired,
+                artefacts=artefacts,
+                dataflows=dataflows,
+                pull_bytes=pull_bytes,
             )
         except TransitionError as exc:
             raise InventoryRuleError.wrapping(exc, product=product_id, edition=edition_id) from exc

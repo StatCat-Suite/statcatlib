@@ -265,6 +265,9 @@ and checks:
   rules;
 - for each edition a leaf records, in any state but retired, that its
   `manifest.json` has the SHA-256 the Inventory records;
+- each of those entries' filled `dataflows`, `pull_bytes` and `artefacts`
+  against the manifest's (`sdmxlib.inventory.verify_entry`), skipping an entry
+  without them, with the leaf as the finding's file;
 - each of those editions with
   `sdmxlib.edition.check_edition(at="publish", extensions={"statcat": check_catalog})`:
   the size and digests of every file the manifest lists, the product's shared

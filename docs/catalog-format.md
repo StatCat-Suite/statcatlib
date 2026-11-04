@@ -56,6 +56,12 @@ not repeated here.
   writer that loses a race computes both again from the new head. The first
   root records `null` and its products. A root an earlier statcatlib wrote has
   neither field, and the next root links it the same way.
+- Every leaf entry a statcatlib of this format records carries `dataflows`,
+  its manifest's binding URNs sorted and without duplicates, and `pull_bytes`,
+  the size of its `required`-tier files. A structure edition's entry also
+  carries `artefacts`, its manifest's records. A data edition's entry leaves
+  `artefacts` out. An entry without the fields is read from its manifest, and
+  `statcat verify-catalog` checks each filled field against the manifest.
 - `created_at` is at least the base version's plus 1 ms, and a writer refuses
   a base version more than 5 minutes ahead of its clock. A writer of this
   format takes no catalog lock, so it refuses a `catalog.json` at format 2.x.

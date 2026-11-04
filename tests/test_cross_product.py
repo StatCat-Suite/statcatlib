@@ -19,14 +19,14 @@ import attrs
 import pytest
 import sdmxlib as sl
 from sdmxlib.edition import read_manifest
-from sdmxlib.inventory import FullInventory, local_fetch
+from sdmxlib.inventory import FullInventory, local_fetch, manifest_records
 
 import statcatlib as sc
 from statcatlib import catalog as catalog_module
 from statcatlib import diagnostics, testing
 from statcatlib.admin import CatalogAdmin
 from statcatlib.store import cross_product
-from statcatlib.store.cross_product import Refusal, manifest_records
+from statcatlib.store.cross_product import Refusal
 from statcatlib.testing import STRUCTURE_PRODUCTS, CodrShape, codr_product, codr_structures
 
 pytestmark = pytest.mark.integration

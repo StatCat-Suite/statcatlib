@@ -211,7 +211,9 @@ read.
 - `verify_catalog(path) -> VerifyReport`: reads `FullInventory`; reports each
   root the read protocol skipped (`full.skipped`), each leaf that fails its
   hash or `validate_leaf`, and for every leaf entry a `manifest.json` whose
-  SHA-256 differs from the entry's, then runs
+  SHA-256 differs from the entry's, or, when it matches, each filled routing
+  field or artefact record `sdmxlib.inventory.verify_entry` finds differing,
+  with the leaf as the finding's file, then runs
   `check_edition(at="publish", structures=..., extensions={"statcat":
   check_catalog})`, with `structures=` from `_structures_for`: every recorded
   edition of every structure product for a data edition, the other

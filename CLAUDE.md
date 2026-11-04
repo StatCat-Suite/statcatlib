@@ -353,6 +353,9 @@ Inventory and seals editions:
   (Inventory 1.2, GH-125), and `try_commit` raises
   `InventoryWriteRefusedError` for a `catalog.json` at 2.x, decoded with
   `decoder="stage-1-writer"`, or a base more than 5 minutes ahead of the clock.
+  Each entry a seal or the journal repair records carries `dataflows` and
+  `pull_bytes`, and a structure entry `artefacts`
+  (`sdmxlib.inventory.routing_fields`, GH-98); `verify-catalog` checks them.
 - **The cross-product rules.** `commit` runs `InventoryWriter.refusals`
   (`store/cross_product.py`) on every change that makes an entry live or
   embargoed, and raises the first `CrossProductRuleError` by product id:
