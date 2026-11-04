@@ -72,7 +72,7 @@ src/
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
     ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog
-    ├── testing.py      # temporary_catalog(); synthetic_catalog(); the CODR generator (codr_structures, codr_product)
+    ├── testing.py      # temporary_catalog(); synthetic_catalog(); the CODR generator (codr_structures, codr_product, codr_corpus)
     ├── urn.py          # Convenience URN builders for SDMX artefacts
     └── __init__.py     # Public API re-exports
 ```
