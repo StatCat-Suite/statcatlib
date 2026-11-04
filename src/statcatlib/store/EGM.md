@@ -149,17 +149,23 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   reader the rules use; `cross_product.ManifestArtefacts(root)` by default),
   `catalog_document()`, `has_version()`, `full() -> FullInventory | None`,
   `head() -> Root | None`, `write_catalog_json(*, catalog_id=None)`,
-  `try_commit(base, leaves, *, retired=None, embargo=None, extensions=None,
-  kind, reason) -> Root` (no cross-product rule), `refusals(full, leaves, *,
+  `check_writable(base, *, now=None) -> CatalogDocument` (the two stage-1
+  refusals alone), `try_commit(base, leaves, *, retired=None, embargo=None,
+  extensions=None, built_from=None, now=None, kind, reason) -> Root` (no
+  cross-product rule), `refusals(full, leaves, *,
   artefacts=None) -> dict[str, CrossProductRuleError]`, and `commit(change,
   *, kind, reason) -> Root`, which runs `refusals` on each planned change and
   raises the first refusal by product id before writing.
-- `Change(leaves, retired=None, embargo=None, extensions=None)`: what
+- `Change(leaves, retired=None, embargo=None, extensions=None,
+  built_from=None)`: what
   `commit`'s *change* callable returns for a head.
 - `MAX_RACES = 8`. `producer()` returns
   `Producer(name="statcatlib", version=<installed version>)`.
 - Errors: `InventoryConflictError` (another writer created the version
   first), `InventoryContentionError` (`MAX_RACES` lost in a row),
+  `InventoryWriteRefusedError` (a subclass of sdmxlib's `InventoryError`: a
+  `catalog.json` at 2.x, or a base version more than 5 minutes ahead of this
+  machine's clock, named in the message),
   `InventoryRuleError(message, *, rule, product, edition)` with
   `InventoryRuleError.wrapping(exc, ...)` over sdmxlib's `TransitionError`,
   and its subclasses `NonFastForwardError` and `CrossProductRuleError(message,
@@ -343,7 +349,8 @@ Imports only sdmxlib, so `inventory.py` can import it.
   one whose check was given a journalled structure edition not recorded,
   is dropped. Any other refusal, and a failed check, clears the entry and
   logs a WARNING.
-  `InventoryContentionError` keeps the entry for the next working copy. An
+  `InventoryContentionError` and `InventoryWriteRefusedError` keep the entry
+  for a later working copy. An
   unreadable entry raises `JournalError`.
 - A refusal after the manifest (a rollback landing during the seal) raises
   `NonFastForwardError` from the record; the seal clears the journal entry,
@@ -358,7 +365,15 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `FileExistsError` becomes `InventoryConflictError`; a leaf that exists already counts as written, since
   its name is the hash of its bytes. It writes leaves, then the root, then
   `CURRENT`, and replaces `CURRENT` only with a higher `seq` in the same
-  `restore_epoch`. `commit` re-reads the head and calls *change* again after
+  `restore_epoch`. Every root it writes carries `previous_root_sha256` and
+  `changes`, from root `seq - 1`'s stored bytes and the leaves of each product
+  whose pointer or tombstones change, also when `built_from` names an older
+  version; only those leaves are read. `try_commit` runs `check_writable`
+  first: `catalog.json` is decoded with `decoder="stage-1-writer"`, and
+  `next_created_at` refuses a base more than 5 minutes ahead. The seal's
+  `_precheck` runs it too, so a refused seal writes nothing and leaves the
+  working copy open. `catalog_document()` decodes as a reader does.
+  `commit` re-reads the head and calls *change* again after
   each `InventoryConflictError`, so every rule is evaluated against the
   version the commit lands on, and raises `InventoryContentionError` after
   `MAX_RACES`. A root records `catalog.json`'s `restore_epoch`, and its
@@ -401,9 +416,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
 
 - Run: `just ci`
 - Unit tier only: `uv run pytest -m unit`
-- The Inventory writer: `tests/test_inventory_writer.py` (unit) and
+- The Inventory writer: `tests/test_inventory_writer.py` (unit),
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
-  suite). The cross-product rules: `tests/test_cross_product_rules.py` (unit,
+  suite and `run_history`) and `tests/test_inventory_history.py` (integration:
+  the chain over seals, a correction, a lost race, the fast base, an opted-in
+  catalog). The cross-product rules: `tests/test_cross_product_rules.py` (unit,
   `refusals` over built leaves) and `tests/test_cross_product.py`
   (integration: seals, batches, releases, rollbacks, stale editions,
   partials with no structure home, the committed sabotage test). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`

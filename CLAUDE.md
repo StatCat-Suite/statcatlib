@@ -348,7 +348,11 @@ Inventory and seals editions:
   `change` after each lost race, and raises `InventoryContentionError` after
   `MAX_RACES` (8). sdmxlib's refusals become `InventoryRuleError`, and a
   `fast-forward` refusal becomes `NonFastForwardError`. `Catalog.create`
-  refuses a filesystem without hard links.
+  refuses a filesystem without hard links. Every root carries
+  `previous_root_sha256` and `changes` from root `seq - 1` and its leaves
+  (Inventory 1.2, GH-125), and `try_commit` raises
+  `InventoryWriteRefusedError` for a `catalog.json` at 2.x, decoded with
+  `decoder="stage-1-writer"`, or a base more than 5 minutes ahead of the clock.
 - **The cross-product rules.** `commit` runs `InventoryWriter.refusals`
   (`store/cross_product.py`) on every change that makes an entry live or
   embargoed, and raises the first `CrossProductRuleError` by product id:
@@ -700,7 +704,7 @@ stating it.
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
-  caps each suite dependency below its next minor (`sdmxlib>=0.84,<0.85`),
+  caps each suite dependency below its next minor (`sdmxlib>=0.85,<0.86`),
   and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.

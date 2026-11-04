@@ -5,8 +5,8 @@
 `statcatlib` is the package root. `__init__.py` re-exports the public API of
 `model`, `sources` and `store`; `CatalogAdmin` from `admin.py`; `Catalog`, `Product`, `Edition`,
 `SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
-`InventoryContentionError`, `InventoryRuleError`, `NonFastForwardError` and
-`CrossProductRuleError` from `store/inventory.py`, and `WorkingCopyExistsError`,
+`InventoryContentionError`, `InventoryRuleError`, `InventoryWriteRefusedError`,
+`NonFastForwardError` and `CrossProductRuleError` from `store/inventory.py`, and `WorkingCopyExistsError`,
 `WorkingCopyClosedError`, `SealCheckError`, `EditionCheckError` and `JournalError` from
 `store/working_copy.py`; `NotLoadedError` and `is_unloaded` from the store's
 sentinel module; and part of `expr` (listed below). It exposes `checks`,
@@ -94,8 +94,8 @@ and test catalogs (`testing.py`).
   `Edition`, all recorded in one version) and `refused` (product id to the
   error: `SealCheckError`, `NonFastForwardError` or another
   `InventoryRuleError` (`CrossProductRuleError` from the pre-check or the
-  record included), `ManifestError`, `EditionCheckError`, or
-  `InventoryContentionError`).
+  record included), `ManifestError`, `EditionCheckError`,
+  `InventoryContentionError`, or `InventoryWriteRefusedError`).
 - `Edition` is re-exported from `store/working_copy.py`.
 
 ### `admin.py`

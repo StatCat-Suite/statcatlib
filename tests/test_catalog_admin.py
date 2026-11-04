@@ -80,13 +80,23 @@ def _race_once(monkeypatch: pytest.MonkeyPatch, writer: InventoryWriter, competi
         retired: Sequence[Tombstone] | None = None,
         embargo: bool | None = None,
         extensions: Mapping[str, Mapping[str, object]] | None = None,
+        built_from: int | None = None,
         kind: EventKind,
         reason: str,
     ) -> Root:
         if not calls:
             calls.append(1)
             competing()
-        return original(base, leaves, retired=retired, embargo=embargo, extensions=extensions, kind=kind, reason=reason)
+        return original(
+            base,
+            leaves,
+            retired=retired,
+            embargo=embargo,
+            extensions=extensions,
+            built_from=built_from,
+            kind=kind,
+            reason=reason,
+        )
 
     monkeypatch.setattr(writer, "try_commit", raced)
 

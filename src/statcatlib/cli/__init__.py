@@ -539,7 +539,13 @@ def prune(
     try:
         admin = sc.CatalogAdmin.open(path)
         report = admin.prune(older_than=timedelta(days=older_than), reason=reason, dry_run=not apply)
-    except (IncompatibleCatalogError, sc.InventoryRuleError, sc.InventoryContentionError, ValueError) as exc:
+    except (
+        IncompatibleCatalogError,
+        sc.InventoryRuleError,
+        sc.InventoryContentionError,
+        sc.InventoryWriteRefusedError,
+        ValueError,
+    ) as exc:
         _say(f"Cannot prune the catalog: {exc}", style="red")
         raise typer.Exit(code=1) from None
     for product_id, why in report.skipped_products.items():

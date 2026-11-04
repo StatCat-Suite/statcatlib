@@ -37,7 +37,13 @@ from sdmxlib.edition import Finding, ManifestError, read_manifest
 from sdmxlib.inventory import CATALOG_NAME, LiveEdition, LiveInventory, decode_root, local_fetch, root_path
 
 from statcatlib.bundle import description_from_root
-from statcatlib.store.inventory import Change, InventoryContentionError, InventoryRuleError, InventoryWriter
+from statcatlib.store.inventory import (
+    Change,
+    InventoryContentionError,
+    InventoryRuleError,
+    InventoryWriter,
+    InventoryWriteRefusedError,
+)
 from statcatlib.store.store import VIEW_ATTRIBUTES, EditionView, IncompatibleCatalogError, _Store
 from statcatlib.store.working_copy import (
     Edition,
@@ -289,7 +295,7 @@ def _seal_ready(
     for wc in working_copies:
         try:
             wc._precheck(checks, batch=batch)
-        except (SealCheckError, InventoryRuleError, InventoryContentionError) as exc:
+        except (SealCheckError, InventoryRuleError, InventoryContentionError, InventoryWriteRefusedError) as exc:
             refused[wc.product_id] = exc
         else:
             ready.append(wc)
@@ -478,6 +484,12 @@ def _record_batch(
         for done in sealed:
             msg = f"{exc}; the edition {done.wc.edition_id} is recorded at the next working_copy()"
             refused[done.wc.product_id] = InventoryContentionError(msg)
+        return {}
+    except InventoryWriteRefusedError as exc:
+        # The journal entries stay, so a later working_copy() records each edition.
+        for done in sealed:
+            msg = f"{exc}; the edition {done.wc.edition_id} stays unrecorded until a working_copy() can record it"
+            refused[done.wc.product_id] = InventoryWriteRefusedError(msg)
         return {}
     recorded: dict[str, Edition] = {}
     for done in sealed:

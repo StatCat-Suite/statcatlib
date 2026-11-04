@@ -164,6 +164,7 @@ class TestStoreExports:
             "InventoryConflictError",
             "InventoryContentionError",
             "InventoryRuleError",
+            "InventoryWriteRefusedError",
             "NonFastForwardError",
             "CrossProductRuleError",
             "WorkingCopyExistsError",

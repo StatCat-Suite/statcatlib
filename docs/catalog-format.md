@@ -12,7 +12,7 @@ of the manifest, and the checks that hold the three to each other.
 
 It describes **statcat section format 3**, **search index manifest version 3**
 and **embeddings sidecar version 4**, on sdmxlib's manifest format 3.0 and
-Inventory format 1.0. statcatlib's code is the reference implementation
+Inventory format 1.2. statcatlib's code is the reference implementation
 (`statcatlib.catalog`, `statcatlib.bundle`, `statcatlib.store.inventory`,
 `statcatlib.store.lance`).
 
@@ -49,6 +49,16 @@ not repeated here.
   fsyncing it, hard-linking it to its name and fsyncing the directory, so a
   name never holds half a file and two writers never both create one root.
   `CURRENT` is replaced only by a higher `seq`.
+- Every root carries `previous_root_sha256`, the SHA-256 of the stored bytes
+  of root `seq - 1`, and `changes`, the change list against root `seq - 1` and
+  its leaves. A correction built from an older version records that version
+  in `previous_inventory` and still links and diffs against root `seq - 1`. A
+  writer that loses a race computes both again from the new head. The first
+  root records `null` and its products. A root an earlier statcatlib wrote has
+  neither field, and the next root links it the same way.
+- `created_at` is at least the base version's plus 1 ms, and a writer refuses
+  a base version more than 5 minutes ahead of its clock. A writer of this
+  format takes no catalog lock, so it refuses a `catalog.json` at format 2.x.
 - `Catalog.open` reads the Inventory with sdmxlib's `LiveInventory` and
   writes nothing.
 - An edition without `manifest.json` is unsealed: a product's working copy.

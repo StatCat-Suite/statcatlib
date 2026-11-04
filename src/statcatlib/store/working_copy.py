@@ -38,6 +38,7 @@ version:
 | The cross-product rules refuse it | Clear the entry, log a WARNING, leave the edition |
 | Its check was given a structure edition that is not recorded | Clear the entry, log a WARNING, leave the edition |
 | `InventoryContentionError` | Keep the entry, so the next working copy records it |
+| `InventoryWriteRefusedError` | Keep the entry, so a working copy records it once the catalog or the clock allows |
 | The entry cannot be read | Raise `JournalError` naming the file and ``statcat doctor`` |
 
 Another product's entry is acted on only when its edition has a manifest and
@@ -80,6 +81,7 @@ from statcatlib.store.inventory import (
     InventoryContentionError,
     InventoryRuleError,
     InventoryWriter,
+    InventoryWriteRefusedError,
     NonFastForwardError,
     producer,
 )
@@ -410,8 +412,10 @@ def settle_journal(
 
     An entry of the product that cannot be read raises `JournalError`;
     another product's unreadable journal is left to that product. A record
-    that loses too many races raises `InventoryContentionError`, and the
-    entries are kept for the next working copy.
+    that loses too many races raises `InventoryContentionError`, a catalog or
+    base version the writer must not write on raises
+    `InventoryWriteRefusedError`, and either way the entries are kept for a
+    later working copy.
     """
     products_dir = product_dir.parent
     own = _read_journal(product_dir)
@@ -594,6 +598,9 @@ class _Repair:
         except InventoryContentionError as exc:
             msg = f"{exc}; the journalled edition is recorded at the next working_copy()"
             raise InventoryContentionError(msg) from exc
+        except InventoryWriteRefusedError as exc:
+            msg = f"{exc}; the journalled edition stays unrecorded until a working_copy() can record it"
+            raise InventoryWriteRefusedError(msg) from exc
 
 
 class _NothingToRepairError(Exception):
@@ -1443,6 +1450,11 @@ class WorkingCopy:
                 disk unrecorded.
             InventoryContentionError: The record lost too many races; the
                 product's next ``working_copy()`` records the edition.
+            InventoryWriteRefusedError: The catalog has opted in to expiry, or
+                the newest Inventory version's time is more than 5 minutes
+                ahead of this machine's clock. Raised from the pre-check, it
+                leaves the working copy open; raised from the record, it keeps
+                the journal entry for a later ``working_copy()``.
 
         Before anything is written, a check's finding raises `SealCheckError`
         (for a structure product, also each dataflow, binding or partial it
@@ -1479,6 +1491,9 @@ class WorkingCopy:
         except InventoryContentionError as exc:
             msg = f"{exc}; the edition {self._edition_id} is recorded at the next working_copy()"
             raise InventoryContentionError(msg) from exc
+        except InventoryWriteRefusedError as exc:
+            msg = f"{exc}; the edition {self._edition_id} stays unrecorded until a working_copy() can record it"
+            raise InventoryWriteRefusedError(msg) from exc
         self._recorded()
         return sealed.edition
 
@@ -1501,8 +1516,12 @@ class WorkingCopy:
         Raises:
             SealCheckError: A check found something.
             NonFastForwardError: The base is no longer the live edition.
+
+        A catalog or a base version the writer must not write on raises
+        `InventoryWriteRefusedError` first.
         """
         store = self._live()
+        self._writer.check_writable(self._writer.head())
         settle_journal(
             self._writer,
             self._product_dir,
