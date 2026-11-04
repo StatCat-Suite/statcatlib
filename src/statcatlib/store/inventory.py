@@ -3,7 +3,7 @@
 sdmxlib owns the Inventory's documents, their validation and the state
 transition rules (`sdmxlib.inventory`). statcatlib writes them, and this module
 is the only code that writes ``catalog.json``, ``inventory/`` and ``CURRENT``.
-It adds three things to sdmxlib's helpers:
+It adds these things to sdmxlib's helpers:
 
 - **exclusive create**: each document is written by
   `sdmxlib.storage.create_exclusive`, which stages the file, fsyncs it,
@@ -17,7 +17,14 @@ It adds three things to sdmxlib's helpers:
 - **the cross-product rules** (`statcatlib.store.cross_product`, Phase 3):
   `InventoryWriter.commit` refuses a version that breaks specification §6.5
   item 4, 7 or 8 for an entry that becomes live or embargoed in it, with
-  `CrossProductRuleError`.
+  `CrossProductRuleError`;
+- **the history fields** (Inventory 1.2, GH-125): every root carries
+  ``previous_root_sha256`` and ``changes``, computed from root ``seq - 1`` and
+  its leaves, whatever version a correction is built from, and again after a
+  lost race;
+- **the stage-1 refusals**: every commit decodes ``catalog.json`` as a writer
+  without the catalog lock, so it refuses a catalog that has opted in to expiry,
+  and refuses a base version more than 5 minutes ahead of this machine's clock.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from sdmxlib.inventory import (
     CATALOG_NAME,
     CURRENT_NAME,
     CatalogDocument,
+    ChangeItem,
     Current,
     Event,
     EventKind,
@@ -48,24 +56,26 @@ from sdmxlib.inventory import (
     Root,
     Tombstone,
     TransitionError,
+    change_list,
     decode_catalog,
     decode_current,
+    decode_leaf,
     encode,
     leaf_ref,
     local_fetch,
+    next_created_at,
     next_root,
     root_path,
     sha256_hex,
-    validate_root,
 )
 from sdmxlib.storage import create_exclusive
 
 from statcatlib.store import cross_product
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
-    from sdmxlib.inventory import Rule
+    from sdmxlib.inventory import LeafRef, Rule
     from sdmxlib.storage import JsonValue
 
     from statcatlib.store.cross_product import Artefacts, CrossRule
@@ -77,6 +87,7 @@ __all__ = [
     "InventoryConflictError",
     "InventoryContentionError",
     "InventoryRuleError",
+    "InventoryWriteRefusedError",
     "InventoryWriter",
     "NonFastForwardError",
     "producer",
@@ -98,6 +109,18 @@ class InventoryConflictError(Exception):
 
 class InventoryContentionError(Exception):
     """A commit lost `MAX_RACES` races in a row to other writers, and gave up."""
+
+
+class InventoryWriteRefusedError(InventoryError):
+    """This writer must not write the next Inventory version, whatever the version holds.
+
+    The catalog has opted in to expiry (``catalog.json`` 2.x), which needs a
+    writer with the catalog lock, or the base version's ``created_at`` is more
+    than 5 minutes ahead of this machine's clock. The message names the
+    format, or the base version's time and this machine's. It stays refused
+    until the catalog or the clock changes, so a seal refused after its
+    manifest keeps its journal entry, as `InventoryContentionError` does.
+    """
 
 
 class InventoryRuleError(Exception):
@@ -229,12 +252,16 @@ class Change:
         retired: The tombstones the next root holds; ``None`` keeps the head's.
         embargo: The next root's embargo setting; ``None`` keeps the head's.
         extensions: The next root's extension sections; ``None`` keeps the head's.
+        built_from: The older version a correction is built from
+            (``previous_inventory``); ``None`` builds from the head. The
+            history fields follow the head either way.
     """
 
     leaves: Mapping[str, Leaf]
     retired: Sequence[Tombstone] | None = None
     embargo: bool | None = None
     extensions: Mapping[str, Mapping[str, JsonValue]] | None = None
+    built_from: int | None = None
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -313,7 +340,10 @@ class InventoryWriter:
     # -- reading ---------------------------------------------------------
 
     def catalog_document(self) -> CatalogDocument:
-        """``catalog.json``, decoded; a missing one raises `FileNotFoundError`, a malformed one `InventoryError`."""
+        """``catalog.json``, decoded as a reader decodes it, 2.x included.
+
+        A missing one raises `FileNotFoundError`, a malformed one `InventoryError`.
+        """
         return decode_catalog((self._root / CATALOG_NAME).read_bytes())
 
     def has_version(self) -> bool:
@@ -378,6 +408,81 @@ class InventoryWriter:
         create_exclusive(self._root / CATALOG_NAME, encode(document))
         return document
 
+    def check_writable(self, base: Root | None, *, now: datetime | None = None) -> CatalogDocument:
+        """Refuse a commit this writer must not make on top of *base*, and return ``catalog.json``.
+
+        Every commit runs it first, and a seal runs it before it writes
+        anything.
+
+        Args:
+            base: The newest version, or ``None`` for the catalog's first.
+            now: This machine's time; the clock when ``None``.
+
+        Returns:
+            ``catalog.json``, decoded as a writer without the catalog lock.
+
+        Raises:
+            InventoryWriteRefusedError: ``catalog.json`` is malformed or 2.x, or
+                *base* was created more than 5 minutes ahead of *now*; the
+                message names the format or the base version's time.
+
+        A missing ``catalog.json`` raises `FileNotFoundError`.
+        """
+        raw = (self._root / CATALOG_NAME).read_bytes()
+        try:
+            document = decode_catalog(raw, decoder="stage-1-writer")
+            next_created_at(base, now or datetime.now(UTC))
+        except InventoryError as exc:
+            raise InventoryWriteRefusedError(str(exc)) from exc
+        return document
+
+    def _stored_root(self, base: Root) -> bytes:
+        """The stored bytes of *base*; a root a restore removed means another writer moved the head."""
+        try:
+            return (self._root / root_path(base.seq)).read_bytes()
+        except FileNotFoundError as exc:
+            msg = f"Inventory version {base.seq} no longer exists"
+            raise InventoryConflictError(msg) from exc
+
+    def _base_leaves(
+        self, base: Root, products: Mapping[str, LeafRef], retired: Iterable[Tombstone]
+    ) -> dict[str, Leaf]:
+        """The leaves of *base* the change list reads: each product whose pointer or tombstones change.
+
+        Args:
+            base: The base version, root ``seq - 1``.
+            products: Every product's leaf pointer in the new version.
+            retired: The new version's tombstones.
+
+        Returns:
+            Those products' leaves in *base*, by product.
+
+        Raises:
+            InventoryError: A leaf is missing or malformed.
+        """
+        moved = {t.product_id for t in set(base.retired) ^ set(retired)}
+        moved |= {p for p, ref in base.products.items() if products.get(p) != ref}
+        found: dict[str, Leaf] = {}
+        for product_id in moved & base.products.keys():
+            ref = base.products[product_id]
+            try:
+                found[product_id] = decode_leaf((self._root / ref.leaf).read_bytes())
+            except FileNotFoundError as exc:
+                msg = f"{product_id}'s leaf {ref.leaf} in Inventory version {base.seq} is missing"
+                raise InventoryError(msg) from exc
+        return found
+
+    def _changes(
+        self,
+        base: Root | None,
+        leaves: Mapping[str, Leaf],
+        products: Mapping[str, LeafRef],
+        retired: Sequence[Tombstone],
+    ) -> tuple[ChangeItem, ...]:
+        """The change list of the version after *base*, which is root ``seq - 1`` whatever it is built from."""
+        base_leaves = {} if base is None else self._base_leaves(base, products, retired)
+        return change_list(base, base_leaves, products=products, leaves=leaves, retired=retired)
+
     def try_commit(
         self,
         base: Root | None,
@@ -386,10 +491,15 @@ class InventoryWriter:
         retired: Sequence[Tombstone] | None = None,
         embargo: bool | None = None,
         extensions: Mapping[str, Mapping[str, JsonValue]] | None = None,
+        built_from: int | None = None,
+        now: datetime | None = None,
         kind: EventKind,
         reason: str,
     ) -> Root:
         """Write the version after *base*, once: its changed leaves, its root, then ``CURRENT``.
+
+        The root carries the history fields, computed from *base*'s stored
+        bytes and its leaves, also when *built_from* names an older version.
 
         Args:
             base: The newest version, read before the change was computed, or
@@ -399,6 +509,9 @@ class InventoryWriter:
             retired: The tombstones; *base*'s when ``None``.
             embargo: The embargo setting; *base*'s when ``None``.
             extensions: The extension sections; *base*'s when ``None``.
+            built_from: The older version a correction is built from; *base*
+                when ``None``.
+            now: This machine's time; the clock when ``None``.
             kind: What the version records (``event.kind``).
             reason: Why, in the caller's words (``event.reason``).
 
@@ -408,25 +521,34 @@ class InventoryWriter:
         Raises:
             InventoryConflictError: Another writer created the version after
                 *base* first.
+
+        `check_writable` raises `InventoryWriteRefusedError` before anything is
+        written.
         """
+        now = now or datetime.now(UTC)
+        catalog = self.check_writable(base, now=now)
+        previous_bytes = None if base is None else self._stored_root(base)
         products = dict(base.products) if base is not None else {}
         for product_id, leaf in leaves.items():
             data, ref = leaf_ref(leaf)
             self._write_leaf(self._root / ref.leaf, data)
             products[product_id] = ref
+        tombstones = tuple(retired) if retired is not None else (base.retired if base is not None else ())
         root = next_root(
             base,
             products=products,
             event=Event(actor=_actor(), reason=reason, kind=kind),
             producer=producer(),
-            now=datetime.now(UTC),
-            retired=retired,
+            now=now,
+            retired=tombstones,
             embargo=embargo,
             # A root records catalog.json's restore_epoch when it is written.
-            restore_epoch=self.catalog_document().restore_epoch,
+            restore_epoch=catalog.restore_epoch,
+            built_from=built_from,
             extensions=extensions,
+            previous_bytes=previous_bytes,
+            changes=self._changes(base, leaves, products, tombstones),
         )
-        validate_root(root)
         data = encode(root)
         try:
             create_exclusive(self._root / root_path(root.seq), data)
@@ -466,7 +588,9 @@ class InventoryWriter:
         A version that breaks a cross-product rule raises the first refused
         product's `CrossProductRuleError`, by product id, and a manifest the
         rules cannot read raises `sdmxlib.edition.ManifestError`; neither
-        writes anything.
+        writes anything. `try_commit` raises `InventoryWriteRefusedError` for a
+        catalog or a base version this writer must not write on, and it
+        writes nothing either.
         """
         for _ in range(MAX_RACES):
             full = self.full()
@@ -479,6 +603,7 @@ class InventoryWriter:
                     retired=planned.retired,
                     embargo=planned.embargo,
                     extensions=planned.extensions,
+                    built_from=planned.built_from,
                     kind=kind,
                     reason=reason,
                 )

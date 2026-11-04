@@ -93,6 +93,7 @@ from statcatlib.store.inventory import (
     InventoryConflictError,
     InventoryContentionError,
     InventoryRuleError,
+    InventoryWriteRefusedError,
     NonFastForwardError,
 )
 from statcatlib.store.sentinel import NotLoadedError, is_unloaded
@@ -159,6 +160,7 @@ __all__ = [
     "InventoryConflictError",
     "InventoryContentionError",
     "InventoryRuleError",
+    "InventoryWriteRefusedError",
     "JournalError",
     "LicenceDocument",
     "MicrodataDataset",
