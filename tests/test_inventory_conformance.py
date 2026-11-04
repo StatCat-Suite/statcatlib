@@ -45,6 +45,7 @@ from sdmxlib.inventory.conformance import (
     HistoryBackend,
     Reader,
     Snapshot,
+    check_the_routing_fields_survive_a_commit_and_a_reinstate,
     run,
     run_history,
 )
@@ -200,6 +201,11 @@ class WriterBackend:
 def test_the_writer_conforms(check: Callable[[Callable[[], Backend]], None], tmp_path: Path) -> None:
     counter = itertools.count()
     check(lambda: WriterBackend(tmp_path / f"catalog-{next(counter)}"))
+
+
+def test_the_routing_fields_survive_the_writer(tmp_path: Path) -> None:
+    counter = itertools.count()
+    check_the_routing_fields_survive_a_commit_and_a_reinstate(lambda: WriterBackend(tmp_path / f"c{next(counter)}"))
 
 
 def test_run_passes_every_check(tmp_path: Path) -> None:
