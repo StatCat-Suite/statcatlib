@@ -5,7 +5,8 @@ Two functions, each run by a ``statcat`` command:
 - `verify_catalog` (``statcat verify-catalog PATH``) reads the newest valid
   Inventory version with `sdmxlib.inventory.FullInventory`. It checks every
   root the read protocol skipped, every leaf, and, for every entry the leaves
-  hold, the ``manifest_sha256`` the Inventory records. It then runs
+  hold, the ``manifest_sha256`` the Inventory records and the routing fields
+  and artefact records it holds. It then runs
   `sdmxlib.edition.check_edition` at the ``publish`` profile with
   `statcatlib.bundle.check_catalog`, which checks every file the manifest
   lists, the shared ``data/`` files included, each partial against the
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from attrs import frozen
-from sdmxlib.edition import MANIFEST_NAME, ManifestError, check_edition, list_editions, read_journal
+from sdmxlib.edition import MANIFEST_NAME, ManifestError, check_edition, list_editions, read_journal, read_manifest
 from sdmxlib.inventory import (
     CATALOG_NAME,
     CURRENT_NAME,
@@ -41,6 +42,7 @@ from sdmxlib.inventory import (
     InventoryError,
     decode_current,
     validate_leaf,
+    verify_entry,
 )
 
 from statcatlib.bundle import STATCAT_SECTION, check_catalog
@@ -281,8 +283,23 @@ def _structures_for(full: FullInventory, root: Path, product_id: str) -> list[Pa
     return found
 
 
-def _verify_edition(root: Path, product_id: str, entry: LeafEntry, structures: list[Path]) -> list[VerifyFinding]:
-    """Check one recorded edition: its manifest's SHA-256, then `check_edition` at ``publish`` with *structures*."""
+def _routing_findings(leaf_file: str, entry: LeafEntry, edition_dir: Path) -> list[VerifyFinding]:
+    """Each filled routing field or artefact record of *entry* that differs from its manifest (`verify_entry`).
+
+    The caller has checked the manifest's SHA-256. A manifest that cannot be
+    parsed is left to `check_edition`, which reports it.
+    """
+    try:
+        manifest = read_manifest(edition_dir)
+    except ManifestError:
+        return []
+    return [VerifyFinding(file=leaf_file, detail=detail) for detail in verify_entry(entry, manifest)]
+
+
+def _verify_edition(
+    root: Path, product_id: str, leaf_file: str, entry: LeafEntry, structures: list[Path]
+) -> list[VerifyFinding]:
+    """Check one edition: its manifest's SHA-256, its entry's fields, then `check_edition` with *structures*."""
     edition_rel = f"products/{product_id}/{entry.edition_id}"
     edition_dir = root / edition_rel
     manifest_rel = f"{edition_rel}/{MANIFEST_NAME}"
@@ -293,6 +310,8 @@ def _verify_edition(root: Path, product_id: str, entry: LeafEntry, structures: l
     if digest != entry.manifest_sha256:
         detail = f"SHA-256 {digest}, the Inventory records {entry.manifest_sha256}"
         found.append(VerifyFinding(file=manifest_rel, detail=detail))
+    else:
+        found += _routing_findings(leaf_file, entry, edition_dir)
     report = check_edition(
         edition_dir, at="publish", structures=structures or None, extensions={STATCAT_SECTION: check_catalog}
     )
@@ -307,7 +326,9 @@ def verify_catalog(path: str | Path) -> VerifyReport:
     read protocol skipped is a finding. For each product it checks the leaf
     against its name and sdmxlib's leaf rules; for each entry of the leaf, in
     every state but retired, it compares ``manifest.json`` with the
-    ``manifest_sha256`` the Inventory records, then runs
+    ``manifest_sha256`` the Inventory records, compares the entry's filled
+    ``dataflows``, ``pull_bytes`` and ``artefacts`` with the manifest's
+    (`sdmxlib.inventory.verify_entry`; an entry without them is skipped), then runs
     ``check_edition(at="publish", extensions={"statcat": check_catalog})``,
     which checks the size and digests of every file the manifest lists,
     ``data/`` files included, the lake, the bindings and the ``statcat``
@@ -345,7 +366,7 @@ def verify_catalog(path: str | Path) -> VerifyReport:
         structures = _structures_for(full, root, product_id)
         for entry in leaf.editions:
             editions.append(f"{product_id}/{entry.edition_id}")
-            findings += _verify_edition(root, product_id, entry, structures)
+            findings += _verify_edition(root, product_id, ref.leaf, entry, structures)
     stale, unread = _stale(full, InventoryWriter(root).artefacts)
     findings += unread
     return VerifyReport(
