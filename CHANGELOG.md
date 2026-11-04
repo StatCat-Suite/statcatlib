@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-11-04
+
+### Breaking Changes
+
+- **deps**: Require sdmxlib>=0.85,<0.86 (GH-125)
+- **store**: Write the history fields in every root and refuse what stage 1 cannot write (GH-125)
+- **store**: Record the routing fields of every edition (GH-98)
+
+### Documentation
+
+- **bench**: Record the Phase 4 corpus measurements of the no-home comparison (GH-124)
+- Describe the history fields and InventoryWriteRefusedError (GH-125)
+- Describe the routing fields a recorded entry carries (GH-98)
+
+### Features
+
+- **testing**: Add the CODR corpus generator and the Phase 4 bench script (GH-124)
+- **diagnostics**: Check each entry's routing fields in verify-catalog (GH-98)
+
+### Testing
+
+- **store**: Run sdmxlib's history conformance against the writer (GH-125)
+- **store**: Cover the routing fields through seals, repairs and verify-catalog (GH-98)
+
 ## [0.13.0] - 2026-11-03
 
 Phase 3: structure products and partial codelists in data products. `docs/upgrading.md`'s 0.13.0 section describes the changes; no catalog is rebuilt.
