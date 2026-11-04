@@ -40,6 +40,21 @@ catches `InventoryRuleError` around a commit also needs to catch it.
 `built_from`, for a correction built from an older version.
 `InventoryWriter.check_writable(base)` runs the two refusals alone.
 
+### Routing fields
+
+Each edition a seal or the journal repair records carries `dataflows` and
+`pull_bytes`, from `sdmxlib.inventory.routing_fields`, and a structure edition
+also carries `artefacts`. An entry an earlier statcatlib recorded keeps none
+of them, and readers fall back to its manifest. A release, a rollback and a
+reinstate keep what the entry holds.
+
+`statcat verify-catalog` reports a filled field that differs from the
+manifest as `FAIL inventory/leaves/<sha256>.json: ...`, and skips an entry
+without the fields.
+
+`statcatlib.store.cross_product.manifest_records` is gone. Import
+`sdmxlib.inventory.manifest_records`, which is the same function.
+
 ## 0.13.0: structure products, on sdmxlib 0.84
 
 statcatlib requires `sdmxlib>=0.84,<0.85`. sdmxlib's

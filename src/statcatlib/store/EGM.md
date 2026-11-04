@@ -115,7 +115,9 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `previous` and `manifest_sha256`.
 - `settle_journal(writer, product_dir, product_id, lifecycle, *,
   exclude=())` applies the journal rule catalog-wide (`_Repair` runs the
-  publish checks and the one commit); `record_journalled(...)` is its pure
+  publish checks and the one commit, with each edition's `routing_fields`);
+  `recorded_routing(fields, kind)` gives `record` both routing fields, and
+  `artefacts` for a structure edition only; `record_journalled(...)` is its pure
   part per product, taking each entry as `(JournalEntry, manifest_sha256,
   schema_version, kind)`.
 - `Planned(product_id, edition_id, leaf, read=None)` and
@@ -190,7 +192,7 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `manifest.json`, checks its SHA-256 (`ManifestError` otherwise) and caches
   by `(edition_id, sha)`; `StoreArtefacts(edition_id, read, *, fallback)`
   answers one working copy's edition with `read()` and the rest with
-  *fallback*; `manifest_records(manifest)` is the shared conversion.
+  *fallback*. The conversion is `sdmxlib.inventory.manifest_records`.
 - `StaleEdition` and `stale_editions(full, artefacts)`: each live or
   embargoed data edition and URN whose fingerprint (a partial's
   `partial_of`) no live or embargoed edition of its structure home holds.
@@ -313,7 +315,7 @@ Imports only sdmxlib, so `inventory.py` can import it.
   writer's journal repair, counts as recorded); clear the journal entry. The steps are split for
   `Catalog.seal`: `_precheck(checks)` (steps 0 to 2), `_seal_edition()`
   (steps 3 to 5, returning a private `_Sealed` with the edition, its
-  manifest's store schema and its `cut_partials`), `_next_leaf(full, sealed)` (the record's leaf;
+  manifest's store schema, its `routing_fields` and its `cut_partials`), `_next_leaf(full, sealed)` (the record's leaf, with `recorded_routing`;
   `InventoryRuleError` on a refusal), `_publish_check(structures)`,
   `_recorded()` and `_unrecorded(exc)` (clear the journal entry; the second
   also logs the WARNING, for an `InventoryRuleError` or an
@@ -420,7 +422,7 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite and `run_history`) and `tests/test_inventory_history.py` (integration:
   the chain over seals, a correction, a lost race, the fast base, an opted-in
-  catalog). The cross-product rules: `tests/test_cross_product_rules.py` (unit,
+  catalog). The routing fields: `tests/test_inventory_routing.py`. The cross-product rules: `tests/test_cross_product_rules.py` (unit,
   `refusals` over built leaves) and `tests/test_cross_product.py`
   (integration: seals, batches, releases, rollbacks, stale editions,
   partials with no structure home, the committed sabotage test). Seals: `tests/test_seal_checks.py`, `tests/test_seal_crash.py`
