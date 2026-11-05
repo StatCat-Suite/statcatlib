@@ -1,11 +1,12 @@
 # Phase 4: the catalog on blob storage
 
 *   **Author:** Gabriel Gellner
-*   **Status:** Draft, revision 3, with the owner's decisions of 2026-11-04 applied. A
-    second, narrower EGM review is pending. Revision 2 had an EGM review
-    ([report](egm/catalog-on-blob-storage/review_report.md): 4 Blocker, 37 Major, 33
-    Minor), which revision 3 applies.
-*   **Date:** 2026-11-04
+*   **Status:** Draft, revision 4, with the owner's decisions of 2026-11-04 and 2026-11-05
+    applied. Both EGM reviews are applied: round 1
+    ([report](egm/catalog-on-blob-storage/review_report.md): 4 Blocker, 37 Major, 33 Minor)
+    and round 2 ([report](egm/catalog-on-blob-storage/round-2/review_report.md): 0 Blocker, 4
+    Major, 20 Minor).
+*   **Date:** 2026-11-05
 *   **Issue:** GH-98. Stage 2's later needs: GH-125. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#19.
 *   **Read against:** statcatlib `e7eba47`, whose code equals `origin/main` `974ea27`
@@ -145,13 +146,19 @@ handoff table gives its owner and order. Owner decisions are under Recorded deci
 | # | Where | Question | Proposal |
 |---|---|---|---|
 | S1 | §6.4 table, against §10.1 and §11.2 | The table says the publish job moves a sealed edition to `embargoed`. §10.1 gives that job no access to `inventory/`, and §11.2 says only the release job writes versions. Its fast-forward precondition also contradicts `record` (`_rules.py`). | Change the table's "who" to the fold, and fix the precondition. |
-| S2 | §6.2, against §10.1 | §6.2 says the actor is "never from the caller". §10.1 says an operator who needs another identity sets it explicitly. | The actor is fixed when the writer's storage is constructed, and no method takes one (D3). |
-| S3 | §6.6 item 4 | "On a server" is undefined. | Read it as every writer over a blob store (D4). |
-| S7 | §10.1 | The publish job's "write" must include reading its own uploads for the digest check. | State it. Storage Blob Data Contributor includes read. |
 | S12 | §11.4 | GC can delete a pending edition's files: an uploaded edition is listed by no recorded manifest, so GC deletes its files, and the fold later records an edition whose bytes are gone (review M5). | Open. Left to the spec's owner, before Phase 5 builds GC. |
 | S13 | §11.2 step 1 | The fold has no source for `lifecycle`: `record` requires it, the manifest has none, and `pending/` holds none (review M7). | Open, for Phase 5. Candidates are the `statcat` section and the `pending/` document. |
 | S14 | §11.2 | The `pending/` document's byte format. D7 defines what upload writes, and Phase 5 reads it. | Adopt D7's form as the contract. |
 | S15 | §4.6 line 277 | Extensions at `open` are "section only", while `check_catalog` runs everything, so each `view()` pays for it. | Align the table, or give `check_catalog` the profile. |
+
+**Spec questions resolved.** sdmxlib#372, merged as `4f9b6c07`, settled these, and they are
+no longer open.
+
+| # | Where | Question | Resolution |
+|---|---|---|---|
+| S2 | §6.2, against §10.1 | §6.2 said the actor is "never from the caller", and §10.1 said an operator who needs another identity sets it explicitly. | Resolved by sdmxlib#372: the actor is fixed when the writer's storage is constructed, and no write method takes one (D3). |
+| S3 | §6.6 item 4 | "On a server" was undefined. | Resolved by sdmxlib#372: every writer over a blob store (D4). |
+| S7 | §10.1 | The publish job's "write" must include reading its own uploads for the digest check. | Resolved by sdmxlib#372: §10.1 states it. |
 
 **Code changes in sdmxlib.**
 
@@ -168,7 +175,7 @@ In order. "Gates" names what cannot start until the row is done.
 
 | Order | Change | Owner | Gates |
 |---|---|---|---|
-| 1 | sdmxlib's `docs/phase-4-restated` PR (#372), merged: the leaf rule, W4, S2, S3 and S7 | sdmxlib | Part 1, Part 2 (S7) |
+| 1 | Done: sdmxlib's `docs/phase-4-restated` PR (#372), merged as `4f9b6c07`, with the leaf rule, W4, S2, S3 and S7 | sdmxlib | Part 1, Part 2 (S7) |
 | 2 | Part 1, on sdmxlib 0.85 | statcatlib | Parts 2 and 4 |
 | 3 | The StatCat-Suite/sdmxlib#371 release: `references=False` (S16) and the `decode_manifest` export (S6), with spec §4.6 and §4.7's `check_on_open` text | sdmxlib | Part 2, Part 3 |
 | 4 | Part 2, whose PR sets the new cap in `pyproject.toml` | statcatlib | Part 3 |
@@ -293,7 +300,7 @@ The owner decided these on 2026-11-04, except W24. W2 and W8 move with `correct`
 | W11 | `CatalogAdmin.open(BlobLocation)`, `CatalogAdmin.create` and `ManifestArtefacts(fetch)` leave Phase 4, since none has a caller. | Until Phase 5, a blob `commit` with an incoming entry raises `NotImplementedError` (Land order). |
 | W12 | The sdmxlib release is StatCat-Suite/sdmxlib#371. It holds `references: bool = True`, with a stamp rule, and the `decode_manifest` export (W24). `check_on_open(structures=)` waits for a caller. | S16, S6. |
 | W13 | Part 1 lands on sdmxlib 0.85, Parts 2 and 3 on the #371 release, and Part 4 needs nothing from that release. | Land order. |
-| W14 | S2, S3 and S7 go into sdmxlib's `docs/phase-4-restated` PR. | Handoff row 1. |
+| W14 | S2, S3 and S7 go into sdmxlib's `docs/phase-4-restated` PR. | Done: resolved by sdmxlib#372, handoff row 1. |
 | W15 | `view` and upload pass `references=False` when the manifest has no bindings, and statcatlib passes no `structures=` in Phase 4. The fold owns that check. | D6, D7, handoff row 9. |
 | W16 | The CLI's credential is `DefaultAzureCredential` in `AzureCredentialProvider` in `TokenIdentity`, with `azure-identity`, `typer` and `rich` in `blob`. | D2, D7. |
 | W17 | The CLI's grammar, variables and codes: `az://<container>[/<prefix>]`, `AZURE_STORAGE_ACCOUNT_NAME`, a refusal when key or SAS variables are set, RFC 3339 with a zone, exit codes 0, 1 and 2, and a one-hour timeout. | D7. |
