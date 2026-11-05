@@ -192,8 +192,11 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 
 ### `blob.py`
 
-Loads `obstore` on first use through `_Lazy`, so core statcatlib imports
-without the `blob` extra; a missing one raises `ImportError` naming the extra.
+`_load_obstore()` imports `obstore` and `obstore.exceptions` for every route to
+the store, so core statcatlib imports without the `blob` extra, and a missing one
+raises `ImportError` naming the extra. Function-level imports with
+`# noqa: PLC0415` load the `blob` extra until Python 3.15 is the minimum
+version, when `lazy import` (PEP 810) can replace them.
 
 - `BlobLocation(uri, store, secrets=(), cache_dir=None, ops=...)`: a frozen
   value; `store` is prefixed at the catalog root. Part 3 of Phase 4 reads

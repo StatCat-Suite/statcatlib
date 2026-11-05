@@ -18,8 +18,10 @@ over an `obstore` store. It differs from `LocalInventoryStorage` in these ways:
   (`TokenIdentity`), else the value given to `BlobInventoryStorage`, else a
   refusal.
 
-`obstore` belongs to the ``blob`` extra and loads on first use, so core
-statcatlib imports without it.
+`obstore` belongs to the ``blob`` extra, so core statcatlib imports without it.
+Function-level imports with ``# noqa: PLC0415`` load the ``blob`` extra until
+Python 3.15 is the minimum version, when ``lazy import`` (PEP 810) can replace
+them.
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
-import importlib
 import inspect
 import json
 import logging
@@ -50,32 +51,13 @@ from statcatlib.store.inventory import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
     from pathlib import Path
+    from types import ModuleType
 
-    import obstore
-    from obstore import ObjectMeta, PutMode, exceptions
+    from obstore import ObjectMeta, PutMode, PutResult
     from obstore.store import AzureBearerToken, ObjectStore
     from sdmxlib import StoreSecret
     from sdmxlib.inventory import Root
 
-
-class _Lazy:
-    """A module of the ``blob`` extra, imported on first use; a missing one raises `ImportError` naming the extra."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __getattr__(self, attribute: str) -> object:
-        try:
-            module = importlib.import_module(self._name)
-        except ImportError as exc:
-            msg = "object storage needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')"
-            raise ImportError(msg) from exc
-        return getattr(module, attribute)
-
-
-if not TYPE_CHECKING:
-    obstore = _Lazy("obstore")
-    exceptions = _Lazy("obstore.exceptions")
 
 __all__ = [
     "MAX_CLOCK_SKEW",
@@ -89,6 +71,17 @@ log = logging.getLogger(__name__)
 
 #: How far this machine's clock may run ahead of the storage clock (spec §6.4).
 MAX_CLOCK_SKEW = timedelta(seconds=30)
+
+
+def _load_obstore() -> tuple[ModuleType, ModuleType]:
+    """`obstore` and `obstore.exceptions`; a missing ``blob`` extra raises `ImportError` naming it."""
+    try:
+        import obstore  # noqa: PLC0415
+        from obstore import exceptions  # noqa: PLC0415
+    except ImportError as exc:
+        msg = "object storage needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')"
+        raise ImportError(msg) from exc
+    return obstore, exceptions
 
 
 class BlobStoreError(RuntimeError):
@@ -113,6 +106,7 @@ class BlobStoreError(RuntimeError):
 @contextlib.contextmanager
 def _store_faults(action: str, path: str) -> Generator[None]:
     """Raise `BlobStoreError` for a store fault in the block, except `AlreadyExistsError` and `PreconditionError`."""
+    _, exceptions = _load_obstore()
     try:
         yield
     except exceptions.AlreadyExistsError, exceptions.PreconditionError:
@@ -135,6 +129,7 @@ class _ObjectOps:
 
     def read(self, path: str) -> tuple[bytes, str | None] | None:
         """The object's bytes and ``e_tag``, or ``None`` when it is absent."""
+        obstore, exceptions = _load_obstore()
         with _store_faults("read", path):
             try:
                 result = obstore.get(self._store, path)
@@ -144,19 +139,24 @@ class _ObjectOps:
 
     def put(self, path: str, data: bytes, *, mode: PutMode | None = None, use_multipart: bool = False) -> str | None:
         """Write the object and return its ``e_tag``."""
+        obstore, _ = _load_obstore()
         with _store_faults("write", path):
-            return obstore.put(self._store, path, data, mode=mode, use_multipart=use_multipart)["e_tag"]
+            written: PutResult = obstore.put(self._store, path, data, mode=mode, use_multipart=use_multipart)
+            return written["e_tag"]
 
     def head(self, path: str) -> ObjectMeta | None:
         """The object's metadata, or ``None`` when it is absent."""
+        obstore, exceptions = _load_obstore()
         with _store_faults("read the metadata of", path):
             try:
-                return obstore.head(self._store, path)
+                meta: ObjectMeta | None = obstore.head(self._store, path)
             except FileNotFoundError, exceptions.NotFoundError:
-                return None
+                meta = None
+            return meta
 
     def delete(self, path: str) -> None:
         """Delete the object."""
+        obstore, _ = _load_obstore()
         with _store_faults("delete", path):
             obstore.delete(self._store, path)
 
@@ -344,6 +344,7 @@ class BlobInventoryStorage:
                 second try, and a timed-out create can still land later.
             BlobStoreError: The store gave a definite refusal.
         """
+        _, exceptions = _load_obstore()
         for _ in range(2):
             try:
                 self._ops.put(path, data, mode="create")
@@ -389,6 +390,7 @@ class BlobInventoryStorage:
 
     def _move_current(self, root: Root, current: bytes) -> bool:
         """One read and conditional write of ``CURRENT``; false when another writer got between them."""
+        _, exceptions = _load_obstore()
         got = self._ops.read(CURRENT_NAME)
         mode: PutMode = "create"
         held = None

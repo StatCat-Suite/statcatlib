@@ -719,7 +719,7 @@ stating it.
   51 were the same kind. Do not add `# noqa: SLF001`; the rule is not selected.
 - **Domain model**: `attrs`
 - **Storage**: `duckdb`
-- **Object storage**: `obstore` (optional, `statcatlib[blob]`, loaded on first use in `store/blob.py`)
+- **Object storage**: `obstore` (optional, `statcatlib[blob]`, imported inside functions in `store/blob.py`)
 - **Search**: `lancedb` (optional, BM25 FTS via Tantivy + ANN vector index)
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).

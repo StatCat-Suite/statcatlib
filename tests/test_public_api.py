@@ -10,6 +10,8 @@ import annotationlib
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import override
 
 import pytest
 from obstore.store import MemoryStore
@@ -186,6 +188,62 @@ class TestStoreExports:
 
         with pytest.raises(ImportError, match=r"uv add 'statcatlib\[blob\]'.*pip install 'statcatlib\[blob\]'"):
             _ObjectOps(MemoryStore()).read("catalog.json")
+
+    @pytest.mark.parametrize(
+        "route",
+        [
+            lambda ops, storage, root: ops.read("a"),
+            lambda ops, storage, root: ops.put("a", b""),
+            lambda ops, storage, root: ops.head("a"),
+            lambda ops, storage, root: ops.delete("a"),
+            lambda ops, storage, root: storage.read("a"),
+            lambda ops, storage, root: storage.create("a", b""),
+            lambda ops, storage, root: storage.write_leaf("a", b""),
+            lambda ops, storage, root: storage.advance_current(root, b""),
+        ],
+        ids=["read", "put", "head", "delete", "storage-read", "create", "write-leaf", "advance-current"],
+    )
+    def test_every_route_names_the_missing_extra(self, monkeypatch: pytest.MonkeyPatch, route) -> None:
+        from statcatlib.store.blob import BlobInventoryStorage, BlobLocation, _ObjectOps
+
+        store = MemoryStore()
+        storage = BlobInventoryStorage(BlobLocation("az://c/p/", store), actor="t")
+        monkeypatch.setitem(sys.modules, "obstore", None)
+        monkeypatch.setitem(sys.modules, "obstore.exceptions", None)
+
+        with pytest.raises(ImportError, match=r"uv add 'statcatlib\[blob\]'.*pip install 'statcatlib\[blob\]'"):
+            route(_ObjectOps(store), storage, SimpleNamespace(seq=1, restore_epoch=0))
+
+    @pytest.mark.parametrize(
+        "route",
+        [
+            lambda storage, root: storage.create("a", b""),
+            lambda storage, root: storage._move_current(root, b""),
+        ],
+        ids=["create", "move-current"],
+    )
+    def test_a_route_with_except_clauses_loads_the_extra_itself(self, monkeypatch: pytest.MonkeyPatch, route) -> None:
+        """`create` and `_move_current` name `obstore.exceptions` in `except` clauses, past an injected `_ObjectOps`."""
+        from statcatlib.store.blob import BlobInventoryStorage, BlobLocation, _ObjectOps
+
+        class Refuses(_ObjectOps):
+            """Reaches no store and raises, so only the storage's own load can name the extra."""
+
+            @override
+            def read(self, path: str) -> tuple[bytes, str | None] | None:
+                return None
+
+            @override
+            def put(self, path: str, data: bytes, **kwargs) -> str | None:
+                raise OSError(path)
+
+        store = MemoryStore()
+        storage = BlobInventoryStorage(BlobLocation("az://c/p/", store, ops=Refuses(store)), actor="t")
+        monkeypatch.setitem(sys.modules, "obstore", None)
+        monkeypatch.setitem(sys.modules, "obstore.exceptions", None)
+
+        with pytest.raises(ImportError, match=r"statcatlib\[blob\]"):
+            route(storage, SimpleNamespace(seq=1, restore_epoch=0))
 
     def test_errors(self) -> None:
         import statcatlib as sc

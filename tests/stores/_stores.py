@@ -8,13 +8,13 @@ edition in Phase 4.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import hmac
 import http.client
 import shutil
 import socket
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Generator
@@ -46,34 +46,14 @@ KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr
 CONTAINER = "catalogs"
 
 
-@frozen
-class Docker:
-    """What one run of the docker CLI returned."""
-
-    returncode: int
-    stdout: str
-    stderr: str
-
-
-def _docker(*args: str, check: bool = True) -> Docker:
+def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run the docker CLI, found on PATH, with *args*: the tier's one subprocess."""
     docker = shutil.which("docker")
     if docker is None:
         msg = "no docker CLI on PATH"
         raise FileNotFoundError(msg)
-
-    async def run() -> Docker:
-        process = await asyncio.create_subprocess_exec(
-            docker, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        out, err = await process.communicate()
-        return Docker(process.returncode or 0, out.decode(), err.decode())
-
-    result = asyncio.run(run())
-    if check and result.returncode != 0:
-        msg = f"docker {' '.join(args)} exited {result.returncode}: {result.stderr}"
-        raise RuntimeError(msg)
-    return result
+    # The docker CLI from shutil.which; arguments are the module's pinned image and docker's own output.
+    return subprocess.run([docker, *args], capture_output=True, text=True, check=check)  # noqa: S603
 
 
 def runtime_missing() -> str | None:
