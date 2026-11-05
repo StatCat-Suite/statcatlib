@@ -51,6 +51,7 @@ __all__ = [
     "STATCAT_SECTION_FORMAT",
     "catalog_section",
     "check_catalog",
+    "check_catalog_no_index",
     "description_from_json",
     "description_from_root",
     "description_to_json",
@@ -234,10 +235,19 @@ def _check_search(root: Path, declared: object) -> Iterator[Finding]:
         detail = f"{found}, which this build does not read: check it with that release, or rebuild with build_index()"
         yield Finding(STATCAT_SECTION, f"{_SEARCH_DIRNAME}/{_INDEX_MANIFEST}", detail)
         return
-    index = LanceIndex(search_dir)
+    try:
+        index = LanceIndex(search_dir)
+    except ImportError:
+        yield Finding(STATCAT_SECTION, _SEARCH_DIRNAME, "cannot check the search index without statcatlib[search]")
+        return
     if (declared_version := declared.get("index_version")) != index.version:
         detail = f"the manifest declares index_version {declared_version}, {_INDEX_MANIFEST} records {index.version}"
         yield Finding(STATCAT_SECTION, MANIFEST_NAME, detail)
+    yield from _check_layout(index, languages)
+
+
+def _check_layout(index: LanceIndex, languages: Mapping[str, object]) -> Iterator[Finding]:
+    """The index's tables: each declared language as declared, and none ``index.json`` does not name."""
     layout = index.describe()
     for lang in sorted(set(languages) | set(layout)):
         yield from _check_language(index, lang, layout.get(lang), languages.get(lang))
@@ -297,10 +307,36 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
     Returns:
         Everything found wrong with the catalog's part of the edition.
     """
+    del profile
+    return _section_findings(root, manifest, reg, index=True)
+
+
+def check_catalog_no_index(root: Path, manifest: Manifest, reg: EditionRegistry, profile: Profile) -> list[Finding]:
+    """`check_catalog` without its search index check, for an install with no `lancedb`.
+
+    A ``statcatlib[blob]`` install holds no `lancedb`, so it cannot open the
+    index. The ``files`` check of `sdmxlib.edition.check_edition` still covers the
+    index's bytes by digest.
+
+    Args:
+        root: The edition directory.
+        manifest: Its manifest.
+        reg: sdmxlib's registry over the edition.
+        profile: The `check_edition` profile that runs it. Every profile runs
+            the same checks.
+
+    Returns:
+        Everything found wrong with the rest of the catalog's part of the edition.
+    """
+    del profile
+    return _section_findings(root, manifest, reg, index=False)
+
+
+def _section_findings(root: Path, manifest: Manifest, reg: EditionRegistry, *, index: bool) -> list[Finding]:
+    """The ``statcat`` checks, with the opening of the search index when *index* is true."""
     from statcatlib.store.schema import first_row  # noqa: PLC0415
     from statcatlib.store.store import annotation_fingerprint, statcat_schema_mismatch  # noqa: PLC0415
 
-    del profile
     conn = reg.connection
     rows = conn.execute(
         """
@@ -332,7 +368,9 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
             for binding in manifest.bindings
         ]
         findings += structure_content(conn)
-    findings += [*_check_catalog_rows(conn, section), *_check_search(root, section.get("search"))]
+    findings += _check_catalog_rows(conn, section)
+    if index:
+        findings += _check_search(root, section.get("search"))
     search = section.get("search")
     if isinstance(search, Mapping):
         findings += _check_index_annotations(conn, search.get("annotations"), annotation_fingerprint)

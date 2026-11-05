@@ -18,6 +18,9 @@ over an `obstore` store. It differs from `LocalInventoryStorage` in these ways:
   (`TokenIdentity`), else the value given to `BlobInventoryStorage`, else a
   refusal.
 
+`AzureBlobRest` reads the digest Azure keeps for a single-shot Put, since
+`obstore` reads no ``Content-MD5``. `statcatlib.upload` uses it.
+
 `obstore` belongs to the ``blob`` extra, so core statcatlib imports without it.
 Function-level imports with ``# noqa: PLC0415`` load the ``blob`` extra until
 Python 3.15 is the minimum version, when ``lazy import`` (PEP 810) can replace
@@ -29,18 +32,22 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import importlib.util
 import inspect
 import json
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Self, cast
+from urllib.parse import quote
 
 import httpx
 from attrs import Factory, field, frozen
+from sdmxlib.edition import RemoteFile
 from sdmxlib.inventory import CURRENT_NAME, Current, InventoryError, decode_current, encode, sha256_hex
 
+from statcatlib.bundle import check_catalog, check_catalog_no_index
 from statcatlib.store.inventory import (
     MAX_RACES,
     InventoryCommitUnknownError,
@@ -56,11 +63,13 @@ if TYPE_CHECKING:
     from obstore import ObjectMeta, PutMode, PutResult
     from obstore.store import AzureBearerToken, ObjectStore
     from sdmxlib import StoreSecret
+    from sdmxlib.edition import Check
     from sdmxlib.inventory import Root
 
 
 __all__ = [
     "MAX_CLOCK_SKEW",
+    "AzureBlobRest",
     "BlobInventoryStorage",
     "BlobLocation",
     "BlobStoreError",
@@ -71,6 +80,12 @@ log = logging.getLogger(__name__)
 
 #: How far this machine's clock may run ahead of the storage clock (spec §6.4).
 MAX_CLOCK_SKEW = timedelta(seconds=30)
+
+#: The Blob service version `AzureBlobRest` asks for, the one `object_store` sends.
+_AZURE_VERSION = "2023-11-03"
+
+#: How long `AzureBlobRest` waits for one ``Get Blob Properties``, in seconds.
+_REST_TIMEOUT = 30.0
 
 
 def _load_obstore() -> tuple[ModuleType, ModuleType]:
@@ -249,6 +264,12 @@ class TokenIdentity:
         return self._object_id
 
 
+def _token_identity(store: ObjectStore) -> TokenIdentity | None:
+    """The `TokenIdentity` *store* holds as its credential provider, or ``None``."""
+    provider = getattr(store, "credential_provider", None)
+    return provider if isinstance(provider, TokenIdentity) else None
+
+
 def _endpoint(store: ObjectStore) -> str:
     """The URL *store* answers at, from its configuration.
 
@@ -280,6 +301,83 @@ def _endpoint(store: ObjectStore) -> str:
         return f"https://s3.{region}.amazonaws.com"
     msg = f"{store!r} names no endpoint; set endpoint= (or region= on an S3Store) on the store"
     raise ValueError(msg)
+
+
+class AzureBlobRest:
+    """Azure's ``Get Blob Properties`` under the identity's bearer token, for the digest `obstore` cannot read.
+
+    The call needs ``blobs/read`` and nothing else. Azure keeps an MD5 for a
+    single-shot Put, and this class reads it back. A tokenless store has no route
+    here, since no deployment uses a key.
+    """
+
+    def __init__(self, location: BlobLocation) -> None:
+        """Reach the blobs of *location*, an `AzureStore`'s; a config naming no account raises `ValueError`."""
+        self._store = location.store
+        found = getattr(self._store, "config", None)
+        config: Mapping[str, object] = found if isinstance(found, Mapping) else {}
+        prefix = getattr(self._store, "prefix", None)
+        parts = [_endpoint(self._store).rstrip("/"), quote(str(config["container_name"]))]
+        self._base = "/".join([*parts, *([quote(prefix)] if prefix else [])])
+        self._client = httpx.Client(timeout=_REST_TIMEOUT)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the HTTP client."""
+        self._client.close()
+
+    def _url(self, path: str) -> str:
+        return f"{self._base}/{quote(path)}"
+
+    def _send(self, path: str) -> httpx.Response:
+        """Send the ``HEAD``. The account-key test path overrides this one method."""
+        identity = _token_identity(self._store)
+        if identity is None:
+            msg = "AzureBlobRest needs a store whose credential_provider is a TokenIdentity"
+            raise ValueError(msg)
+        headers = {"Authorization": f"Bearer {identity.token()}", "x-ms-version": _AZURE_VERSION}
+        return self._client.head(self._url(path), headers=headers)
+
+    def head(self, path: str) -> RemoteFile | None:
+        """The size and kept digest of the blob at *path* under the catalog root.
+
+        Args:
+            path: The object's path.
+
+        Returns:
+            What the store reports, or ``None`` on a 404 alone, so a missing
+            role never reads as a missing file.
+
+        Raises:
+            BlobStoreError: Any other status, an unreadable size, or a transport
+                failure.
+        """
+        try:
+            response = self._send(path)
+        except httpx.HTTPError as exc:
+            msg = f"read the properties of {path}: {type(exc).__name__}: {exc}"
+            raise BlobStoreError(msg, path=path) from exc
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        if not response.is_success:
+            msg = f"read the properties of {path}: HTTP {response.status_code}"
+            raise BlobStoreError(msg, path=path)
+        length = response.headers.get("content-length", "")
+        if not length.isdecimal():
+            msg = f"read the properties of {path}: the response has no readable Content-Length: {length!r}"
+            raise BlobStoreError(msg, path=path)
+        md5 = response.headers.get("content-md5")
+        return RemoteFile(int(length), {} if md5 is None else {"md5": md5})
+
+
+def _statcat_check() -> Check:
+    """The ``statcat`` check this install can run: `check_catalog` with `lancedb`, else `check_catalog_no_index`."""
+    return check_catalog if importlib.util.find_spec("lancedb") is not None else check_catalog_no_index
 
 
 class BlobInventoryStorage:
@@ -468,8 +566,8 @@ class BlobInventoryStorage:
             InventoryWriteRefusedError: Neither exists.
         """
         if self._resolved_actor is None:
-            provider = getattr(self._location.store, "credential_provider", None)
-            oid = provider.object_id() if isinstance(provider, TokenIdentity) else None
+            identity = _token_identity(self._location.store)
+            oid = identity.object_id() if identity is not None else None
             resolved = oid or self._given_actor
             if not resolved:
                 msg = (
