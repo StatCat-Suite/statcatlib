@@ -999,7 +999,7 @@ class WorkingCopy:
         if leaf is not None and leaf.lifecycle != lifecycle:
             msg = (
                 f"{product_id} is recorded as a {leaf.lifecycle} product, and working_copy() asked for "
-                f"{lifecycle}; changing a product's lifecycle is not supported before Phase 4"
+                f"{lifecycle}; a product keeps the lifecycle it was first recorded with"
             )
             raise InventoryRuleError(msg, rule="lifecycle", product=product_id, edition=None)
         if leaf is not None and kind is not None and leaf.kind != kind:

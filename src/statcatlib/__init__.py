@@ -88,6 +88,7 @@ from statcatlib.store import (
     WorkingCopy,
     xhtml_to_markdown,
 )
+from statcatlib.store.blob import BlobLocation, TokenIdentity
 from statcatlib.store.inventory import (
     CrossProductRuleError,
     InventoryConflictError,
@@ -114,6 +115,7 @@ __all__ = [
     "AggregateDataset",
     "AliasedExpr",
     "BaseDataset",
+    "BlobLocation",
     "Catalog",
     "CatalogAdmin",
     "CatalogDescription",
@@ -186,6 +188,7 @@ __all__ = [
     "StatisticalDataset",
     "TemporalCoverage",
     "ThemesScope",
+    "TokenIdentity",
     "TraversalExpr",
     "Variable",
     "WorkingCopy",

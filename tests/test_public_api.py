@@ -7,9 +7,12 @@ and that ``statcatlib.query`` is accessible as the filter DSL module.
 from __future__ import annotations
 
 import annotationlib
+import importlib
+import sys
 from pathlib import Path
 
 import pytest
+from obstore.store import MemoryStore
 
 import statcatlib as sc
 from tests.conftest import concept_of, open_scratch, scratch_store
@@ -156,6 +159,33 @@ class TestStoreExports:
         for name in ("Catalog", "Product", "Edition", "EditionView", "WorkingCopy", "checks"):
             assert name in sc.__all__, name
             assert getattr(sc, name) is not None
+
+    def test_object_storage(self) -> None:
+        import statcatlib as sc
+
+        for name in ("BlobLocation", "TokenIdentity"):
+            assert name in sc.__all__, name
+            assert getattr(sc, name) is not None
+
+    def test_core_imports_without_the_blob_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`obstore` belongs to the ``blob`` extra, so importing statcatlib must not need it."""
+        for name in [n for n in sys.modules if n == "statcatlib" or n.startswith("statcatlib.")]:
+            monkeypatch.delitem(sys.modules, name)
+        monkeypatch.setitem(sys.modules, "obstore", None)
+        monkeypatch.setitem(sys.modules, "obstore.exceptions", None)
+
+        reimported = importlib.import_module("statcatlib")
+
+        assert reimported.BlobLocation is not None
+
+    def test_a_blob_call_without_the_extra_names_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from statcatlib.store.blob import _ObjectOps
+
+        monkeypatch.setitem(sys.modules, "obstore", None)
+        monkeypatch.setitem(sys.modules, "obstore.exceptions", None)
+
+        with pytest.raises(ImportError, match=r"uv add 'statcatlib\[blob\]'.*pip install 'statcatlib\[blob\]'"):
+            _ObjectOps(MemoryStore()).read("catalog.json")
 
     def test_errors(self) -> None:
         import statcatlib as sc
