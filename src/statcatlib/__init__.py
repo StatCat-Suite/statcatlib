@@ -105,6 +105,7 @@ from statcatlib.store.working_copy import (
     WorkingCopyClosedError,
     WorkingCopyExistsError,
 )
+from statcatlib.upload import UploadCheckError, UploadReport, upload_edition
 
 __all__ = [
     "SEARCH_ANNOTATION_TYPES",
@@ -190,6 +191,8 @@ __all__ = [
     "ThemesScope",
     "TokenIdentity",
     "TraversalExpr",
+    "UploadCheckError",
+    "UploadReport",
     "Variable",
     "WorkingCopy",
     "WorkingCopyClosedError",
@@ -206,6 +209,7 @@ __all__ = [
     "is_unloaded",
     "prepare_sdmx",
     "query",
+    "upload_edition",
     "urn",
     "xhtml_to_markdown",
 ]
