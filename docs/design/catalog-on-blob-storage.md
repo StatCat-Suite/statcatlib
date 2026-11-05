@@ -175,7 +175,7 @@ In order. "Gates" names what cannot start until the row is done.
 | 5 | Part 2, then Part 3 | statcatlib | Phase 5 |
 | 6 | Part 4's result into §6.5, with the owner's summary decision. The hub session delegates this PR. | sdmxlib | GH-98's last acceptance item |
 | 7 | S1, S12, S13, S14, S15, and S6 with its first caller | sdmxlib, GH-52 | Phase 5 |
-| 8 | The fold owns the reference check for an edition with no bindings: it runs the publish check with `structures=` before it records the edition. Nothing else checks those references after the seal, so this is a Phase 5 acceptance item. | statcatlib, GH-52 | Phase 5 |
+| 8 | The fold owns the reference check for an edition with no bindings: it runs `check_edition(at="receive", remote=, structures=)` before it records the edition, since `check_edition` refuses `remote=` at `publish` (`edition/_check.py:262`). Nothing else checks those references after the seal, so this is a Phase 5 acceptance item. | statcatlib, GH-52 | Phase 5 |
 | 9 | Issue: S4 | sdmxlib | Phase 6 |
 | 10 | GH-130 exists, and its design files the sdmxlib issues for S9, S11 and its `correct` rule | statcatlib, sdmxlib | Phase 9's restore drill |
 
@@ -585,7 +585,7 @@ product (§6.5 item 9). `view` skips that check, for these reasons:
 
 | Option for an edition with no bindings | Gain | Cost |
 |---|---|---|
-| **`references=False` at `view` (chosen).** | The bytes hash to a manifest the Inventory recorded, and the fold's publish check owns the references. No other edition is pulled. | The reference check does not re-run on a reader. |
+| **`references=False` at `view` (chosen).** | The bytes hash to a manifest the Inventory recorded, and the fold's `check_edition(at="receive", remote=, structures=)` owns the references. No other edition is pulled. | The reference check does not re-run on a reader. |
 | A `check_on_open(structures=)`, which does not exist, passing the other live structure editions. | The check runs again on each machine. | Finding them reads every leaf, 7,000 GETs cold, and pulls each one. `LiveInventory` hides embargoed products, and §6.5 item 9 allows a reference into one, so a valid edition would be refused. |
 
 So upload and `view` pass `references=False` when the manifest has no bindings (W15). By
@@ -771,7 +771,8 @@ on blob and no fold. It lives in `tests/stores/_stores.py`:
 
 ```python
 record_uploaded(
-    writer: InventoryWriter, location: BlobLocation, edition_dir: Path, *, lifecycle: Lifecycle = "revisable", release_at: datetime | None = None,
+    writer: InventoryWriter, location: BlobLocation, edition_dir: Path, *,
+    lifecycle: Lifecycle = "revisable", release_at: datetime | None = None,
 ) -> Edition
 ```
 
@@ -842,9 +843,9 @@ arguments come from these sources:
 ## Moved out: `correct` and `reinstate`
 
 `CatalogAdmin.correct` and `CatalogAdmin.reinstate` leave Phase 4 (W7) for GH-130, to land
-before Phase 9's restore drill. That issue takes GH-98 question 7, D7 of revision 2 (at
-`e7eba47`), S8's remainder, S9, S10's `correct` rule in sdmxlib, S11, O4 and their four
-acceptance items. Nothing depends on them until that drill.
+before Phase 9's restore drill. That issue takes GH-98 question 7, its four acceptance
+items, S9, S11, and from revision 2 (at `e7eba47`) D7, the rest of S8, S10's `correct` rule
+in sdmxlib, and the embargo question O4, which W8 now answers. Nothing depends on them until that drill.
 
 The [review](egm/catalog-on-blob-storage/review_report.md) holds the findings the issue must
 take: B2, M1, M2's verification rules, M4, M10, M13, M16, M26, M34 to M36, and m1, m6 to m9,
