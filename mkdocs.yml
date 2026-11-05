@@ -102,6 +102,7 @@ nav:
   - Upgrading: upgrading.md
   - API Reference:
     - Catalog: api/store.md
+    - Object Storage: api/blob.md
     - Domain Model: api/model.md
     - Query Filters: api/query.md
     - Source Connectors: api/sources.md

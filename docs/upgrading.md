@@ -5,7 +5,11 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: the `blob` extra and the Inventory writer on object storage
+## Next release: the `blob` extra, the Inventory writer on object storage and `statcat upload`
+
+statcatlib requires `sdmxlib>=0.86,<0.87`. sdmxlib's
+[upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists its own
+changes. No catalog is rebuilt.
 
 A local catalog keeps its files, its writer and its checks. The new `statcatlib[blob]` extra (`uv add 'statcatlib[blob]'`, or
 `pip install 'statcatlib[blob]'`) adds `obstore`, `azure-identity`, `typer` and
@@ -22,6 +26,16 @@ lifecycle it was first recorded with.
 
 `just ci` gains the `stores` tier, so a push from a clone needs a container
 runtime.
+
+`statcat upload EDITION_DIR AZ_URL [--release-at TIME]` and
+`statcatlib.upload_edition` copy a sealed edition to a catalog in Azure Blob Storage
+and register it in `pending/`, where it waits for Phase 5's fold. [Object
+storage](api/blob.md) describes them. They are Azure-only, and the real-account
+checklist on that page has not run.
+
+`check_catalog`, on an install with no `lancedb`, now reports a finding for an edition
+with a search index, where it raised `ModuleNotFoundError`. The new
+`bundle.check_catalog_no_index` runs the section's other checks.
 
 ## 0.14.0: Inventory history fields, on sdmxlib 0.85
 

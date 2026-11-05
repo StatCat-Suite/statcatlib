@@ -211,6 +211,15 @@ version, when `lazy import` (PEP 810) can replace them.
   `BlobLocation.ops`.
 - `_endpoint(store) -> str`: `config["endpoint"]`, else Azure's account URL or
   S3's regional URL; `ValueError` when the config names neither.
+- `_token_identity(store) -> TokenIdentity | None`: the store's credential provider
+  when it is a `TokenIdentity`.
+- `AzureBlobRest(location)`: `head(path) -> RemoteFile | None`, `Get Blob Properties`
+  by `httpx` with `x-ms-version: 2023-11-03` and the bearer token, for the `Content-MD5`
+  `obstore` cannot read. Only a 404 returns `None`; any other failure raises
+  `BlobStoreError`, so a missing role never reads as a missing file. `_send` is the one
+  method the account-key test path overrides. `close()`, or use it in a `with`.
+- `_statcat_check() -> Check`: `check_catalog`, or `check_catalog_no_index` when
+  `lancedb` cannot be found.
 - `MAX_CLOCK_SKEW` (30 s). `BlobStoreError(message, *, path, outcome_unknown)`
   (`RuntimeError`): a store fault, with `outcome_unknown` true for `obstore`'s
   `GenericError`.
@@ -487,6 +496,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `tests/stores/test_blob_conformance.py` (sdmxlib's conformance suite over
   Azurite) and `tests/stores/test_blob_writer.py` (conditional headers, by a
   recording proxy). The tier needs a container runtime and fails without one.
+- The upload: `tests/test_upload.py` (unit, over `MemoryStore`),
+  `tests/test_azure_blob_rest.py` (unit, the bearer path by `pytest-httpx`),
+  `tests/test_cli_upload.py` (unit, the command) and
+  `tests/stores/test_upload_store.py` (Azurite, with an account-key digest read).
+  Nothing here runs on real Azure: `docs/api/blob.md` lists the real-account checklist.
 - The Inventory writer: `tests/test_inventory_writer.py` (unit),
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite and `run_history`) and `tests/test_inventory_history.py` (integration:

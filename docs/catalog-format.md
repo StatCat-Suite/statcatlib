@@ -40,6 +40,7 @@ not repeated here.
         search_<lang>__<edition>.lance   one LanceDB table per language
         embeddings.json              the embedding model's settings; only with vectors
       manifest.json                  sdmxlib's manifest, with a statcat section (§3), written last
+  pending/<product_id>/<edition_id>.json   an uploaded edition waiting for the fold, in object storage only (§1.5)
 ```
 
 - `Catalog.create` writes `catalog.json` and nothing else. The first seal
@@ -119,6 +120,24 @@ root-level `meta.duckdb` (a statcatlib 0.11 catalog), a
 `catalog.json`, with `IncompatibleCatalogError`, and write nothing first.
 Names starting with `.` are not counted. [Upgrading](upgrading.md) gives the
 re-ingest steps.
+
+### 1.5 The `pending/` registrations
+
+A catalog in object storage also holds `pending/<product_id>/<edition_id>.json`, one
+document per uploaded edition that waits for Phase 5's fold. [`statcat
+upload`](api/blob.md) creates it after every listed file is verified, and nothing else
+writes it. A local catalog has none.
+
+The document is UTF-8 compact JSON with two keys in this order:
+
+```json
+{"edition_id":"019a2b00-0000-7000-8000-000000000001","release_at":"2026-11-05T13:30:00.000Z"}
+```
+
+`release_at` is `null` for no scheduled release. Times are UTC, `Z`, in milliseconds,
+as a root's `created_at` is. Equal input gives equal bytes, so a second upload of the
+same edition leaves the same document. This form is a proposal to the specification
+(spec question S14), and Phase 5's fold reads it.
 
 ## 2. The catalog schema
 

@@ -64,7 +64,7 @@ src/
     │   ├── __init__.py
     │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_dataflows(); ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
-    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune
+    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
     ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, prune
@@ -72,7 +72,8 @@ src/
     ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks, stale data editions
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
-    ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog
+    ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog, check_catalog_no_index
+    ├── upload.py       # upload_edition, UploadReport, UploadCheckError: a sealed edition to Azure Blob Storage and `pending/`
     ├── testing.py      # temporary_catalog(); synthetic_catalog(); the CODR generator (codr_structures, codr_product, codr_corpus)
     ├── urn.py          # Convenience URN builders for SDMX artefacts
     └── __init__.py     # Public API re-exports
@@ -372,6 +373,16 @@ Inventory and seals editions:
   point. A blob writer has no manifest reader until Phase 5, so a blob `commit`
   with an incoming entry raises `NotImplementedError`; `try_commit` writes
   versions, and no `CatalogAdmin` runs on blob.
+- **The upload.** `upload_edition(edition_dir, location, *, release_at=None)`
+  (`upload.py`, `statcat upload`, `statcatlib[blob]`) is Azure-only, and refuses any
+  other store with `TypeError`. It creates each data file, then each file of the
+  edition, then `manifest.json`, each with one `put(mode="create")`, so Azure keeps its
+  MD5; a file the store holds stays. It verifies with `check_edition(at="receive",
+  lookup=)` and `verify_remote` through `AzureBlobRest`, a bearer `HEAD`, deferring
+  references only on an edition with no bindings, then creates
+  `pending/<product_id>/<edition_id>.json`. A finding raises `UploadCheckError` and
+  registers nothing. It reads and writes nothing under `catalog.json`, `inventory/` or
+  `CURRENT`, and only `statcat upload` reads the environment.
 - **The cross-product rules.** `commit` runs `InventoryWriter.refusals`
   (`store/cross_product.py`) on every change that makes an entry live or
   embargoed, and raises the first `CrossProductRuleError` by product id:
@@ -719,12 +730,12 @@ stating it.
   51 were the same kind. Do not add `# noqa: SLF001`; the rule is not selected.
 - **Domain model**: `attrs`
 - **Storage**: `duckdb`
-- **Object storage**: `obstore` (optional, `statcatlib[blob]`, imported inside functions in `store/blob.py`)
+- **Object storage**: `obstore` and `azure-identity` (optional, `statcatlib[blob]`, imported inside functions in `store/blob.py`, `upload.py` and `cli/`)
 - **Search**: `lancedb` (optional, BM25 FTS via Tantivy + ANN vector index)
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
-  caps each suite dependency below its next minor (`sdmxlib>=0.85,<0.86`),
+  caps each suite dependency below its next minor (`sdmxlib>=0.86,<0.87`),
   and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.
