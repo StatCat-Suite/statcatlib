@@ -354,6 +354,57 @@ them under embargo; `bench/corpus.py` builds the Phase 4 corpus with it.
 
 ---
 
+## The Inventory on object storage
+
+`InventoryWriter` commits Inventory versions to a catalog in object storage
+through `BlobInventoryStorage` (`statcatlib[blob]`). Working copies and seals
+stay on local disk. Only tests and benches write versions there, with
+`try_commit`. `CatalogAdmin` runs on local catalogs only, and a `commit` with an
+entry that becomes live or embargoed raises `NotImplementedError`, naming Phase
+5, which builds the manifest reader the cross-product rules need.
+
+```python
+from obstore.store import AzureStore
+from statcatlib import BlobLocation, TokenIdentity
+from statcatlib.store.blob import BlobInventoryStorage
+from statcatlib.store.inventory import InventoryWriter
+
+identity = TokenIdentity(provider)  # returns {"token": ..., "expires_at": ...}
+store = AzureStore("catalogs", prefix="stc", account_name="acct", credential_provider=identity)
+writer = InventoryWriter(BlobInventoryStorage(BlobLocation("az://catalogs/stc/", store)))
+writer.write_catalog_json()
+```
+
+A blob writer follows the local writer's rules, and writes in these ways:
+
+| Document | Write | Requests for a one-product change |
+|---|---|---|
+| A leaf the version changes | One unconditional Put, with no existence check. A carried-forward leaf gets none. | 1 |
+| A root | One Put with `If-None-Match: *`, at any size. | 1 |
+| `CURRENT` | A read, then one Put conditional on its `e_tag`, moving only forward. | 1 |
+
+The root is the commit point. A `CURRENT` that fails to move logs a WARNING, the
+commit stands, and readers probe forward from the old value.
+
+A create whose outcome is unknown, as after a timeout, reads its name back. Equal
+bytes mean the writer won, other bytes raise `InventoryConflictError` from
+`try_commit`, and an absent name is tried once more. If that fails too,
+`InventoryCommitUnknownError` names the root, and the caller re-reads the head.
+
+The writer takes its time from the `Date` header of an anonymous `HEAD` at the
+store's endpoint. It raises `InventoryWriteRefusedError` when the header is
+missing or malformed, the request fails, or this machine's clock runs more than
+30 s ahead of it, naming both times. A clock behind the storage's passes.
+
+`event.actor` is the `oid` claim of a `TokenIdentity`'s token. A store with no
+`TokenIdentity`, or a token with no `oid`, takes `actor=` from
+`BlobInventoryStorage`, recorded verbatim, and with neither the writer raises
+`InventoryWriteRefusedError` before it writes anything.
+
+A `catalog.json` at format 2.x is refused with `InventoryWriteRefusedError`, as
+on local disk. Any other store fault raises `statcatlib.store.blob.BlobStoreError`,
+naming the object.
+
 ## Writing datasets
 
 The write methods are `WorkingCopy` methods.

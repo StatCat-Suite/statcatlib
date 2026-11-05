@@ -10,7 +10,9 @@ schemas: `statcat` (the catalog star schema, created by `schema.py`) and
 schemas, with `dataset.sdmx_dataflow_urn` as the link into sdmxlib's tables.
 Two public classes wrap a `_Store`: `EditionView` (read-only, `store.py`) and
 `WorkingCopy` (writable, `working_copy.py`), which also seals the edition.
-`inventory.py` commits Inventory versions, `cross_product.py` holds the rules
+`inventory.py` commits Inventory versions through an `InventoryStorage`,
+`blob.py` is that storage on object storage (`statcatlib[blob]`),
+`cross_product.py` holds the rules
 that read several products (specification §6.5 items 4, 7 and 8), and
 `lance.py` serves an optional LanceDB search index from the edition's
 `search/`.
@@ -147,8 +149,18 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 
 ### `inventory.py`
 
-- `InventoryWriter(root, *, artefacts=None)`: `root`, `artefacts` (the
-  reader the rules use; `cross_product.ManifestArtefacts(root)` by default),
+- `InventoryStorage` (a runtime-checkable `Protocol`): `location`,
+  `read(path) -> bytes | None`, `create(path, data)` (`FileExistsError` when
+  the name is taken), `write_leaf(path, data)`, `advance_current(root, data)`,
+  `now()`, `actor()`. `LocalInventoryStorage(root)` holds the local code, and
+  `root` names its directory. `current_is_older(held, root) -> bool` is the rule
+  both storages use for `CURRENT`.
+- `InventoryWriter(root, *, artefacts=None)`: *root* is a directory or an
+  `InventoryStorage`; `storage`; `root` (a `TypeError` on a storage that is not
+  local); `artefacts` (the
+  reader the rules use; `cross_product.ManifestArtefacts(root)` by default on a
+  directory, and on any other storage a reader raising `NotImplementedError`
+  naming Phase 5);
   `catalog_document()`, `has_version()`, `full() -> FullInventory | None`,
   `head() -> Root | None`, `write_catalog_json(*, catalog_id=None)`,
   `check_writable(base, *, now=None) -> CatalogDocument` (the two stage-1
@@ -174,7 +186,31 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   *, rule, item, urn, editions, product, edition)` (`rule` one of
   `full-artefacts`, `structure-home`, `publish-order`; `item` 4, 7 or 8;
   `editions` the incoming `(product, edition)` first; `of(refusal)` builds
-  one from a `cross_product.Refusal`).
+  one from a `cross_product.Refusal`), and `InventoryCommitUnknownError` (a
+  subclass of `InventoryError`: a create on object storage whose outcome stayed
+  unknown).
+
+### `blob.py`
+
+Loads `obstore` on first use through `_Lazy`, so core statcatlib imports
+without the `blob` extra; a missing one raises `ImportError` naming the extra.
+
+- `BlobLocation(uri, store, secrets=(), cache_dir=None, ops=...)`: a frozen
+  value; `store` is prefixed at the catalog root. Part 3 of Phase 4 reads
+  `secrets` and `cache_dir`.
+- `BlobInventoryStorage(location, *, actor=None, clock=None)`: an
+  `InventoryStorage`, built by the caller and passed to `InventoryWriter`.
+- `TokenIdentity(provider)`: the credential provider to pass to `AzureStore`;
+  `__call__()`, `token() -> str`, `object_id() -> str | None`.
+- `_ObjectOps(store)`: the one route to `obstore`: `read(path) -> tuple[bytes,
+  str | None] | None`, `put(path, data, *, mode=None, use_multipart=False) ->
+  str | None`, `head(path)`, `delete(path)`. Tests subclass it and pass it as
+  `BlobLocation.ops`.
+- `_endpoint(store) -> str`: `config["endpoint"]`, else Azure's account URL or
+  S3's regional URL; `ValueError` when the config names neither.
+- `MAX_CLOCK_SKEW` (30 s). `BlobStoreError(message, *, path, outcome_unknown)`
+  (`RuntimeError`): a store fault, with `outcome_unknown` true for `obstore`'s
+  `GenericError`.
 
 ### `cross_product.py`
 
@@ -378,8 +414,31 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `commit` re-reads the head and calls *change* again after
   each `InventoryConflictError`, so every rule is evaluated against the
   version the commit lands on, and raises `InventoryContentionError` after
-  `MAX_RACES`. A root records `catalog.json`'s `restore_epoch`, and its
-  event's actor is `<os user>@<hostname>`, taken from the process.
+  `MAX_RACES`. A root records `catalog.json`'s `restore_epoch`, and on local
+  disk its event's actor is `<os user>@<hostname>`, taken from the process.
+  `try_commit` resolves the actor before it writes the first leaf, and takes
+  its time from `storage.now()` when not given `now=`.
+- Over object storage the writer's rules are the same, and `BlobInventoryStorage`
+  differs in these ways. Each root and `catalog.json` is one
+  `put(mode="create")`, one Put at any size. Each leaf a version changes is one
+  unconditional `put(use_multipart=False)` with no existence check, and a
+  carried-forward leaf gets no Put. `create` settles `AlreadyExistsError` and
+  `GenericError` by reading the name: equal bytes return, so twin roots count as
+  one commit, other bytes raise `FileExistsError`, and an absent name is tried
+  once more before `InventoryCommitUnknownError`; any other store fault raises
+  `BlobStoreError` at once. `write_catalog_json` reads first, so a second run
+  raises `FileExistsError` on every storage. `advance_current` reads `CURRENT`
+  and writes on its `e_tag`, or `mode="create"` when absent, up to `MAX_RACES`
+  times, and any failure logs a WARNING and returns, since the root is the
+  commit point. `now()` is the `Date` of one anonymous `HEAD` at `_endpoint`,
+  one per `try_commit`, refused when missing, malformed, unreachable or more
+  than `MAX_CLOCK_SKEW` behind this machine; given `clock=` it sends nothing,
+  and a `MemoryStore` without one refuses. `actor()` resolves once: the `oid` of
+  a `TokenIdentity` on the store, else `actor=`, else
+  `InventoryWriteRefusedError`.
+- A blob `commit` with an incoming entry and no `artefacts=` raises
+  `NotImplementedError` naming Phase 5 from `_refuse`, before the rules read
+  every leaf. `check_writable` refuses a 2.x `catalog.json` on blob as on disk.
 - Structural queries read sdmxlib's tables by JOIN, and this package keeps no copy of codes or hierarchies. The filter SQL, including hierarchy descent over `hierarchy_applicability`, is built in `../query.py`; `store.py` compiles it through `_QueryContext`. An absent `sdmx` reference is `NULL`, never `''`.
 - `include()` accepts only names in `VALID_INCLUDE_RELS` and raises `ValueError` otherwise. Unloaded fields hold a per-field cached sentinel whose `__bool__` is `False` and whose attribute, iteration, `len` or index access raises `NotLoadedError`. A NULL foreign key yields `None` regardless of `include()`. `get()` always loads every relationship.
 - Every public `lang` parameter and `.lang()` setter passes its tag through `sdmxlib.normalize_tag` once on entry; a malformed tag raises `sdmxlib.InvalidTagError`. Internal helpers trust the value. `add_language_alternates` stores each tag as `normalize_tag` spells it.
@@ -410,7 +469,9 @@ Imports only sdmxlib, so `inventory.py` can import it.
 - `InventoryWriter` writes `catalog.json`, leaves under `inventory/leaves/`
   and roots under `inventory/` through `sdmxlib.storage.create_exclusive`,
   and `CURRENT` through its own staged `.<name>.<pid>.<uuid>.tmp` file and
-  rename; each file and directory is fsynced.
+  rename; each file and directory is fsynced. Over `BlobInventoryStorage` it
+  writes the same names under the store's prefix, and each `try_commit` sends
+  one anonymous `HEAD` to the store's endpoint unless given a clock.
 - `discard_orphans()` drops LanceDB tables the manifest does not name.
 - Emits `warnings.warn` for a quantised (stale) vector index and for changed search annotations, and logs a WARNING for an edition the journal rule cannot record.
 
@@ -418,6 +479,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
 
 - Run: `just ci`
 - Unit tier only: `uv run pytest -m unit`
+- The blob writer: `tests/test_blob_storage.py` (unit, over `MemoryStore`,
+  with `pytest-httpx` for the clock) and `just test-stores`:
+  `tests/stores/test_blob_conformance.py` (sdmxlib's conformance suite over
+  Azurite) and `tests/stores/test_blob_writer.py` (conditional headers, by a
+  recording proxy). The tier needs a container runtime and fails without one.
 - The Inventory writer: `tests/test_inventory_writer.py` (unit),
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite and `run_history`) and `tests/test_inventory_history.py` (integration:

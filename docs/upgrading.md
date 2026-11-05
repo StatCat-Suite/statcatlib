@@ -5,6 +5,24 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## Next release: the `blob` extra and the Inventory writer on object storage
+
+A local catalog keeps its files, its writer and its checks. The new `statcatlib[blob]` extra (`uv add 'statcatlib[blob]'`, or
+`pip install 'statcatlib[blob]'`) adds `obstore`, `azure-identity`, `typer` and
+`rich`, and `statcatlib.BlobLocation`, `statcatlib.TokenIdentity` and
+`statcatlib.store.blob` give an `InventoryWriter` a catalog in object storage.
+[Object storage](api/store.md#the-inventory-on-object-storage) describes it.
+
+`InventoryWriter` takes a directory or an `InventoryStorage`. `InventoryWriter.root`
+raises `TypeError` on a catalog in object storage, and `InventoryWriter.storage`
+returns the storage on either kind.
+
+The `lifecycle` refusal from `working_copy()` now says that a product keeps the
+lifecycle it was first recorded with.
+
+`just ci` gains the `stores` tier, so a push from a clone needs a container
+runtime.
+
 ## 0.14.0: Inventory history fields, on sdmxlib 0.85
 
 statcatlib requires `sdmxlib>=0.85,<0.86`. sdmxlib's

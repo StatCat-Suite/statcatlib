@@ -26,7 +26,8 @@ design decisions in full. This file indexes the code contracts.
     — attrs domain model with no I/O.
   - `src/statcatlib/store`: [`./src/statcatlib/store/EGM.md`](./src/statcatlib/store/EGM.md)
     — the private `_Store`, `EditionView`, `WorkingCopy`, the Inventory
-    writer, `QueryBuilder`, scopes, schema DDL, LanceDB index.
+    writer and its local and blob storage, `QueryBuilder`, scopes, schema DDL,
+    LanceDB index.
   - `src/statcatlib/sources`: [`./src/statcatlib/sources/EGM.md`](./src/statcatlib/sources/EGM.md)
     — SDMX and CKAN ingest connectors.
   - `src/statcatlib/cli`: [`./src/statcatlib/cli/EGM.md`](./src/statcatlib/cli/EGM.md)
@@ -98,4 +99,4 @@ design decisions in full. This file indexes the code contracts.
 ## System Verification
 
 - Run: `just ci` (index guard, lint, format, docstrings, prose, `Any` ratchet,
-  pyrefly, unit and integration tests, strict docs build).
+  pyrefly, unit and integration tests, the `stores` tier, strict docs build).

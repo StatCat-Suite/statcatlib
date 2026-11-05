@@ -6,7 +6,8 @@
 `model`, `sources` and `store`; `CatalogAdmin` from `admin.py`; `Catalog`, `Product`, `Edition`,
 `SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
 `InventoryContentionError`, `InventoryRuleError`, `InventoryWriteRefusedError`,
-`NonFastForwardError` and `CrossProductRuleError` from `store/inventory.py`, and `WorkingCopyExistsError`,
+`NonFastForwardError` and `CrossProductRuleError` from `store/inventory.py`; `BlobLocation` and `TokenIdentity`
+from `store/blob.py`; `WorkingCopyExistsError`,
 `WorkingCopyClosedError`, `SealCheckError`, `EditionCheckError` and `JournalError` from
 `store/working_copy.py`; `NotLoadedError` and `is_unloaded` from the store's
 sentinel module; and part of `expr` (listed below). It exposes `checks`,
@@ -28,8 +29,8 @@ and test catalogs (`testing.py`).
   agents, distributions, SKOS concepts); imports only `InternationalString`
   from sdmxlib.
 - `store/`: [`./store/EGM.md`](./store/EGM.md) — the private `_Store`,
-  `EditionView`, `WorkingCopy` and the seal, the Inventory writer,
-  `QueryBuilder`, scopes, DDL, LanceDB search index.
+  `EditionView`, `WorkingCopy` and the seal, the Inventory writer and its
+  local and blob storage, `QueryBuilder`, scopes, DDL, LanceDB search index.
 - `sources/`: [`./sources/EGM.md`](./sources/EGM.md) — SDMX and CKAN ingest
   connectors.
 - `cli/`: [`./cli/EGM.md`](./cli/EGM.md) — the `statcat` Typer command.
