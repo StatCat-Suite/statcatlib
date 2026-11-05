@@ -362,8 +362,8 @@ class CatalogAdmin:
         (``rule="structure-home"``).
 
         An empty *reason* raises `ValueError`. It acts on the live edition at
-        this sdmxlib's store schema; rolling back another schema's live
-        edition arrives in Phase 4.
+        this sdmxlib's store schema, and does not roll back another schema's
+        live edition.
         """
         _require_reason(reason)
         if if_live is None:

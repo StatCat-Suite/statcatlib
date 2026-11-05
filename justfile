@@ -99,16 +99,23 @@ coverage:
 test-integration:
     uv run pytest -m integration
 
+# Run the object-store tier against Azurite in a container. No container
+# runtime fails the tier and names the fix: the pre-push hook is the only gate.
+[group('test')]
+test-stores:
+    uv run pytest tests/stores -m stores -rs
+
 # Run live tests against real SDMX REST endpoints (requires network)
 [group('test')]
 test-live:
     uv run pytest -m live
 
 # Full CI gate: index guard + lint + format + typecheck + unit and
-# integration tests + docs. Enforced locally by the pre-push hook — see
-# `just hooks-install`. Only `live` tests, which need the network, stay out.
+# integration tests + the object-store tier + docs. Enforced locally by the
+# pre-push hook — see `just hooks-install`. Only `live` tests, which need the
+# network, stay out. The object-store tier needs a container runtime.
 [group('test')]
-ci: check test test-integration docs-build
+ci: check test test-integration test-stores docs-build
 
 # ── Docs ──────────────────────────────────────────────────────────────────────
 

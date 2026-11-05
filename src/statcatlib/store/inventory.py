@@ -1,16 +1,19 @@
-"""The Inventory writer: commits Inventory versions on local disk (Phase 2a).
+"""The Inventory writer: commits Inventory versions through an `InventoryStorage`.
 
 sdmxlib owns the Inventory's documents, their validation and the state
 transition rules (`sdmxlib.inventory`). statcatlib writes them, and this module
-is the only code that writes ``catalog.json``, ``inventory/`` and ``CURRENT``.
+is the only code that decides what goes in ``catalog.json``, ``inventory/`` and
+``CURRENT``. `InventoryWriter` holds the rules, and an `InventoryStorage` holds
+the reads, the writes, the clock and the actor: `LocalInventoryStorage` here,
+and `statcatlib.store.blob.BlobInventoryStorage` on object storage.
 It adds these things to sdmxlib's helpers:
 
-- **exclusive create**: each document is written by
+- **exclusive create**: on local disk each document is written by
   `sdmxlib.storage.create_exclusive`, which stages the file, fsyncs it,
   hard-links it to its name and fsyncs the directory, so a name never holds
   half a file, and two writers never both create one root;
 - **the ``CURRENT`` advance**: ``CURRENT`` is replaced only by a higher
-  ``seq``, so a slow writer never moves it back;
+  ``seq`` (`current_is_older`), so a slow writer never moves it back;
 - **the retry loop**: `InventoryWriter.commit` re-reads the head and re-applies
   the change when another writer created the next version first, so every
   rule is evaluated against the version it lands on;
@@ -24,7 +27,7 @@ It adds these things to sdmxlib's helpers:
   lost race;
 - **the stage-1 refusals**: every commit decodes ``catalog.json`` as a writer
   without the catalog lock, so it refuses a catalog that has opted in to expiry,
-  and refuses a base version more than 5 minutes ahead of this machine's clock.
+  and refuses a base version more than 5 minutes ahead of the storage's clock.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ import socket
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, runtime_checkable
 
 from attrs import frozen
 from sdmxlib.edition import Producer
@@ -84,12 +87,16 @@ __all__ = [
     "MAX_RACES",
     "Change",
     "CrossProductRuleError",
+    "InventoryCommitUnknownError",
     "InventoryConflictError",
     "InventoryContentionError",
     "InventoryRuleError",
+    "InventoryStorage",
     "InventoryWriteRefusedError",
     "InventoryWriter",
+    "LocalInventoryStorage",
     "NonFastForwardError",
+    "current_is_older",
     "producer",
 ]
 
@@ -120,6 +127,14 @@ class InventoryWriteRefusedError(InventoryError):
     format, or the base version's time and this machine's. It stays refused
     until the catalog or the clock changes, so a seal refused after its
     manifest keeps its journal entry, as `InventoryContentionError` does.
+    """
+
+
+class InventoryCommitUnknownError(InventoryError):
+    """A create on object storage ended with its outcome unknown.
+
+    A timed-out create can still land later, so the version the message names
+    may or may not exist. The caller re-reads the head to find out.
     """
 
 
@@ -289,30 +304,159 @@ def _stage(path: Path, data: bytes) -> Path:
     return staged
 
 
+def current_is_older(held: Current | None, root: Root) -> bool:
+    """Whether ``CURRENT``, holding *held*, must move to *root*.
+
+    No held value, another ``restore_epoch`` or a lower ``seq`` means advance.
+    """
+    return held is None or held.restore_epoch != root.restore_epoch or held.seq < root.seq
+
+
+@runtime_checkable
+class InventoryStorage(Protocol):
+    """Where a catalog's Inventory documents live: the writer's only route to them."""
+
+    @property
+    def location(self) -> str:
+        """The path or URI, for messages."""
+        ...
+
+    def read(self, path: str) -> bytes | None:
+        """The bytes at *path* under the catalog root, or ``None``: the reader's `Fetch`."""
+        ...
+
+    def create(self, path: str, data: bytes) -> None:
+        """Create *path*, complete before it is visible; `FileExistsError` when another writer holds the name."""
+        ...
+
+    def write_leaf(self, path: str, data: bytes) -> None:
+        """Write a leaf the version changes."""
+        ...
+
+    def advance_current(self, root: Root, data: bytes) -> None:
+        """Point ``CURRENT`` at *root*, whose stored bytes are *data*, unless it names a version at least as new."""
+        ...
+
+    def now(self) -> datetime:
+        """The time a version records."""
+        ...
+
+    def actor(self) -> str:
+        """Who acts: ``event.actor``."""
+        ...
+
+
+class LocalInventoryStorage:
+    """A catalog directory on local disk, written with atomic links and renames."""
+
+    def __init__(self, root: str | Path) -> None:
+        """Store the Inventory in the directory *root*."""
+        self._root = Path(root)
+        self._fetch = local_fetch(self._root)
+
+    @property
+    def root(self) -> Path:
+        """The catalog directory."""
+        return self._root
+
+    @property
+    def location(self) -> str:
+        """The catalog directory, for messages."""
+        return str(self._root)
+
+    def read(self, path: str) -> bytes | None:
+        """The bytes at *path* under the directory, or ``None``."""
+        return self._fetch(path)
+
+    def create(self, path: str, data: bytes) -> None:
+        """Create *path* with `sdmxlib.storage.create_exclusive`."""
+        create_exclusive(self._root / path, data)
+
+    def write_leaf(self, path: str, data: bytes) -> None:
+        """Create a leaf. One already there is the same leaf: its name is the hash of its bytes."""
+        target = self._root / path
+        if target.exists():
+            return
+        with contextlib.suppress(FileExistsError):
+            create_exclusive(target, data)
+
+    def advance_current(self, root: Root, data: bytes) -> None:
+        """Point ``CURRENT`` at *root*, unless it already names a version at least as new.
+
+        Two writers can race the replace and leave ``CURRENT`` one version
+        behind; readers probe forward from it (spec §6.6), so a lagging hint
+        costs extra reads and still finds the newest root.
+        """
+        target = self._root / CURRENT_NAME
+        try:
+            held = decode_current(target.read_bytes())
+        except FileNotFoundError, InventoryError:
+            held = None
+        if not current_is_older(held, root):
+            return
+        current = Current(seq=root.seq, root_sha256=sha256_hex(data), restore_epoch=root.restore_epoch)
+        staged = _stage(target, encode(current))
+        staged.replace(target)
+        _fsync_dir(self._root)
+
+    def now(self) -> datetime:
+        """This machine's clock."""
+        return datetime.now(UTC)
+
+    def actor(self) -> str:
+        """``<os user>@<hostname>``, from the process."""
+        return _actor()
+
+
+def _no_manifest_reader(product_id: str, edition_id: str, _manifest_sha256: str) -> NoReturn:
+    """The cross-product rules' reader on a storage with no manifest reader, which Phase 5 builds (GH-52)."""
+    msg = (
+        f"{product_id}'s edition {edition_id} becomes live or embargoed, and the cross-product rules cannot read "
+        "manifests on this storage until Phase 5; use try_commit, or pass artefacts= to InventoryWriter"
+    )
+    raise NotImplementedError(msg)
+
+
 class InventoryWriter:
-    """Commits Inventory versions to the catalog directory *root*, on local disk.
+    """Commits Inventory versions to one catalog, through an `InventoryStorage`.
 
     It reads the head with `sdmxlib.inventory.FullInventory`, builds the next
     root with `sdmxlib.inventory.next_root`, and writes leaves, the root and
     ``CURRENT`` in that order (spec §6.6).
     """
 
-    def __init__(self, root: str | Path, *, artefacts: Artefacts | None = None) -> None:
+    def __init__(self, root: str | Path | InventoryStorage, *, artefacts: Artefacts | None = None) -> None:
         """Write the catalog at *root*.
 
         Args:
-            root: The catalog directory.
+            root: The catalog directory, or the storage that holds the catalog.
             artefacts: How the cross-product rules read an edition's
                 artefacts; a `statcatlib.store.cross_product.ManifestArtefacts`
-                over *root* when ``None``.
+                over a catalog directory when ``None``. Any other storage has
+                no default reader, so a `commit` with an incoming entry raises
+                `NotImplementedError`.
         """
-        self._root = Path(root)
-        self._artefacts: Artefacts = artefacts or cross_product.ManifestArtefacts(self._root)
+        self._storage: InventoryStorage = LocalInventoryStorage(root) if isinstance(root, str | Path) else root
+        self._artefacts: Artefacts
+        if artefacts is not None:
+            self._artefacts = artefacts
+        elif isinstance(self._storage, LocalInventoryStorage):
+            self._artefacts = cross_product.ManifestArtefacts(self._storage.root)
+        else:
+            self._artefacts = _no_manifest_reader
+
+    @property
+    def storage(self) -> InventoryStorage:
+        """The storage holding the catalog."""
+        return self._storage
 
     @property
     def root(self) -> Path:
-        """The catalog directory."""
-        return self._root
+        """The catalog directory; a catalog in object storage has none and raises `TypeError`."""
+        if isinstance(self._storage, LocalInventoryStorage):
+            return self._storage.root
+        msg = f"the catalog {self._storage.location} is not on local disk, so it has no directory"
+        raise TypeError(msg)
 
     @property
     def artefacts(self) -> Artefacts:
@@ -344,11 +488,19 @@ class InventoryWriter:
 
         A missing one raises `FileNotFoundError`, a malformed one `InventoryError`.
         """
-        return decode_catalog((self._root / CATALOG_NAME).read_bytes())
+        return decode_catalog(self._catalog_bytes())
+
+    def _catalog_bytes(self) -> bytes:
+        """The stored ``catalog.json``; a missing one raises `FileNotFoundError`."""
+        raw = self._storage.read(CATALOG_NAME)
+        if raw is None:
+            msg = f"{self._storage.location} has no {CATALOG_NAME}"
+            raise FileNotFoundError(msg)
+        return raw
 
     def has_version(self) -> bool:
         """Whether any Inventory version has been written: ``CURRENT`` or version 1 exists."""
-        return (self._root / CURRENT_NAME).is_file() or (self._root / root_path(1)).is_file()
+        return self._storage.read(CURRENT_NAME) is not None or self._storage.read(root_path(1)) is not None
 
     def full(self) -> FullInventory | None:
         """The newest valid version, by the read protocol, or ``None`` before the first.
@@ -357,7 +509,7 @@ class InventoryWriter:
         """
         if not self.has_version():
             return None
-        return FullInventory(local_fetch(self._root)).refresh()
+        return FullInventory(self._storage.read).refresh()
 
     def head(self) -> Root | None:
         """The newest valid version's root, or ``None`` before the first."""
@@ -366,31 +518,13 @@ class InventoryWriter:
 
     # -- writing ---------------------------------------------------------
 
-    def _write_leaf(self, path: Path, data: bytes) -> None:
-        """Create a leaf. One already there is the same leaf: its name is the hash of its bytes."""
-        if path.exists():
-            return
-        with contextlib.suppress(FileExistsError):
-            create_exclusive(path, data)
+    def _write_leaf(self, path: str, data: bytes) -> None:
+        """Write a leaf the version changes, through the storage."""
+        self._storage.write_leaf(path, data)
 
     def _advance_current(self, root: Root, data: bytes) -> None:
-        """Point ``CURRENT`` at *root*, unless it already names a version at least as new.
-
-        Two writers can race the replace and leave ``CURRENT`` one version
-        behind; readers probe forward from it (spec §6.6), so a lagging hint
-        costs extra reads and still finds the newest root.
-        """
-        target = self._root / CURRENT_NAME
-        try:
-            held = decode_current(target.read_bytes())
-        except FileNotFoundError, InventoryError:
-            held = None
-        if held is not None and held.restore_epoch == root.restore_epoch and held.seq >= root.seq:
-            return
-        current = Current(seq=root.seq, root_sha256=sha256_hex(data), restore_epoch=root.restore_epoch)
-        staged = _stage(target, encode(current))
-        staged.replace(target)
-        _fsync_dir(self._root)
+        """Point ``CURRENT`` at *root*, through the storage."""
+        self._storage.advance_current(root, data)
 
     def write_catalog_json(self, *, catalog_id: str | None = None) -> CatalogDocument:
         """Create ``catalog.json``, with a UUIDv7 ``catalog_id`` and ``restore_epoch`` 0.
@@ -399,13 +533,18 @@ class InventoryWriter:
             catalog_id: The id to record; a new UUIDv7 when ``None``.
 
         Returns:
-            The document written. A catalog that has one already raises
-            `FileExistsError`.
+            The document written.
+
+        Raises:
+            FileExistsError: The catalog has a ``catalog.json`` already.
         """
+        if self._storage.read(CATALOG_NAME) is not None:
+            msg = f"{self._storage.location} has a {CATALOG_NAME} already"
+            raise FileExistsError(msg)
         document = CatalogDocument(
             format_version=CATALOG_FORMAT, catalog_id=catalog_id or str(uuid.uuid7()), restore_epoch=0
         )
-        create_exclusive(self._root / CATALOG_NAME, encode(document))
+        self._storage.create(CATALOG_NAME, encode(document))
         return document
 
     def check_writable(self, base: Root | None, *, now: datetime | None = None) -> CatalogDocument:
@@ -416,7 +555,7 @@ class InventoryWriter:
 
         Args:
             base: The newest version, or ``None`` for the catalog's first.
-            now: This machine's time; the clock when ``None``.
+            now: The commit's time; the storage's clock when ``None``.
 
         Returns:
             ``catalog.json``, decoded as a writer without the catalog lock.
@@ -428,21 +567,21 @@ class InventoryWriter:
 
         A missing ``catalog.json`` raises `FileNotFoundError`.
         """
-        raw = (self._root / CATALOG_NAME).read_bytes()
+        raw = self._catalog_bytes()
         try:
             document = decode_catalog(raw, decoder="stage-1-writer")
-            next_created_at(base, now or datetime.now(UTC))
+            next_created_at(base, now or self._storage.now())
         except InventoryError as exc:
             raise InventoryWriteRefusedError(str(exc)) from exc
         return document
 
     def _stored_root(self, base: Root) -> bytes:
         """The stored bytes of *base*; a root a restore removed means another writer moved the head."""
-        try:
-            return (self._root / root_path(base.seq)).read_bytes()
-        except FileNotFoundError as exc:
+        stored = self._storage.read(root_path(base.seq))
+        if stored is None:
             msg = f"Inventory version {base.seq} no longer exists"
-            raise InventoryConflictError(msg) from exc
+            raise InventoryConflictError(msg)
+        return stored
 
     def _base_leaves(
         self, base: Root, products: Mapping[str, LeafRef], retired: Iterable[Tombstone]
@@ -465,11 +604,11 @@ class InventoryWriter:
         found: dict[str, Leaf] = {}
         for product_id in moved & base.products.keys():
             ref = base.products[product_id]
-            try:
-                found[product_id] = decode_leaf((self._root / ref.leaf).read_bytes())
-            except FileNotFoundError as exc:
+            stored = self._storage.read(ref.leaf)
+            if stored is None:
                 msg = f"{product_id}'s leaf {ref.leaf} in Inventory version {base.seq} is missing"
-                raise InventoryError(msg) from exc
+                raise InventoryError(msg)
+            found[product_id] = decode_leaf(stored)
         return found
 
     def _changes(
@@ -511,7 +650,7 @@ class InventoryWriter:
             extensions: The extension sections; *base*'s when ``None``.
             built_from: The older version a correction is built from; *base*
                 when ``None``.
-            now: This machine's time; the clock when ``None``.
+            now: The commit's time; the storage's clock when ``None``.
             kind: What the version records (``event.kind``).
             reason: Why, in the caller's words (``event.reason``).
 
@@ -523,21 +662,22 @@ class InventoryWriter:
                 *base* first.
 
         `check_writable` raises `InventoryWriteRefusedError` before anything is
-        written.
+        written, and so does a storage that has no actor to record.
         """
-        now = now or datetime.now(UTC)
+        now = now or self._storage.now()
         catalog = self.check_writable(base, now=now)
+        actor = self._storage.actor()
         previous_bytes = None if base is None else self._stored_root(base)
         products = dict(base.products) if base is not None else {}
         for product_id, leaf in leaves.items():
             data, ref = leaf_ref(leaf)
-            self._write_leaf(self._root / ref.leaf, data)
+            self._write_leaf(ref.leaf, data)
             products[product_id] = ref
         tombstones = tuple(retired) if retired is not None else (base.retired if base is not None else ())
         root = next_root(
             base,
             products=products,
-            event=Event(actor=_actor(), reason=reason, kind=kind),
+            event=Event(actor=actor, reason=reason, kind=kind),
             producer=producer(),
             now=now,
             retired=tombstones,
@@ -551,7 +691,7 @@ class InventoryWriter:
         )
         data = encode(root)
         try:
-            create_exclusive(self._root / root_path(root.seq), data)
+            self._storage.create(root_path(root.seq), data)
         except FileExistsError as exc:
             msg = f"another writer created Inventory version {root.seq} first"
             raise InventoryConflictError(msg) from exc
@@ -559,7 +699,13 @@ class InventoryWriter:
         return root
 
     def _refuse(self, full: FullInventory | None, leaves: Mapping[str, Leaf]) -> None:
-        """Raise the first refused product's `CrossProductRuleError`, by product id, when the rules refuse *leaves*."""
+        """Raise the first refused product's `CrossProductRuleError`, by product id, when the rules refuse *leaves*.
+
+        A storage with no manifest reader refuses an incoming entry here, before the rules read every leaf.
+        """
+        if self._artefacts is _no_manifest_reader:
+            for product_id, entry in cross_product.incoming(full, leaves):
+                _no_manifest_reader(product_id, entry.edition_id, entry.manifest_sha256)
         found = self.refusals(full, leaves)
         if found:
             raise found[min(found)]
@@ -590,7 +736,8 @@ class InventoryWriter:
         rules cannot read raises `sdmxlib.edition.ManifestError`; neither
         writes anything. `try_commit` raises `InventoryWriteRefusedError` for a
         catalog or a base version this writer must not write on, and it
-        writes nothing either.
+        writes nothing either. On a storage with no manifest reader, an
+        incoming entry raises `NotImplementedError` before anything is written.
         """
         for _ in range(MAX_RACES):
             full = self.full()
@@ -608,8 +755,10 @@ class InventoryWriter:
                     reason=reason,
                 )
             except InventoryConflictError:
-                log.debug("lost the race for the next Inventory version of %s; re-reading the head", self._root)
+                log.debug(
+                    "lost the race for the next Inventory version of %s; re-reading the head", self._storage.location
+                )
                 continue
             return root
-        msg = f"{self._root}: {MAX_RACES} commits in a row lost to other writers; try again"
+        msg = f"{self._storage.location}: {MAX_RACES} commits in a row lost to other writers; try again"
         raise InventoryContentionError(msg)

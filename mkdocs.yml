@@ -108,6 +108,7 @@ nav:
     - Catalog Administration: api/admin.md
   - Reference:
     - Catalog: reference/catalog.md
+    - Object Storage: reference/blob.md
     - Scopes: reference/scopes.md
     - Domain Model: reference/model.md
     - Query: reference/query.md

@@ -51,7 +51,8 @@ src/
     │   ├── __init__.py
     │   ├── store.py         # _Store (private engine), EditionView, QueryBuilder
     │   ├── working_copy.py  # WorkingCopy, Edition, the journal rule, the seal
-    │   ├── inventory.py     # InventoryWriter: catalog.json, inventory/, CURRENT
+    │   ├── inventory.py     # InventoryWriter, InventoryStorage, LocalInventoryStorage: catalog.json, inventory/, CURRENT
+    │   ├── blob.py          # BlobInventoryStorage, BlobLocation, TokenIdentity: the Inventory on object storage (`statcatlib[blob]`)
     │   ├── cross_product.py # The cross-product rules (§6.5 items 4, 7, 8), stale editions
     │   ├── schema.py        # DDL: statcat namespace, MAP columns, use_statcat
     │   ├── lance.py         # LanceDB search index (BM25 + vector)
@@ -356,6 +357,21 @@ Inventory and seals editions:
   Each entry a seal or the journal repair records carries `dataflows` and
   `pull_bytes`, and a structure entry `artefacts`
   (`sdmxlib.inventory.routing_fields`, GH-98); `verify-catalog` checks them.
+- **The storage seam.** `InventoryWriter(root)` takes a directory or an
+  `InventoryStorage`. The rules stay in the writer, and the storage holds
+  `read`, `create`, `write_leaf`, `advance_current`, `now` and `actor`.
+  `LocalInventoryStorage` keeps the link and rename publish above.
+  `BlobInventoryStorage(location, *, actor=None, clock=None)`
+  (`store/blob.py`, `statcatlib[blob]`) writes each root with one
+  `put(mode="create")`, each leaf its version changes with one unconditional
+  Put and no existence check, on every store, and `CURRENT` by a conditional
+  write on its `e_tag`. It takes its time from the `Date` of an anonymous
+  `HEAD`, refusing a machine clock more than `MAX_CLOCK_SKEW` (30 s) ahead,
+  and its actor from `TokenIdentity`'s `oid`, else a given value, else a
+  refusal. A failed `CURRENT` move logs a WARNING, since the root is the commit
+  point. A blob writer has no manifest reader until Phase 5, so a blob `commit`
+  with an incoming entry raises `NotImplementedError`; `try_commit` writes
+  versions, and no `CatalogAdmin` runs on blob.
 - **The cross-product rules.** `commit` runs `InventoryWriter.refusals`
   (`store/cross_product.py`) on every change that makes an entry live or
   embargoed, and raises the first `CrossProductRuleError` by product id:
@@ -703,6 +719,7 @@ stating it.
   51 were the same kind. Do not add `# noqa: SLF001`; the rule is not selected.
 - **Domain model**: `attrs`
 - **Storage**: `duckdb`
+- **Object storage**: `obstore` (optional, `statcatlib[blob]`, imported inside functions in `store/blob.py`)
 - **Search**: `lancedb` (optional, BM25 FTS via Tantivy + ANN vector index)
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
@@ -715,7 +732,7 @@ stating it.
 ## Commands
 
 ```bash
-just ci                        # the gate: index guard + lint + fmt + docstrings + prose + Any + typecheck + unit and integration tests + docs
+just ci                        # the gate: index guard + lint + fmt + docstrings + prose + Any + typecheck + unit and integration tests + stores tier + docs
 just typecheck                 # pyrefly over src/ and tests/
 just lint                      # ruff check src tests tools
 just fmt                       # ruff format + ruff check --fix
@@ -724,6 +741,7 @@ just check-prose               # no question headings, no banned hook phrases (G
 just check-any                 # the `Any` ratchet (tools/count_any.py)
 just check-indexes             # only public PyPI named in tracked files; uv.lock is gitignored
 just coverage                  # unit + integration with coverage; fails under 85% (pyproject.toml)
+just test-stores               # the `stores` tier: the blob Inventory writer against Azurite in a container
 just test-live                 # the `live` tier: real HTTP calls to SDMX endpoints
 ```
 
@@ -734,9 +752,15 @@ the docs to GitHub Pages on pushes to main that touch the site's sources (or
 by hand from the Actions tab). So nothing merges on a green pipeline; it
 merges on a green `just ci`.
 
-The gate selects tests by marker (`-m unit`, then `-m integration`), so **every
-test file needs a `pytestmark`**: a file without one never runs in `just ci`
-(GH-8). `live` (network) is the only tier left out.
+The gate selects tests by marker (`-m unit`, then `-m integration`, then `-m
+stores` in `tests/stores`), so **every test file needs a `pytestmark`**: a file
+without one never runs in `just ci` (GH-8). `live` (network) is the only tier
+left out.
+
+The `stores` tier runs Azurite in a container, from the image digest sdmxlib's
+tier pins. A push therefore needs a container runtime (Docker, or colima with
+the docker CLI): with none, the tier fails and names the fix, where sdmxlib's
+skips, because the pre-push hook is statcatlib's only gate.
 
 pytest runs with `strict = true` and `filterwarnings = ["error"]`, and no
 ignore list. A test that sets up a situation statcatlib warns about asserts

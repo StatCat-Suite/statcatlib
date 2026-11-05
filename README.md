@@ -428,9 +428,10 @@ just hooks-install
 ```
 
 ```bash
-just ci                # full gate: index guard + lint + format + docstrings + prose + Any ratchet + pyrefly + unit and integration tests + strict docs build
+just ci                # full gate: index guard + lint + format + docstrings + prose + Any ratchet + pyrefly + unit and integration tests + stores tier + strict docs build
 just test              # unit tests
 just test-integration  # integration tests (no network)
+just test-stores       # the blob Inventory writer against Azurite (needs a container runtime)
 just test-live         # live tests against real SDMX endpoints
 just lint              # ruff check
 just typecheck         # pyrefly

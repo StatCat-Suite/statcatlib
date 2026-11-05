@@ -34,6 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 search = ["lancedb>=0.39", "sentence-transformers>=3.0", "typer>=0.15", "rich>=15.0"]
+blob = ["obstore>=0.12,<0.13", "azure-identity>=1", "typer>=0.15", "rich>=15.0"]
 
 [project.scripts]
 statcat = "statcatlib.cli:main"
@@ -83,6 +84,7 @@ markers = [
     "unit: fast, in-process tests with no network I/O",
     "integration: tests that use real DuckDB and sdmxlib but no network",
     "live: tests that make real HTTP calls to external SDMX endpoints",
+    "stores: tests that run against an object-store emulator in a container",
 ]
 
 [tool.coverage.run]
@@ -104,9 +106,11 @@ exclude_lines = [
 
 [dependency-groups]
 dev = [
+    "azure-identity>=1",
     "lancedb>=0.39",
     "mkdocs-material>=9.7.6",
     "mkdocstrings[python]>=1.0.3",
+    "obstore>=0.12,<0.13",
     "polars>=1.39.3",
     # The checkers are capped, as sdmxlib's are: uv.lock is gitignored, so an
     # uncapped checker's next release would change what `just ci` reports
