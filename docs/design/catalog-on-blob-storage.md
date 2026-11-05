@@ -1,13 +1,16 @@
 # Phase 4: the catalog on blob storage
 
 *   **Author:** Gabriel Gellner
-*   **Status:** Draft, not yet reviewed.
+*   **Status:** Draft, revision 2, not yet reviewed. Revision 2 records the owner's
+    decisions of 2026-11-04 on revision 1 (Recorded decisions) and changes upload's
+    digest lookup and the test setup. One owner decision is pending (O4).
 *   **Date:** 2026-11-04
 *   **Issue:** GH-98. Stage 2's later needs: GH-125. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#19.
 *   **Read against:** statcatlib `974ea27` (`origin/main`, 0.14.0); sdmxlib
     `11f18e3f` (`origin/main`, after 0.85.0); the hub at `cb144f6`, with the
-    suite design at revision 4. Every `file:line` below is at these commits.
+    suite design at revision 4; for the leaf rule, sdmxlib's `docs/phase-4-restated` at
+    `cf11dd1a`. Every `file:line` below is at these commits.
     Find each site by its symbol and use the number as a hint.
 *   **Inputs:**
     *   GH-98's body, restated on 2026-11-04, which is the scope and overrides
@@ -50,7 +53,7 @@ Three findings from checking `obstore` 0.12.1 shape the design:
 
 1. `obstore` cannot set or read `Content-MD5` or CRC32C, and it exposes no
    `Date` header. Azure computes an MD5 for a single-shot Put by itself, and a
-   signed URL read through `httpx` reads it back.
+   `HEAD` with the identity's bearer token, through `httpx`, reads it back.
 2. `obstore` has no lease call, no conditional delete and no per-request
    header, so stage 2's Azure duties need a small REST client beside it. The
    seam leaves room for one.
@@ -86,7 +89,8 @@ error (N13). Phase 2a deferred it here (ZM2, P6).
     leaves one `pending/` entry however often it runs.
 *   A remote `Catalog.open` that never returns an embargoed entry and refuses a
     wrong manifest before it reads any other file of the edition.
-*   `correct` and `reinstate` that close DES-M6 and N13.
+*   `correct` and `reinstate` that close DES-M6 and N13, with every edition a
+    correction drops able to come back.
 *   A recorded Inventory read cost that lets the owner decide on the baked
     summary.
 
@@ -99,8 +103,10 @@ error (N13). Phase 2a deferred it here (ZM2, P6).
     deletes (GH-125 parts 2 and 3). This design names the seam they use.
 *   Filling `artefacts` for data products and the leaf-backed reader (GH-125
     part 4).
-*   The full data corpus. GH-98's part 5 is under review with the owner on where
-    it is built. This design covers the Inventory-documents read only.
+*   The full data corpus. It moves to Phase 6, whose benches and load driver are
+    its first named uses (owner, 2026-11-04), and Phase 6 builds it with the shipped
+    `codr_corpus`. Part 5 measures the Inventory-documents read only.
+*   Upload to S3 (owner, 2026-11-04).
 *   Sealing on blob storage. A working copy stays on local disk.
 *   Blob deletion by `CatalogAdmin.prune`. GC owns deletes under `products/`
     (§11.4), so `prune` refuses a blob catalog.
@@ -108,63 +114,45 @@ error (N13). Phase 2a deferred it here (ZM2, P6).
 
 ## Open Questions
 
-### Owner decisions
+The owner's decisions on revision 1 are under Recorded decisions. What stays open is
+one owner decision, O4, and each contract question, with the repository that answers it.
 
-The code and the spec cannot settle these three.
+### O4: an embargoed entry recorded after `from_seq` (pending)
 
-**O1. The digest an S3 upload keeps.** §11.2 and GH-98 say a full-object CRC32C.
-`obstore` accepts only `sha256` and `crc64nvme` as a checksum algorithm, and
-reads back neither (F5). The manifest records sha256, md5 and crc32c, so
-CRC64-NVME cannot be compared either.
-
-| Option | Gain | Cost |
-|---|---|---|
-| **Recommended.** Phase 4's upload supports Azure only, and refuses an `S3Store` naming this decision. | The smallest code. H23 names Azure as the deployment target. | §11.2's S3 clause stays unbuilt. The Inventory writer still runs on S3. |
-| `checksum_algorithm="sha256"` on Put, with the S3 ETag read as an MD5. | Uses `obstore` alone. | AWS documents an ETag as an MD5 only for some uploads, so SSE-KMS breaks it (unconfirmed, no AWS test here). The spec's clause changes. |
-| Raw SigV4 requests or `boto3` in an extra. | Sets CRC32C exactly as §11.2 says. | A second client, for a store no deployment uses. |
-
-**O2. The skew bound's value.** §6.4 and §6.6 item 4 name a skew bound, and
-neither the spec nor the plan gives a number. A writer's clock ahead of the
-storage clock by more than the bound refuses to run.
+**Pending the owner's decision.** W2 tombstones each entry a correction drops. A
+`Tombstone` holds only `product_id`, `edition_id` and `retired_at`, so an embargoed
+entry's `release_at` is lost. sdmxlib's `reinstate` writes `superseded`, and `rollback`
+makes a `superseded` edition `live` with no `release_at` check. That path can publish an
+edition before its release time.
 
 | Option | Gain | Cost |
 |---|---|---|
-| **Recommended.** 30 s. | Catches a broken clock. NTP-synced hosts stay well inside it, and `Date` has one-second resolution. | A host with drifted NTP stops writing until fixed. |
-| 5 s | Tighter release times. | A slow request or a GC pause can trip it. |
-| 5 minutes, equal to `MAX_BASE_AHEAD`. | One number. | A release could go out minutes off with no refusal, which is the fault §6.4 exists to stop. |
+| **1. Recommended.** `correct` keeps embargoed entries recorded after `from_seq` in their leaves, unchanged, with no tombstone. | No format change and no code beyond the rule itself. `release_at` survives, and the embargo holds. Recovery never blocks. | A wrongly recorded entry stays until an operator runs `cancel`. If its `previous` is still live, its release goes through when due, so the operator must look at what remains. If its `previous` is no longer live, the release's fast-forward check refuses it and reports it. |
+| 2. `Tombstone` gains the prior state and `release_at`, and `reinstate` restores the entry as `embargoed`. | Every dropped entry leaves the leaf, as W2 reads. A wrong entry cannot release by itself. | An optional-field format change, and a new rule in sdmxlib. Readers and the conformance suite follow. |
+| 3. `correct` refuses while such an entry exists, and the operator cancels first. | The simplest rule, and no gap. | It blocks recovery at the worst moment, when the Inventory is already wrong. |
 
-The value goes in the spec, because the release job and any other writer share
-it.
+D7 and Part 4's tests are written for option 1, and they name what changes under the
+others. Whichever is chosen, the Phase 5 fold cannot re-record the edition from
+`pending/`: §11.2 skips an edition recorded in a leaf or in `retired`, so option 1's kept
+entry, option 2's tombstone and option 3's `withdrawn` entry are each skipped.
 
-**O3. The DuckDB credential for a managed identity.** §10.1 says the jobs and
-pods use workload identities, "with no keys and no SAS tokens". sdmxlib's
-`StoreSecret` docstring (`local/object_store.py`) warns that DuckDB's
-`credential_chain` provider fails on Azure with a managed identity on any query
-over 5 or more files (duckdb/duckdb-azure#171, open on 2026-10-19), and it shows
-a SAS connection string instead. `obstore.sign` on a token credential also
-yields a user delegation SAS, which upload's digest lookup uses (D2).
+### Contract questions
 
-| Option | Gain | Cost |
-|---|---|---|
-| **Recommended.** Amend §10.1: no stored keys or SAS, and a short-lived user delegation SAS minted from the workload identity is allowed. | Works today for lookups and DuckDB reads. No secret is stored. | The principal needs `generateUserDelegationKey` at account scope or above. Long-lived engines must replace the secret before it expires. |
-| Keep §10.1 and wait for the DuckDB fix. | The spec's text stands. | Remote reads on real Azure with a managed identity stay at risk, and there is no date. |
+None of these block Part 1 unless stated. Each goes to the owner named first.
 
-Phase 4 ships either way, since `BlobLocation` takes whatever `StoreSecret` the
-caller gives. Only Phase 6 depends on the answer.
-
-### Contract questions for the spec
-
-None of these block Part 1 unless stated. Each goes to the spec or sdmxlib first.
-
-| # | Where | Question | Proposal |
-|---|---|---|---|
-| S1 | §6.4 table against §10.1 and §11.2 | The table says the publish job moves a sealed edition to `embargoed`. §10.1 gives that job no access to `inventory/`, and §11.2 says only the release job writes versions. | Change the table's "who" to the release job's fold. |
-| S2 | §6.2 against §10.1 | §6.2 says the actor is "never from the caller". §10.1 says an operator who needs another identity sets it explicitly. | The actor is set once when the writer is constructed, and no method takes one (D3). |
-| S3 | §6.6 item 4 | "On a server" is undefined. | Read it as every writer over a blob store, a laptop's `CatalogAdmin` included (D4). |
-| S4 | §4.6, §4.7, §7.1 | `check_edition` reports a missing lazy file at every profile (`edition/_check.py:382-405`), so a pod holding the required tier alone fails `check_on_open`. | sdmxlib adds a tier argument before Phase 6. Phase 4 pulls both tiers (D6). |
-| S5 | §11.2 step 1 | "Verifies every file" goes beyond `check_edition(lookup=)`, which covers `data/` only (`edition/_check.py:202-205`). | No text change. Upload adds `verify_remote` (Part 2). |
-| S6 | sdmxlib API | Reading a manifest from bytes needs `decode_manifest`, which `sdmxlib.edition` does not export. `read_manifest` takes a directory. | sdmxlib exports it. Blocks D5's reader; the fallback writes each manifest to a temporary directory. |
-| S7 | §10.1 | The publish job's "write" must include reading its own uploads for the digest check. | State it. Storage Blob Data Contributor already includes read. |
+| # | Owner | Where | Question | Proposal |
+|---|---|---|---|---|
+| S1 | sdmxlib spec | §6.4 table against §10.1 and §11.2 | The table says the publish job moves a sealed edition to `embargoed`. §10.1 gives that job no access to `inventory/`, and §11.2 says only the release job writes versions. | Change the table's "who" to the release job's fold. |
+| S2 | sdmxlib spec | §6.2 against §10.1 | §6.2 says the actor is "never from the caller". §10.1 says an operator who needs another identity sets it explicitly. | The actor is set once when the writer is constructed, and no method takes one (D3). |
+| S3 | sdmxlib spec | §6.6 item 4 | "On a server" is undefined. | Read it as every writer over a blob store, a laptop's `CatalogAdmin` included (D4). |
+| S4 | sdmxlib code, before Phase 6 | §4.6, §4.7, §7.1 | `check_edition` reports a missing lazy file at every profile (`edition/_check.py:382-405`), so a pod holding the required tier alone fails `check_on_open`. | Add a tier argument. Phase 4 pulls both tiers (D6). |
+| S5 | statcatlib, no spec change | §11.2 step 1 | "Verifies every file" goes beyond `check_edition(lookup=)`, which covers `data/` only (`edition/_check.py:202-205`). | Upload adds `verify_remote` (Part 2). |
+| S6 | sdmxlib code | sdmxlib API | Reading a manifest from bytes needs `decode_manifest`, which `sdmxlib.edition` does not export. `read_manifest` takes a directory. | Export it. Blocks D5's reader; the fallback writes each manifest to a temporary directory. |
+| S7 | sdmxlib spec | §10.1 | The publish job's "write" must include reading its own uploads for the digest check. | State it. Storage Blob Data Contributor already includes read. |
+| S8 | sdmxlib spec | §6.3, §6.4 | §6.3 says "A tombstone comes from a `retire` version", and the §6.4 table moves only `superseded` and `withdrawn` entries to a tombstone. `correct` also tombstones live entries, and embargoed ones under O4's option 2. | Add `correct` to both. No format change (D7). |
+| S9 | sdmxlib code and spec | `rollback`, §6.4 | `rollback` needs a live edition, so an edition reinstated into a product with none cannot go live by rollback (D7). | Let `rollback` take `if_live=None` to mean "expects none live". Part 4 does not depend on it. |
+| S10 | sdmxlib code | `sdmxlib.inventory`, §6.4 | `retire` refuses live and embargoed entries, so `correct` needs its own rule. | Add `sdmxlib.inventory.correct` (D7). Blocks Part 4. |
+| S11 | sdmxlib code and spec | `conformance.py`, §6.3 | `check_a_correction_links_and_diffs_against_the_version_before_it` expects `("live", None)` for the edition the correction leaves out. `CatalogAdmin.correct` never writes that, and §6.3 gives `to: null` only the meaning "drops the tombstone". | Keep the check, which tests `change_list`. Add a check using `correct`, and state the `to: null` case in §6.3. Does not block. |
 
 ## Critical User Journeys (CUJs)
 
@@ -194,18 +182,23 @@ The first `view()` pulls the edition's catalog files to the cache, checks them,
 and reads observations from the store. An embargoed product has no live edition
 and raises `NoLiveEditionError`.
 
+Until Phase 5's fold, nothing in production records an upload, so a catalog in this
+state comes from `statcatlib.testing.record_uploaded` (Test setup).
+
 ### CUJ 3: An operator corrects a wrong Inventory version
 
 An operator finds version 41 wrong. `CatalogAdmin.editions` shows the head at 42
 and version 39 good. `correct(from_seq=39, if_seq=42, reason="...")` writes 43.
 Root 43 links root 42 and diffs against it, and its `previous_inventory` is 39.
-If another writer committed 43 first, the call is refused and nothing is lost.
+If another writer committed 43 first, the call is refused and nothing is lost. An
+edition sealed after 39 is tombstoned, so its files stay for the retention window and
+`reinstate` can bring it back. In Phase 4 the blob form of this journey runs in tests
+and drills, over editions `record_uploaded` put there.
 
-### CUJ 4: A restore drill brings back a retired edition
+### CUJ 4: A restore drill brings back a retired or dropped edition
 
 `reinstate(product, edition, reason=...)` verifies the manifest and every listed
-file, moves the tombstone to `superseded`, and a `rollback` can then make it
-live.
+file and moves the tombstone to `superseded`. A `rollback` can then make it live.
 
 ## Technical Plan (Architecture)
 
@@ -228,7 +221,7 @@ where stated) and **docs** (Microsoft Learn, fetched that day).
 | F5 | CRC32C cannot be set. `checksum_algorithm` takes `sha256` or `crc64nvme`, and `"crc32c"` raises a config error. `sha256` sends `x-amz-checksum-sha256`, which `obstore` never reads back. | src `aws/checksum.rs:25-30`, stub `_aws.pyi:60`; run on SeaweedFS |
 | F6 | `Content-MD5` cannot be set. `attributes={"Content-MD5": ...}` becomes `x-ms-meta-content-md5` (user metadata), which Azurite refuses with 400. `client_options.default_headers` sends `x-ms-blob-content-md5` outside the SharedKey signature, and Azurite answers 403. | src `attributes.rs:18-27`; run |
 | F7 | A single-shot Put Blob keeps an MD5 the service computes. `Get Blob Properties` returns it. A multipart upload (Put Block List) keeps none, and `obstore` cannot send the header that sets one. | run: `content-md5` on `HEAD` after a Put, absent after block upload; docs Put Blob, Put Block List |
-| F8 | `obstore` does not read `Content-MD5`. A signed GET URL (`sign(store, "GET", path, ...)`, `sp=r`) answers an `httpx`-style `HEAD` with `Content-MD5`, `Content-Length` and `ETag`. `sign(store, "HEAD", ...)` yields an empty `sp=` and 403, since only GET, PUT and DELETE map to a permission. | run; src `azure/credential.rs:391-403` |
+| F8 | `obstore` does not read `Content-MD5`. With an account key, a signed GET URL (`sign(store, "GET", path, ...)`, `sp=r`) answers a `HEAD` with `Content-MD5`, `Content-Length` and `ETag`. `sign(store, "HEAD", ...)` yields an empty `sp=` and 403, since only GET, PUT and DELETE map to a permission. | run; src `azure/credential.rs:391-403` |
 | F9 | A signed PUT URL accepts added headers. A wrong `Content-MD5` gives 400, a right one 201, and `If-None-Match: *` a 409 on the second try. | run |
 | F10 | Multipart starts when the size exceeds `chunk_size`, 5 MiB by default: 5,242,880 bytes went as one PUT, 5,242,881 bytes as blocks and a block list. An iterable goes multipart at any size, and a `Path` by its size. | run; src `obstore/src/put.rs:81-82,215-218,322-331` |
 | F11 | `use_multipart=False` forces one PUT at any size, and it reads the whole input into memory. A `mode` other than overwrite forces one PUT, even for an iterable, and even with `use_multipart=True`. | run, 5 MiB + 1, 12 MiB `Path`; src `put.rs:328-333`; stub `_put.pyi` |
@@ -237,6 +230,11 @@ where stated) and **docs** (Microsoft Learn, fetched that day).
 | F14 | `delete(store, paths)` takes paths alone, `put` takes no free-form header, and no call takes a lease. So stage 2's `If-Match` delete, lease and `x-ms-lease-id` writes are outside `obstore`. | stub `_delete.pyi`, `_put.pyi`; `dir(obstore)` |
 | F15 | No API returns an identity. `credential_provider` is a callback we supply, returning a token and its expiry. `obstore.auth.azure.AzureCredentialProvider` wraps `azure.identity`, which `obstore` does not install. | stub `_azure.pyi:331`, `auth/azure.py`; run |
 | F16 | An Entra access token is a JWT, and `oid` is "the immutable identifier for the requestor, which is the verified identity of the user or service principal". Microsoft says an application should not depend hard on any claim being present. | docs, access token claims |
+| F18 | A `HEAD` with `Authorization: Bearer <token>` returns `Content-MD5`, `Content-Length`, `ETag` and `Date`, on a blob written by `obstore` with a `credential_provider` or by raw PUT. The MD5 equals the content's. Azure documents `Get Blob Properties` under Entra ID with `blobs/read`, Storage Blob Data Reader at least, and says `Put Blob` sets the MD5 with no header sent. | run on Azurite 3.37.0, `--oauth basic`; docs Get Blob Properties |
+| F19 | Azurite's `--oauth basic` checks audience, issuer and expiry: a wrong one of each, or a malformed token, gets 403. It does not check the signature, so a test can mint a token. It needs TLS. Over plain HTTP it starts, and it answers a valid token with 403. Its `--cert` and `--key` take a self-signed pair, and `client_options={"allow_invalid_certificates": True}` lets `obstore` connect. Microsoft's Azurite page does not cover OAuth. | run; `azurite-blob --help` |
+| F20 | `obstore.sign` on a bearer credential asks for a user delegation key, which that Azurite did not grant, so the emulator cannot exercise a token-based SAS. | run |
+| F21 | The same bearer token through `httpx` took and released a lease, and a delete with a wrong `If-Match` got 412 and with the right one 202. | run |
+| F22 | A bind mount from `/private/tmp` was not visible in a colima container. `docker cp` into a created container worked. | run |
 | F17 | 2,000 GETs of 14 KB on Azurite: 1.35 s in sequence, 0.61 s with 8 threads, 0.51 s with 32, 0.43 s with 64. The sync `get` runs concurrently in threads. Azurite was CPU-bound here, so this is a floor on the gain. | run |
 
 **Not confirmed.** Nothing here ran against real Azure or AWS.
@@ -246,11 +244,8 @@ where stated) and **docs** (Microsoft Learn, fetched that day).
 - That a token from a managed or workload identity, for the storage audience,
   carries `oid`. The docs say service principals, and do not name managed
   identities on that page.
-- That `obstore.sign` obtains a user delegation key on real Azure with those
-  identities. The docs state the action needed; the code path ran only with an
-  account key on Azurite.
-- That real Azure's `HEAD` with a `sp=r` user delegation SAS returns
-  `Content-MD5`. The docs say `Get Blob Properties` returns it.
+- That a `HEAD` with a real Entra token returns `Content-MD5` on real Azure. The docs
+  say so, and Azurite does not validate a real token.
 - Whether a real Azure duplicate create answers 409 or 412. The crate maps both
   to `AlreadyExistsError`.
 - Any AWS behaviour: the presigned rules for `x-amz-checksum-*` headers, and the
@@ -260,14 +255,27 @@ where stated) and **docs** (Microsoft Learn, fetched that day).
   documents it for streams. Upload sets its own `timeout` in `client_options` and
   Part 2 tests a large file on Azurite (the emulator's limit is 2 GiB, docs).
 
-### Decisions
+### Recorded decisions
+
+The owner decided these on 2026-11-04, and GH-98 records them.
+
+| ID | Decision | Consequence here |
+|---|---|---|
+| W1 | The full data corpus moves to Phase 6. | Part 5 measures Inventory documents only. |
+| W2 | `correct` writes a tombstone for each entry recorded after `from_seq` that it drops. | `reinstate` can bring the edition back, and GC keeps its files for the window (D7). O4 asks whether an embargoed entry counts as dropped. |
+| W3 | Upload is Azure-only in Phase 4 and refuses an `S3Store`. | `obstore` cannot set or read CRC32C (F5). The Inventory writer still runs on S3. §11.2's S3 clause waits for a deployment that needs it. |
+| W4 | The skew bound is 30 s, and spec §6.4 states it. | `MAX_CLOCK_SKEW` (D4). |
+| W5 | Whether §10.1 allows a short-lived user delegation SAS is deferred to Phase 6, when DuckDB's remote reads need an answer. | Phase 4 takes whatever `StoreSecret` the caller gives. duckdb/duckdb-azure#171, open on 2026-10-19, is why it comes up: sdmxlib's `StoreSecret` docstring warns that `credential_chain` fails on Azure with a managed identity. Upload's lookup uses no SAS on real Azure (D2), so nothing else waits on this. |
+| W6 | The `stores` tier fails when no container runtime exists, since the pre-push hook is statcatlib's only gate. | A push needs Docker. This differs from sdmxlib's tier, which skips. |
+
+### Design decisions
 
 | ID | Decision | Question |
 |---|---|---|
 | D1 | `InventoryWriter` takes an injected `InventoryStorage`, and rules stay in the writer. | 1 |
-| D2 | `obstore` is an extra, `statcatlib[blob]`, imported lazily. Upload's lookup uses signed URLs and `httpx`. | 2 |
+| D2 | `obstore` is an extra, `statcatlib[blob]`, imported lazily. Upload's lookup uses a bearer token and `httpx`. | 2 |
 | D3 | The actor is the token's `oid`, else a value declared on the location, else a refusal. | 3 |
-| D4 | The blob clock is an anonymous `HEAD`'s `Date`, under O2's skew bound. | 4 |
+| D4 | The blob clock is an anonymous `HEAD`'s `Date`, under a 30 s skew bound. | 4 |
 | D5 | `ManifestArtefacts` reads through `Fetch`, with a bounded concurrent prefetch. | 5 |
 | D6 | `Catalog.open(BlobLocation(...))`, with an explicit `cache_dir`, pulling both local tiers. | 6 |
 | D7 | `correct` runs the cross-product rules and replaces the fast-forward check with `if_seq` and leaf validation. | 7 |
@@ -355,7 +363,7 @@ The seam's other edges:
 | Stale-base refusal after the lock | Inside `_commit_locked`, on a fresh `storage.read(HISTORY)`. |
 | Decoder for 2.x | One attribute, `storage.stage_2`, picks the decoder. |
 | Unconditional leaf Put | Already `write_leaves`. |
-| `If-Match` leaf delete, lease, `x-ms-lease-id` writes | A small `AzureBlobRest` over `httpx` with a bearer token from the location's `credential_provider`, since `obstore` has none of them (F14) and a signed DELETE URL carries no lease. It belongs to `BlobInventoryStorage`. |
+| `If-Match` leaf delete, lease, `x-ms-lease-id` writes | `AzureBlobRest`, which Part 2 adds for the digest lookup (D2), since `obstore` has none of them (F14). The same bearer token ran a lease and a conditional delete on Azurite (F21). |
 | Opt-in refused on a store other than Azure | `isinstance(store, AzureStore)` in `CatalogAdmin`. |
 
 ### D2: `obstore` as an extra
@@ -374,11 +382,33 @@ adds them. The `azure-identity` package stays the caller's dependency: a
 | Base dependency. | No import guard, simpler typing. | Every laptop install gains a 5 MB native wheel it never calls. |
 | `fsspec` or the Azure SDK instead. | Azure SDK has lease, `If-Match` delete and digest headers in one client, so stage 2's REST client goes away. | GH-98 names `obstore`. `azure-storage-blob` serves Azure only, and its create semantics would need the checks F1 to F11 give here. Worth reconsidering if stage 2's REST client grows. |
 
-**Reading the digest upload needs.** A lookup signs a GET URL and sends `HEAD`
-through `httpx`, a base dependency (F8). A user delegation key needs
-`generateUserDelegationKey` at account scope (docs), and §10.1 needs amending
-(O3). The alternative of streaming each file back to hash it costs a download of
-every file on every upload.
+**Reading the digest upload needs.** `AzureBlobRest(location)` holds an `httpx` client
+and one method in Phase 4, `head(path) -> RemoteFile | None`, sending `Get Blob
+Properties` with `x-ms-version`. It authorizes in one of two ways, chosen when it is
+built:
+
+1. A `TokenIdentity` on the store's credential provider sends `Authorization: Bearer`.
+   This is the production path, and it needs `blobs/read` and nothing else.
+2. An `account_key` in `store.config` signs a GET URL with `obstore.sign` and sends
+   `HEAD` to it (F8). This is the plain Azurite path, two lines with no signer.
+
+With neither, upload refuses before it writes anything and names both.
+
+| Option | Gain | Cost |
+|---|---|---|
+| **Bearer token through `httpx`, account key for the emulator (chosen).** | No SAS, and no `generateUserDelegationKey` at account scope. §10.1 stands as written. The client is the one stage 2 needs (F21). `httpx` is a base dependency. | Two authorization branches. The bearer branch needs a TLS Azurite in the tier (below). A token provider must be a `TokenIdentity`, since `obstore` keeps its credential to itself. |
+| `obstore.sign` for every credential. | One branch, with no bearer handling. | A SAS on every lookup, a role at account scope (docs: the action must be scoped to the account or above), and §10.1 would need amending, which W5 defers. Azurite cannot exercise the token path (F20), so the production path would run first on real Azure. |
+| A SharedKey signer for the emulator instead of `sign`. | The emulator path sends the same `HEAD` as production. | 20 lines of signing in `src` or test code for a path no deployment uses, as sdmxlib's `_stores.py` carries. |
+| `azure-storage-blob` in an extra. | Handles all credentials, digests, leases and conditional deletes. | A second client beside `obstore`, against GH-98's choice. Stage 2 is the point to look again if `AzureBlobRest` grows. |
+| Stream each file back and hash it. | No digest from the store at all. | A download of every file on every upload, and §11.2 asks for a digest the store keeps. |
+
+**What the tier needs for the bearer path.** A second Azurite container runs with
+`--oauth basic --cert --key`, created first and given its certificate by `docker cp`
+(F22). The pair comes from `trustme`, a new `dev` dependency, so no private key sits in
+the repository. A test mints an unsigned token with the right audience and issuer
+(F19) and passes `allow_invalid_certificates`. The tests that read data through DuckDB
+stay on the plain container: this design did not try DuckDB against a self-signed
+certificate, and those tests gain nothing from it.
 
 ### D3: `event.actor`
 
@@ -387,6 +417,7 @@ provider. It is the callable passed to `AzureStore(credential_provider=...)`. It
 calls the inner provider, decodes the JWT payload without verifying it, keeps
 `oid`, and returns the credential unchanged. The token came from Entra over TLS to
 this process, and the value only labels an audit record; no access decision reads it.
+`TokenIdentity` also gives `AzureBlobRest` its token (D2).
 
 The actor resolves once, when the writer first needs it:
 
@@ -424,11 +455,14 @@ The rule, one request per `try_commit` and per `_commit_product`:
 
 ```python
 storage = parse_http_date(response.headers["date"])
-if datetime.now(UTC) - storage > MAX_CLOCK_SKEW:   # O2
+if datetime.now(UTC) - storage > MAX_CLOCK_SKEW:   # 30 s, W4
     raise InventoryWriteRefusedError(...)          # names both times
 return storage
 ```
 
+- The bound is 30 s (W4): it catches a broken clock, NTP-synced hosts stay well inside
+  it, and `Date` has one-second resolution. A release cannot go out minutes off, which
+  a 5-minute bound would allow.
 - A clock behind the storage clock passes, since the writer records storage time.
 - A missing or malformed `Date` refuses, as does a failed request.
 - `next_created_at` then applies §6.6 items 2 and 3 to the storage time, so a root
@@ -591,29 +625,88 @@ CatalogAdmin.correct(*, from_seq: int, if_seq: int, reason: str) -> int
 CatalogAdmin.reinstate(product_id: str, edition_id: str, *, reason: str) -> int
 ```
 
-`Change` gains `removed: frozenset[str] = frozenset()`, passed on to `try_commit`
-and to `cross_product._planned`, for a product in the head and absent from
-`from_seq`. `change_list` already diffs on the `products` map it receives.
-
 **`correct`'s closure, run against each head `commit` gives it:**
 
-1. `full.seq != if_seq` raises `InventoryRuleError(rule="if-seq")`. A lost race
-   lands here, so a retry cannot erase a concurrent commit. `if_seq` is required.
-2. Read root `from_seq`. A root that is absent raises `rule="from-seq"` saying it
-   was pruned or never written, and an invalid one says why it fails to decode.
-   `from_seq` at or above `if_seq` raises the same rule. A missing or bad leaf of
-   that root refuses too.
-3. Take `products` from it, and `retired`, `embargo` and `extensions` from the head.
-4. Drop each entry the head tombstones. When a product's live entry at some schema
-   is dropped, refuse with `rule="tombstone"`, naming the edition. The product would
-   otherwise lose its head with no version saying so. The fix is `reinstate`, then
-   `correct` again, or a later `from_seq`.
-5. Verify every entry that differs from the head's: the stored manifest against the
+1. `full.seq != if_seq` raises `InventoryRuleError(rule="if-seq")`. A lost race lands
+   here, so a retry cannot erase a concurrent commit. `if_seq` is required.
+2. Read root `from_seq`. A root that is absent raises `rule="from-seq"` saying it was
+   pruned or never written, and an invalid one says why it fails to decode. `from_seq`
+   at or above `if_seq` raises the same rule. A missing or bad leaf of that root
+   refuses too.
+3. Find each product's restored leaf: its leaf in `from_seq`, or `None` for a product
+   new since then.
+4. Call sdmxlib's new rule on each product (S10):
+   `correct(head_leaf, restored, head.retired, now=writer.now()) -> (Leaf, tuple[Tombstone, ...])`.
+   One `now` serves the whole version. The rule does three things:
+   - It drops from the restored leaf every entry the head tombstones. When that drops a
+     product's live entry at some schema, it raises `TransitionError(rule="tombstone")`,
+     naming the edition, since the product would lose its head with no version saying
+     so. The fix is `reinstate`, then `correct` again, or a later `from_seq`.
+   - It keeps, unchanged, each entry that is embargoed in the head and absent from the
+     restored leaf (O4, option 1).
+   - It returns a tombstone for every other entry the head holds and the restored leaf
+     does not. A product new since `from_seq` gets a leaf with the head's `kind` and
+     `lifecycle` and the entries kept above.
+5. Build `retired` as the head's tombstones plus the new ones.
+6. Verify every entry that differs from the head's: the stored manifest against the
    entry's `manifest_sha256`, then every listed file, through the helper `reinstate`
-   uses. A failure raises `EditionCheckError`.
-6. Return `Change(leaves=<differing leaves>, removed=..., retired=head's,
-   embargo=None, extensions=None, built_from=from_seq)`. No change at all raises
-   `ValueError`.
+   uses. A failure raises `EditionCheckError`. A dropped entry gets no check, since its
+   tombstone restores nothing.
+7. Return `Change(leaves=<differing leaves>, retired=<from step 5>, embargo=None,
+   extensions=None, built_from=from_seq)`. No change at all raises `ValueError`.
+
+`try_commit` and `Change` need no new field.
+
+**Tombstone fields.** `product_id` and `edition_id` come from the head's entry.
+`retired_at` is the correction's time, the storage clock on blob, so the retention
+window starts at the correction. GC and `prune` measure from it (§11.4), which keeps
+the files for the window. A tombstone holds nothing else, so `reinstate` re-reads the
+manifest.
+
+**Who builds the tombstones.** sdmxlib's `retire` refuses a live or embargoed entry
+(`_rules.py`, `rule="state"`), so it cannot serve. sdmxlib adds the rule.
+
+| Option | Gain | Cost |
+|---|---|---|
+| **A new `sdmxlib.inventory.correct` rule (chosen).** | sdmxlib owns the state-transition rules (§6, RFC decision 8), and `admin.py` adds no rule of its own (`src/statcatlib/EGM.md`), so that invariant stands. The conformance suite can test it, and O4's choice lands in one function. | A sdmxlib release before Part 4, and a raised cap. S6 already asks for a release, so the two can ship together. |
+| `CatalogAdmin` builds `Tombstone` values itself. | No sdmxlib release: `Tombstone` is public and the format accepts the result (table below). | A state transition lives outside sdmxlib, the one place in `admin.py` that would, and no conformance case covers it. |
+
+**Products new since `from_seq`.** The product stays in the root with a leaf holding only
+its kept embargoed entries, which is an empty leaf when it has none. Its other entries
+become tombstones.
+
+| Option | Gain | Cost |
+|---|---|---|
+| **Keep it with an empty leaf (chosen).** | `kind` and `lifecycle` survive, so a later `working_copy` keeps its refusals. `reinstate` has the leaf it requires. No field and no sdmxlib change. `retire` already produces such leaves. | `FullInventory.products()` lists a product `from_seq` did not hold, so the root's map is a superset of `from_seq`'s. `LiveInventory` drops it, so no public reader sees the difference. |
+| Remove it from `products`. | The map equals `from_seq`'s. | `reinstate` needs a leaf, and `kind` and `lifecycle` would have to be rebuilt from the manifest. `Change`, `try_commit` and `_planned` each need a removal path. |
+
+**What `sdmxlib.inventory` accepts**, run against 0.85.0 (`inventory/` at `11f18e3f`
+adds nothing that bears on this):
+
+| Call | Result |
+|---|---|
+| `next_root`, `validate_root`, `decode_root` | Accept tombstones for entries that were live, and an empty leaf. They require only that no tombstone repeats (`_check_root`). |
+| `retire` | Refuses a live or embargoed entry (`rule="state"`), so it cannot build these. |
+| `change_list` | Writes `{edition_id, from: "live", to: "tombstone"}` with no `entry`, and for a restored one `{from: "superseded", to: "live", entry}`. An empty-leaf product gets `leaf_sha256.to` set to the empty leaf's hash. `_marks` and `_check_item` handle these as they stand. |
+| `decode_leaf`, `validate_leaf` | Accept `editions: ()`, and the leaf schema has no minimum. |
+| `LiveInventory`, `FullInventory` | `head` raises `KeyError`, `products()` omits it; `FullInventory.products()` lists it. |
+| `record` | Refuses a tombstoned edition (`rule="tombstone"`), so the journal repair cannot re-record one. `_named` counts a tombstone, so `settle_journal` clears its entry. `record` of a new edition on an empty leaf succeeds. |
+| `reinstate` | Works on an empty leaf and on a restored one. |
+| `rollback` | After `reinstate` on a product with a live edition, it moves the live one to `withdrawn` and the reinstated one to `live`. On a product with no live edition it refuses (`rule="if-live"`), also with `if_live=None`. |
+
+**The sdmxlib changes.** The format and its validators need no change. Tombstones need
+the `correct` rule (S10) and one spec change (S8). S9 is a separate, optional change for
+the last row. Until it ships, an edition reinstated into a product with no live edition
+goes live by a second `correct`, from the version that held it live, which restores that
+whole state. A new seal also works, since the empty leaf takes a first edition.
+
+**The conformance check.** `check_a_correction_links_and_diffs_against_the_version_before_it`
+(`conformance.py:546-567`) calls `backend.commit_at(third, {"p": first.leaves["p"]},
+kind="correct", built_from=1)`, with no `retired` and no `correct` rule. statcatlib's
+backend maps that to `try_commit`, which does not change. So it still passes, and it
+still expects `("live", None)` for edition 2, which now describes a correction with no
+tombstone. It tests `change_list` and the chain, and `CatalogAdmin.correct` never writes
+that item (S11). Part 4's own tests and S11's new check cover the tombstone.
 
 **Verification** (`_verify_edition`). Locally, `check_edition(at="publish",
 extensions={"statcat": check_catalog})` hashes every file. On blob, it pulls the
@@ -640,19 +733,28 @@ gets its Put, and a missing leaf object returns.
 | Fast-forward | Run it. | Uniform rules. | A correction moves the live edition backward by design, so this refuses nearly every useful correction. |
 
 How the rules see it: `incoming` compares `leaves` with the head, so each entry
-returning to `live` or `embargoed` counts as incoming, and `_planned` must drop
-`removed` products. `§6.5` item 6, chain continuity, still holds, since `previous`
-may name a tombstoned edition.
+returning to `live` or `embargoed` counts as incoming, and `_planned` holds the restored
+leaves, so a dropped entry is gone from the comparison. §6.5 item 6, chain continuity,
+still holds, since `previous` may name a tombstoned edition.
 
-**What a correction loses.** Copying `products` removes every entry and product
-recorded after `from_seq`, as GH-98 specifies. Those editions keep their files, and
-no version names them. They are not tombstones, so `reinstate` refuses them, and the
-journal entry is gone, so no repair records them. `doctor` reports each as an
-`unrecorded edition`, and the fix is a new seal. A release after `from_seq` returns
-to `embargoed` and needs releasing again. The embargo setting stays the head's, so
-it cannot turn off. An owner who wants a different rule for products newer than
-`from_seq` should say so in review; keeping them would stop the root being a copy of
-a known-good state.
+**What a correction changes for editions recorded after `from_seq`.** Each one that is not
+embargoed in the head leaves the leaf and becomes a tombstone, and its files stay for the
+window. An
+operator brings one back with `reinstate`, which enters it as `superseded`, and a
+`rollback` makes it live. The working copies built on a dropped live edition fail
+`NonFastForwardError` at their seal, as after a rollback.
+
+A release after `from_seq` still returns to `embargoed`, because the edition's entry in
+`from_seq` is embargoed, and it needs releasing again. The embargo setting stays the
+head's, so it cannot turn off.
+
+An entry embargoed in the head and recorded after `from_seq` stays embargoed, with its
+`release_at`, pending O4. It is not incoming, so the rules and step 6 skip it. If its
+`previous` was dropped, its release is refused, naming the withdrawn base (§6.4).
+
+**The fold.** A tombstone stops the Phase 5 fold from re-recording a dropped edition from
+its `pending/` entry, since §11.2 skips an edition recorded in `retired`, and `record`
+refuses one too. A kept embargoed entry is skipped because a leaf records it.
 
 **`reinstate`**: a change closure that requires a tombstone (sdmxlib raises
 `rule="tombstone"`); reads the manifest; runs `_verify_edition`; calls sdmxlib's
@@ -677,7 +779,7 @@ files `sent` and `kept`, and `registered: bool`.
 Steps, none reading `catalog.json`, `inventory/` or `CURRENT`:
 
 1. `read_manifest(edition_dir)`, refusing an unsealed directory. An `S3Store` is
-   refused (O1).
+   refused, naming the reason (W3).
 2. For each `root: data` entry, `head`, and when absent `put(path, file, mode="create")`.
    A create is always one Put (F11), so Azure keeps its MD5 (F7). Present files stay,
    since data files are immutable and shared across editions (§4.1).
@@ -700,6 +802,32 @@ wait for a real need: a streaming signed PUT through `httpx` (F9), which saves t
 memory, and Put Block plus Put Block List through signed URLs with
 `x-ms-blob-content-md5`, for files past the limit.
 
+### Test setup: an edition in a blob Inventory
+
+Phase 4 has no seal on blob and no fold, so nothing puts a real edition into a blob
+Inventory. Parts 3 and 4 need one, and so does any drill before Phase 5.
+
+```python
+statcatlib.testing.record_uploaded(
+    location: BlobLocation, edition_dir: Path, *, embargoed: bool = False, release_at: datetime | None = None,
+    reason: str = "record_uploaded",
+) -> Edition
+```
+
+It runs `upload_edition(edition_dir, location, release_at=release_at)`. Then, through a
+blob `InventoryWriter.commit` with `event.kind: seal`, it applies sdmxlib's `record` with
+`routing_fields` and `recorded_routing`, as the fold will. The cross-product rules run,
+reading the uploaded manifests. It leaves the `pending/` entry in place, and Phase 5's
+fold skips an edition the Inventory records (§11.2), so a catalog built this way stays
+valid. Editions come from a local catalog (`codr_product`, `synthetic_catalog`), with
+`previous` chains from there.
+
+| Option | Gain | Cost |
+|---|---|---|
+| **`statcatlib.testing` (chosen).** | Part 3, Part 4, drills and sdmxlib-rest's Phase 6 tests share it, beside `synthetic_catalog`. Its module says it is for tests, and the docs keep it out of the operator guide. | It ships in the wheel, so a determined user can record without the release job. It adds no power: the identity already needs write on `inventory/`, and `CatalogAdmin` could do as much. |
+| `tests/stores/_stores.py` only. | Nothing public. | sdmxlib-rest and bench scripts cannot reach it, so each would rewrite the record step. |
+| Public `CatalogAdmin.record_uploaded`. | A supported manual path until Phase 5, for a real operator. | It commits the API before the fold is designed, and offers a route around `pending/` that §11.2 reserves to the release job. |
+
 ## Alternatives Considered
 
 Each decision above carries its own table. Three wider choices:
@@ -708,8 +836,8 @@ Each decision above carries its own table. Three wider choices:
     `object_store` reads only the account name from a `dfs.core.windows.net` URL
     (`azure/builder.rs:743`) and writes with Put Blob. Every write in the runs carried
     `x-ms-blob-type`, and Part 1 asserts that header. No real DFS endpoint was tried.
-*   **Keep the copy of the whole catalog as the corpus.** GH-98 replaces it. The read
-    touches only `CURRENT`, roots and leaves.
+*   **Copy a whole catalog as Part 5's corpus.** GH-98 replaces it, since the read
+    touches only `CURRENT`, roots and leaves. The full data corpus moves to Phase 6 (W1).
 *   **Keep a write-through leaf cache on disk to speed cold reads.** Leaves name
     embargoed editions, so it moves embargoed metadata out of the boundary.
 
@@ -731,10 +859,11 @@ Each decision above carries its own table. Three wider choices:
 |---|---|
 | Nothing ran on real Azure (the unconfirmed list) | Part 1's PR has a manual checklist for one real-account run before Phase 5 relies on it. The clock, the `oid` and the signing are each small and replaceable. |
 | An upstream `obstore` minor changes behaviour | Capped below the next minor. The tier reruns F1, F2, F10 and F11's cases as tests. |
-| An anonymous `HEAD` is blocked | `now()` refuses and names the cause, and the signed form is the fallback. |
+| An anonymous `HEAD` is blocked | `now()` refuses and names the cause. A bearer `HEAD` on `catalog.json` also returns `Date` (F18), and is the fallback on a token credential. |
 | A leaked orphan leaf per crashed commit | Bounded by one version's changed leaves (§6.9). |
 | A cached edition outlives a withdrawal | Recorded limit until `expunge` and Phase 6's placement. Docs say to delete the directory. |
-| The pre-push hook gets slower | About 20 s once images are pulled, on sdmxlib's figures. |
+| The pre-push hook gets slower, and a push needs Docker (W6) | About 20 s once images are pulled, on sdmxlib's figures for its tier, and more for the OAuth container. The failure message names the fix. |
+| A correction's tombstones outlive the window before anyone reinstates | The files go with the tombstone's window, as for any retirement. The correction's `changes` name every dropped edition. |
 
 ## Detailed Implementation Plan
 
@@ -744,8 +873,8 @@ Each runs `just ci`, updates `EGM.md` beside the code, `CHANGELOG.md`, and
 
 ### Part 1: object storage and the blob Inventory writer
 
-*   **`pyproject.toml`:** the `blob` extra, `obstore` in the `dev` group, and the
-    `stores` marker. Cap as in D2.
+*   **`pyproject.toml`:** the `blob` extra, `obstore` and `trustme` in the `dev`
+    group, and the `stores` marker. Cap as in D2.
 *   **`justfile`:** `test-stores` (`uv run pytest tests/stores -m stores -rs`), and
     `ci: check test test-integration test-stores docs-build`.
 *   **`.githooks/pre-push`:** the comment names the tier.
@@ -760,12 +889,10 @@ Each runs `just ci`, updates `EGM.md` beside the code, `CHANGELOG.md`, and
     `prefetch`, `to_read`. Needs S6.
 *   **`src/statcatlib/admin.py` (Modify):** `CatalogAdmin.open(BlobLocation)`,
     `CatalogAdmin.create`, `writer.now()`; `prune` refuses a blob catalog.
-*   **`tests/stores/{__init__,_stores,conftest}.py` (Create):** sdmxlib's model. The
-    Azurite and SeaweedFS images at sdmxlib's digests, a free local port, and a line
-    in the terminal summary when no runtime exists. Like sdmxlib, the tier skips and
-    says so without Docker. GH-98 says the hook "needs Docker"; skipping keeps a
-    machine without it able to push and says the gate did not check this. Review may
-    prefer a hard failure.
+*   **`tests/stores/{__init__,_stores,conftest}.py` (Create):** sdmxlib's model, with
+    one change. The Azurite and SeaweedFS images at sdmxlib's digests and a free local
+    port are the same. A session fixture calls `pytest.fail` naming the fix when no
+    container runtime exists (W6), so `just ci` fails. Part 2 adds the OAuth container.
 
 Unit tests use `MemoryStore` in place of GH-98's `LocalStore`, because `LocalStore`
 has no update mode for `CURRENT` (F2).
@@ -789,6 +916,10 @@ has no update mode for `CURRENT` (F2).
 
 *   **`src/statcatlib/upload.py` (Create):** `upload_edition`, `UploadReport`,
     `UploadCheckError`, `_lookup`.
+*   **`src/statcatlib/store/blob.py` (Modify):** `AzureBlobRest`.
+*   **`src/statcatlib/testing.py` (Modify):** `record_uploaded`.
+*   **`tests/stores/_stores.py` (Modify):** the OAuth Azurite container and a token
+    minter (D2).
 *   **`src/statcatlib/cli/__init__.py` (Modify):** `statcat upload`.
 *   **`docs/`:** the operator guide and `catalog-format.md`'s `pending/` section.
 
@@ -798,7 +929,10 @@ has no update mode for `CURRENT` (F2).
 | A second upload writes no second `pending/` entry, sends no file again, reports `registered=False` | stores | second upload |
 | The manifest is the last edition file written; a corrupt blob fails before `pending/` | stores | §11.2 order |
 | A file lost after step 2 gives a `remote` finding; Azure's stored MD5 compares equal to the manifest's | stores | digest |
-| An `S3Store` is refused (O1) | unit | O1 |
+| An `S3Store` is refused, naming the reason | unit | W3 |
+| `AzureBlobRest.head` with a bearer token reads `Content-MD5` from a blob `obstore` wrote, on the OAuth container | stores | D2 |
+| The same over `sign` on the plain container; no identity and no key refuses before any write | stores, unit | D2 |
+| `record_uploaded` makes an edition live, and with `embargoed=True` embargoed; a rule failure writes no root | stores | Test setup |
 | A 64 MiB data file over Azurite is one PUT | stores | F11 |
 
 ### Part 3: remote catalogs
@@ -808,6 +942,9 @@ has no update mode for `CURRENT` (F2).
     `Product.view` and `Product.editions` through the pull.
 *   **`src/statcatlib/store/blob.py` (Modify):** `pull_edition`.
 *   **`docs/`:** the guide, with the embargo boundary stated.
+
+Fixtures seal editions in a local catalog and put them in the blob catalog with
+`record_uploaded`.
 
 | Test | Tier | Covers |
 |---|---|---|
@@ -821,11 +958,13 @@ has no update mode for `CURRENT` (F2).
 
 ### Part 4: `CatalogAdmin.correct` and `reinstate`
 
-*   **`src/statcatlib/store/inventory.py`, `cross_product.py` (Modify):** `removed`.
+*   **sdmxlib (first):** the `correct` rule (S10), with a conformance check, and a raised
+    cap here.
 *   **`src/statcatlib/admin.py` (Modify):** `correct`, `reinstate`, `_verify_edition`.
 *   **`docs/`:** the operator guide, with what a correction loses.
 
-Tests run locally in the integration tier and once each over Azurite.
+Tests run locally in the integration tier, over a local catalog. Each also runs once
+over Azurite, with editions from `record_uploaded`.
 
 | Test | Covers |
 |---|---|
@@ -836,7 +975,15 @@ Tests run locally in the integration tier and once each over Azurite.
 | With embargo on at the head and off at `from_seq`, it stays on | embargo |
 | Root `seq - 1` is linked, `changes` diff against it, `previous_inventory` is `from_seq`, `event.kind` is `correct` | history |
 | A restore that breaks item 4 raises `CrossProductRuleError` | Question 7 |
-| A product new since `from_seq` is removed, and `doctor` reports its edition | consequence |
+| An entry embargoed in the head and recorded after `from_seq` stays, with its `release_at` and no tombstone; `cancel` then withdraws it, and a dropped `previous` makes its release raise `NonFastForwardError`. These rows change if O4 picks another option. | O4 |
+| A registration in `pending/` for a dropped edition and for a kept one is skipped; `record` refuses the dropped one | §11.2 |
+| An edition recorded after `from_seq`: its entry leaves the leaf, a tombstone holds the correction's time, and `changes` records `from: <state>, to: tombstone` with no `entry` | W2 |
+| That edition, on a product with a live edition, can be reinstated and rolled back to | W2, CUJ 4 |
+| A product new since `from_seq` keeps an empty leaf, its `kind` and `lifecycle`. `Catalog.products()` omits it, `CatalogAdmin.products()` lists it, and its edition can be reinstated. | W2 |
+| An edition reinstated into a product with no live edition goes live by a second `correct`, and a new seal on the empty leaf works | W2, S9 |
+| `doctor` reports no `unrecorded edition`, and a journal entry for a dropped edition is cleared and not recorded | W2 |
+| `prune` keeps a dropped edition's directory inside the window and deletes it after | W2 |
+| An edition released after `from_seq` returns to `embargoed` and can be released again | W2 |
 | `reinstate` refuses a bad manifest and a bad listed file; a good one is `superseded`, with routing fields, and `artefacts` on a structure entry | reinstate |
 | A reinstated edition can be rolled back to | CUJ 4 |
 
@@ -889,8 +1036,9 @@ proposes no threshold, since the spec gives no number for a pod's Inventory read
 | A second upload writes no second `pending/` entry | 2 | `test_upload.py` |
 | A wrong `manifest_sha256` is refused before any other file | 3 | `test_remote_catalog.py` |
 | `Catalog.open` never returns an embargoed entry | 3 | `test_remote_catalog.py` |
-| `correct` refuses stale `if_seq`, pruned or invalid `from_seq`, and failed files; keeps tombstones and embargo | 4 | `test_correct.py` |
+| `correct` refuses stale `if_seq`, pruned or invalid `from_seq`, and failed files; keeps tombstones and embargo; tombstones each entry it drops | 4 | `test_correct.py` |
 | A correction links root `seq - 1`, and `changes` diff against it | 4 | `test_correct.py` |
+| An edition a correction dropped can be reinstated | 4 | `test_correct.py` |
 | `reinstate` refuses bad files; the entry keeps routing fields and `artefacts` | 4 | `test_reinstate.py` |
 | The 7,000-leaf measurement is in spec §6.5, with the summary decision | 5 | `bench/inventory-read-results.md`, then an sdmxlib PR |
 | `just ci` passes | all | the gate, with `test-stores` |
@@ -898,9 +1046,8 @@ proposes no threshold, since the spec gives no number for a pod's Inventory read
 ### Verification Plan
 
 *   `just ci` for each part, on a machine with a container runtime, so the tier runs.
-*   Part 1's PR body says whether the tier ran or skipped.
 *   One manual pass against a real Azure account before Phase 5 relies on Part 1,
     answering the unconfirmed list: a commit with a workload identity (`oid`), the
-    `Date` `HEAD`, a signed `HEAD` for `Content-MD5`, and a duplicate create's status.
+    `Date` `HEAD`, a bearer `HEAD` for `Content-MD5`, and a duplicate create's status.
 *   `uv run python bench/inventory_read.py` for Part 5, recorded with machine and
     versions, as `bench/corpus-results.md` is.
