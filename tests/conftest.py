@@ -10,6 +10,7 @@ from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
 import pytest
 import sdmxlib as sl
 from sdmxlib import InternationalString, Ref
@@ -431,3 +432,54 @@ def structure_source(root: Path) -> sl.EditionRegistry:
         edition_dir = builder.edition_dir
     seal_edition(edition_dir, product_id="source", producer=Producer(name="tests", version="1"))
     return sl.LocalRegistry.edition(edition_dir)
+
+
+def sealed_data_edition(root: Path, *, product_id: str = "p") -> Path:
+    """A data edition with one binding, one Parquet file and a search index, sealed in a catalog at *root*."""
+    codelist = sl.Codelist(
+        id="CL_FREQ", maintainer="T", version="1.0", name={"en": "frequency"}, codes=[sl.Code(id="A", name={"en": "A"})]
+    )
+    scheme = sl.ConceptScheme(
+        id="CS_F", maintainer="T", version="1.0", name={"en": "c"}, concepts=[sl.Concept(id="FREQ", name={"en": "f"})]
+    )
+    dsd = sl.DataStructure(
+        id="DSD_F",
+        maintainer="T",
+        version="1.0",
+        name={"en": "d"},
+        dimensions=[sl.Dimension(id="FREQ", concept=scheme.ref_to("FREQ"), representation=sl.Ref.to(codelist))],
+    )
+    flow = sl.Dataflow(id="DF_F", maintainer="T", version="1.0", name={"en": "f"}, structure=dsd)
+    with sc.Catalog.create(root, exist_ok=True) as cat:
+        wc = cat.product(product_id).working_copy()
+        wc.registry.add_all([scheme, codelist, dsd, flow])
+        wc.registry.write_observations(schema="obs", table="df_f", source=pl.DataFrame({"FREQ": ["A"]}))
+        wc.registry.add(sl.DataflowBinding.from_dsd(dsd, dataflow=Ref.to(flow), schema="obs", table="df_f"))
+        wc.put(
+            sc.OpenDataset(
+                identifier="d1", title=InternationalString(en="One"), description=InternationalString(en="One")
+            )
+        )
+        edition = wc.seal()
+    return root / "products" / product_id / edition.edition_id
+
+
+def sealed_referring_edition(root: Path) -> Path:
+    """A structure edition, sealed in a catalog at *root*, whose references resolve only in two other products.
+
+    Its `CONCEPTS` scheme names `GEO` and `NAICS`, which the catalog's other
+    structure products hold, so `check_edition` given no ``structures=`` finds
+    each one unresolved.
+    """
+    source = structure_source(root.parent / f"{root.name}-source")
+    with source, sc.Catalog.create(root, exist_ok=True) as cat:
+        geo = cat.product("structure-geo").working_copy(kind="structure")
+        geo.fill_structures(source, families=[sl.Codelist, sl.Hierarchy], agency="T", ids=["CL_GEO", "HCL_*"])
+        geo.seal()
+        classifications = cat.product("structure-classifications").working_copy(kind="structure")
+        classifications.fill_structures(source, artefacts=[NAICS.urn])
+        classifications.seal()
+        concepts = cat.product("structure-concepts").working_copy(kind="structure")
+        concepts.fill_structures(source, families=[sl.ConceptScheme])
+        edition = concepts.seal()
+    return root / "products" / "structure-concepts" / edition.edition_id
