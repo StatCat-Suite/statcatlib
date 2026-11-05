@@ -312,10 +312,13 @@ class AzureBlobRest:
     """
 
     def __init__(self, location: BlobLocation) -> None:
-        """Reach the blobs of *location*, an `AzureStore`'s; a config naming no account raises `ValueError`."""
+        """Reach the blobs of *location*'s `AzureStore`; a config with no container or account raises `ValueError`."""
         self._store = location.store
         found = getattr(self._store, "config", None)
         config: Mapping[str, object] = found if isinstance(found, Mapping) else {}
+        if "container_name" not in config:
+            msg = "AzureBlobRest needs an AzureStore whose config names container_name; this store's config has none"
+            raise ValueError(msg)
         prefix = getattr(self._store, "prefix", None)
         parts = [_endpoint(self._store).rstrip("/"), quote(str(config["container_name"]))]
         self._base = "/".join([*parts, *([quote(prefix)] if prefix else [])])

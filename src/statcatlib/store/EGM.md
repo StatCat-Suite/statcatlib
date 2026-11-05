@@ -215,7 +215,8 @@ version, when `lazy import` (PEP 810) can replace them.
   when it is a `TokenIdentity`.
 - `AzureBlobRest(location)`: `head(path) -> RemoteFile | None`, `Get Blob Properties`
   by `httpx` with `x-ms-version: 2023-11-03` and the bearer token, for the `Content-MD5`
-  `obstore` cannot read. Only a 404 returns `None`; any other failure raises
+  `obstore` cannot read. A config with no `container_name`, as on a non-Azure store,
+  raises `ValueError`. Only a 404 returns `None`; any other failure raises
   `BlobStoreError`, so a missing role never reads as a missing file. `_send` is the one
   method the account-key test path overrides. `close()`, or use it in a `with`.
 - `_statcat_check() -> Check`: `check_catalog`, or `check_catalog_no_index` when

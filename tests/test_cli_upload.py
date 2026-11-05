@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from azure.core.exceptions import ClientAuthenticationError
+from pytest_httpx import HTTPXMock
 from sdmxlib.edition import Finding, ManifestError
 from typer.testing import CliRunner
 
@@ -24,6 +25,18 @@ pytestmark = pytest.mark.unit
 runner = CliRunner()
 
 _OID = "11111111-2222-3333-4444-555555555555"
+
+#: Spelled out, so dropping a name from the command's collection fails a test.
+_REFUSED = (
+    "AZURE_STORAGE_ACCOUNT_KEY",
+    "AZURE_STORAGE_ACCESS_KEY",
+    "AZURE_STORAGE_MASTER_KEY",
+    "AZURE_STORAGE_SAS_KEY",
+    "AZURE_STORAGE_SAS_TOKEN",
+    "AZURE_STORAGE_TOKEN",
+    "AZURE_STORAGE_ENDPOINT",
+    "AZURE_ENDPOINT",
+)
 
 
 def _jwt(claims: dict[str, str]) -> str:
@@ -47,8 +60,8 @@ class _NoCredential:
 
 @pytest.fixture
 def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """An account and a stand-in credential, with no key or SAS variable set."""
-    for name in cli._KEY_VARIABLES:
+    """An account and a stand-in credential, with no refused variable set."""
+    for name in _REFUSED:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_NAME", "acct")
     monkeypatch.setattr("azure.identity.DefaultAzureCredential", _Credential)
@@ -230,8 +243,8 @@ class TestExit2:
 
         assert "AZURE_STORAGE_ACCOUNT_NAME" in self._refused(tmp_path, "az://c")
 
-    @pytest.mark.parametrize("name", cli._KEY_VARIABLES)
-    def test_a_key_or_sas_variable(self, tmp_path: Path, env, captured, name: str) -> None:
+    @pytest.mark.parametrize("name", _REFUSED)
+    def test_a_refused_variable(self, tmp_path: Path, env, captured, name: str) -> None:
         env.setenv(name, "secret-value")
 
         output = self._refused(tmp_path, "az://c")
@@ -240,10 +253,39 @@ class TestExit2:
         assert "secret-value" not in output
         assert captured == []
 
-    def test_a_set_empty_key_variable_counts(self, tmp_path: Path, env, captured) -> None:
-        env.setenv("AZURE_STORAGE_ACCOUNT_KEY", "")
+    @pytest.mark.parametrize("name", _REFUSED)
+    def test_a_refused_variable_set_empty_counts(self, tmp_path: Path, env, captured, name: str) -> None:
+        env.setenv(name, "")
 
-        assert "AZURE_STORAGE_ACCOUNT_KEY" in self._refused(tmp_path, "az://c")
+        assert name in self._refused(tmp_path, "az://c")
+        assert captured == []
+
+    def test_the_message_names_only_the_variables_that_are_set(self, tmp_path: Path, env, captured) -> None:
+        env.setenv("AZURE_ENDPOINT", "https://elsewhere.example")
+
+        output = self._refused(tmp_path, "az://c")
+
+        assert "AZURE_ENDPOINT" in output
+        assert "AZURE_STORAGE_TOKEN" not in output
+        assert "elsewhere.example" not in output
+
+    @pytest.mark.parametrize("value", ["secret-value", ""], ids=["set", "empty"])
+    @pytest.mark.parametrize("name", _REFUSED)
+    def test_a_refusal_builds_no_credential_or_store_and_sends_nothing(
+        self, tmp_path: Path, env, captured, httpx_mock: HTTPXMock, name: str, value: str
+    ) -> None:
+        def untouched(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("the refusal comes first")
+
+        env.setattr("azure.identity.DefaultAzureCredential", untouched)
+        env.setattr("obstore.auth.azure.AzureCredentialProvider", untouched)
+        env.setattr("obstore.store.from_url", untouched)
+        env.setenv(name, value)
+
+        self._refused(tmp_path, "az://c")
+
+        assert captured == []
+        assert httpx_mock.get_requests() == []
 
     @pytest.mark.parametrize("module", ["azure.identity", "obstore.auth.azure", "obstore.store"])
     def test_a_missing_extra(self, tmp_path: Path, env, captured, module: str) -> None:

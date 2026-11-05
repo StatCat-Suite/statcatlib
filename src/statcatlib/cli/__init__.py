@@ -60,13 +60,18 @@ _DEFAULT_MODEL = "intfloat/multilingual-e5-base"
 
 _ACCEPTED_CODELIST_MODES = frozenset({"fts_only"})
 
-#: `obstore`'s documented key and SAS variables, each of which `statcat upload` refuses (spec §10.1).
-_KEY_VARIABLES = (
+#: The `obstore` variables `statcat upload` refuses, as `_store/_azure.pyi` spells them. Keys and SAS break spec
+#: §10.1. A token writes under another identity than the one the upload records. An endpoint sends the writes to
+#: another host than the digest read.
+_REFUSED_VARIABLES = (
     "AZURE_STORAGE_ACCOUNT_KEY",
     "AZURE_STORAGE_ACCESS_KEY",
     "AZURE_STORAGE_MASTER_KEY",
     "AZURE_STORAGE_SAS_KEY",
     "AZURE_STORAGE_SAS_TOKEN",
+    "AZURE_STORAGE_TOKEN",
+    "AZURE_STORAGE_ENDPOINT",
+    "AZURE_ENDPOINT",
 )
 
 #: How long one request may take: a 5,000 MiB Put at about 1.4 MB/s.
@@ -629,9 +634,9 @@ def _catalog_uri(raw: str) -> str:
 
 
 def _azure_account() -> str:
-    """The storage account from the environment; a key or SAS variable, or no account, exits 2."""
-    if found := [name for name in _KEY_VARIABLES if name in os.environ]:
-        _usage(f"upload acts under an identity; unset {', '.join(found)}")
+    """The storage account from the environment; a refused variable, even empty, or no account, exits 2."""
+    if found := [name for name in _REFUSED_VARIABLES if name in os.environ]:
+        _usage(f"upload acts under one identity at the account's URL; unset {', '.join(found)}")
     account = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
     if not account:
         _usage("set AZURE_STORAGE_ACCOUNT_NAME to the storage account's name")
@@ -679,7 +684,11 @@ def upload(
     release job. It exits 0 when the edition is uploaded, or already registered
     with the same bytes; 1 on any finding, each printed as ``FAIL <file>: <detail>``,
     or on a store or credential failure, printed as ``ERROR <message>``; and 2 on
-    a usage error, a key or SAS variable, or a missing ``blob`` extra.
+    a usage error, a missing ``blob`` extra, or any of these variables set, even
+    empty: ``AZURE_STORAGE_ACCOUNT_KEY``, ``AZURE_STORAGE_ACCESS_KEY``,
+    ``AZURE_STORAGE_MASTER_KEY``, ``AZURE_STORAGE_SAS_KEY``,
+    ``AZURE_STORAGE_SAS_TOKEN``, ``AZURE_STORAGE_TOKEN``,
+    ``AZURE_STORAGE_ENDPOINT`` and ``AZURE_ENDPOINT``.
     """
     when = _release_time(release_at)
     uri = _catalog_uri(az_url)

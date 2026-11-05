@@ -27,8 +27,12 @@ statcat upload EDITION_DIR AZ_URL [--release-at TIME]
 | `azure.identity`'s variables | Such as `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE` for a workload identity. `DefaultAzureCredential` reads them. |
 
 The command exits 2 when any of `AZURE_STORAGE_ACCOUNT_KEY`,
-`AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY`, `AZURE_STORAGE_SAS_KEY`
-or `AZURE_STORAGE_SAS_TOKEN` is set, since the publish job acts under an identity.
+`AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY`, `AZURE_STORAGE_SAS_KEY`,
+`AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_TOKEN`, `AZURE_STORAGE_ENDPOINT` or
+`AZURE_ENDPOINT` is set, even to an empty value, before it builds a credential. The
+publish job acts under one identity, and `obstore` reads each of these variables: a key
+or token would write under another identity, and an endpoint would send the writes to
+another host than the digest read.
 
 The identity reads and writes under `products/` and `pending/`, as Storage Blob Data
 Contributor grants. The command reads nothing under `catalog.json`, `inventory/` or

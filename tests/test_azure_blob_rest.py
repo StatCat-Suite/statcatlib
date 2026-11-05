@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from obstore.store import AzureStore
+from obstore.store import AzureStore, MemoryStore, ObjectStore, S3Store
 from pytest_httpx import HTTPXMock
 from sdmxlib.edition import RemoteFile
 
@@ -114,4 +114,18 @@ def test_a_store_with_no_account_in_its_config_is_refused(monkeypatch: pytest.Mo
     store = AzureStore("catalogs", credential_provider=TokenIdentity(_provider))
 
     with pytest.raises(ValueError, match="account_name"):
+        AzureBlobRest(BlobLocation("az://catalogs/", store))
+
+
+@pytest.mark.parametrize(
+    "store",
+    [
+        S3Store("bucket", region="us-east-1", skip_signature=True),
+        S3Store("bucket", region="r", endpoint="http://127.0.0.1:1", client_options={"allow_http": True}),
+        MemoryStore(),
+    ],
+    ids=["s3-region", "s3-endpoint", "memory"],
+)
+def test_a_store_with_no_container_is_refused(store: ObjectStore) -> None:
+    with pytest.raises(ValueError, match="container_name"):
         AzureBlobRest(BlobLocation("az://catalogs/", store))
