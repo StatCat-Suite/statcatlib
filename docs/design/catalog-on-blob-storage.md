@@ -5,8 +5,9 @@
     applied. Both EGM reviews are applied: round 1
     ([report](egm/catalog-on-blob-storage/review_report.md): 4 Blocker, 37 Major, 33 Minor)
     and round 2 ([report](egm/catalog-on-blob-storage/round-2/review_report.md): 0 Blocker, 4
-    Major, 20 Minor).
-*   **Date:** 2026-11-05
+    Major, 20 Minor). The owner's decision of 2026-11-06 on the leaf read updates checklist
+    item 9 and Part 4's closing paragraph.
+*   **Date:** 2026-11-06
 *   **Issue:** GH-98. Stage 2's later needs: GH-125. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#19.
 *   **Read against:** statcatlib `e7eba47`, whose code equals `origin/main` `974ea27`
@@ -1142,34 +1143,11 @@ recorded in GH-134. Item 9 runs in the same pass and feeds Phase 6, serving.
    `[blob]` install.
 8. `Catalog.open(BlobLocation)` over a bearer `TokenIdentity` store with a real
    `StoreSecret`: a view of a data edition reads rows through DuckDB.
-9. A 64-thread read of every leaf, from a machine in the account's region. The result
-   decides between concurrent reads (StatCat-Suite/sdmxlib#375) and the baked summary.
-   Record the wall time, the GET count and any throttling responses, such as 503
-   `ServerBusy` or client retries.
-
-    `bench/inventory_read.py` starts Azurite and has no real-account option, so call its
-    functions from a short script in the repository root, run with `uv run python`. Build
-    a `BlobLocation` over an empty prefix, with a store as `statcat upload` builds it. Call
-    `statcatlib.testing.inventory_corpus(InventoryWriter(BlobInventoryStorage(location)))`.
-    At its defaults it records 7,000 products in 7,016 blobs (7,000 leaves, 14 roots,
-    `catalog.json` and `CURRENT`), about 21 MB, one Put at a time.
-
-    In a new process, so the connections start cold, call
-    `bench.inventory_read.cold_prefilled(LiveInventory, fetch)` with
-    `fetch = RecordingFetch(_ObjectOps(location.store))`. `threads` defaults to 64. Time
-    the whole call, because its return value covers only the reader served from the
-    filled dictionary. `len(fetch.take())` is the GET count, expected to be 7,003.
-
-    `obstore` retries a 5xx response inside its client, and `RecordingFetch` counts calls,
-    so it misses each retry. Read the throttling from the account's `Transactions` metric
-    in Azure Monitor, split by `ResponseType`, with no other traffic on the account.
-    `ServerBusyError` counts the 503 responses, and `GetBlob` transactions above 7,003
-    count the retries. A `BlobStoreError` from the call means the retries ran out, and
-    is a result to record.
-
-    The corpus holds Inventory documents with no edition behind them. Write it once, since
-    a second `inventory_corpus` at the prefix raises `FileExistsError` and each read reuses
-    the corpus. Delete the prefix afterwards, since no other item uses it.
+9. A read of every leaf on the reader's own pool, from a machine in the account's region.
+   On 2026-11-06 the owner chose concurrent reads, and sdmxlib 0.87 shipped them
+   (StatCat-Suite/sdmxlib#375). The baked summary is the fallback if this read cannot serve
+   plan Goal 1 on real storage. [`docs/api/blob.md`](../api/blob.md#real-account-checklist)
+   holds the current item 9 and its steps.
 
 ### Part 3: remote catalogs
 
@@ -1242,9 +1220,11 @@ time as `GETs x 10 ms` in sequence and `ceil(GETs / 64) x 10 ms` concurrent, in 
 | `inventory_corpus` over `MemoryStore`: entry states, sizes, determinism by seed | `tests/test_inventory_corpus.py` | unit | Part 4 |
 
 The full run stays outside `just ci`. The specification lives in sdmxlib, so the result
-reaches §6.5 through handoff row 7. The baked-summary choice is the owner's, on these
-numbers, against the readiness budget of §7.1. This design proposes no threshold, since the
-spec gives no number for a pod's Inventory read.
+reaches §6.5 through handoff row 7. On 2026-11-06 the owner chose concurrent leaf reads
+(StatCat-Suite/sdmxlib#375, shipped in sdmxlib 0.87) with no baked summary. The summary
+returns as the fallback if checklist item 9 in `docs/api/blob.md` shows the concurrent read
+cannot serve plan Goal 1 on real storage. This design proposes no threshold, since the spec
+gives no number for a pod's Inventory read.
 
 ### Acceptance map
 
