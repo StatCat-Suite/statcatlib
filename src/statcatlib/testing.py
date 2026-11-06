@@ -15,6 +15,9 @@ products of one or more tables whose codelists are cut to partials. A
 fingerprints, so products generated in separate calls match the structure
 products.
 
+`inventory_corpus` writes Inventory documents alone, with no edition behind
+them, for measuring the Inventory read: the same seed writes the same bytes.
+
 Example:
     from sdmxlib.testing import Dim, Shape
 
@@ -35,14 +38,18 @@ import importlib.util
 import math
 import re
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import sdmxlib as sl
 from attrs import field, frozen
+from sdmxlib.inventory import PartialRecord, record
+from sdmxlib.storage.schema import SCHEMA_VERSION
 from sdmxlib.testing import synthetic_edition
 
+from statcatlib import urn
 from statcatlib.admin import CatalogAdmin
 from statcatlib.catalog import Catalog
 from statcatlib.sources.sdmx import ingest_dataflows, prepare_sdmx
@@ -52,8 +59,10 @@ from statcatlib.store.working_copy import WorkingCopyExistsError
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
 
+    from sdmxlib.inventory import Leaf, Root
     from sdmxlib.testing import Shape
 
+    from statcatlib.store.inventory import InventoryWriter
     from statcatlib.store.working_copy import Edition, WorkingCopy
 
 __all__ = [
@@ -67,6 +76,7 @@ __all__ = [
     "codr_working_copy",
     "corpus_embargoed",
     "corpus_product_id",
+    "inventory_corpus",
     "synthetic_catalog",
     "temporary_catalog",
 ]
@@ -104,6 +114,21 @@ _YEARS = tuple(str(year) for year in range(2015, 2025))
 _CLASSIFICATION_DEPTH = 3
 
 _MASK = (1 << 64) - 1
+
+#: `inventory_corpus`'s first commit. It lies in the past, so a later commit on the real clock can follow it.
+_INVENTORY_NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+#: The ``release_at`` of `inventory_corpus`'s embargoed entries, ahead of its commits and of the real clock.
+_INVENTORY_RELEASE_AT = datetime(2100, 1, 1, tzinfo=UTC)
+
+#: `inventory_corpus`'s step in time from one commit to the next.
+_INVENTORY_STEP = timedelta(milliseconds=1)
+
+#: The ``pull_bytes`` of every `inventory_corpus` entry, the example in spec §6.3.
+_INVENTORY_PULL_BYTES = 13_131_776
+
+#: The artefact records of an `inventory_corpus` entry, with ``artefacts=True``.
+_INVENTORY_ARTEFACTS = 10
 
 
 @frozen
@@ -637,6 +662,108 @@ def codr_corpus(
             if on_sealed is not None:
                 on_sealed(product_id, edition)
     return sealed
+
+
+def _sha256(*parts: object) -> str:
+    """The SHA-256, in hex, of *parts* joined with ``/``."""
+    return hashlib.sha256("/".join(str(part) for part in parts).encode()).hexdigest()
+
+
+def _uuid7_form(digest: str) -> str:
+    """The first hex digits of *digest*, as a UUID with the version and variant bits of a UUIDv7."""
+    return f"{digest[:8]}-{digest[8:12]}-7{digest[13:16]}-8{digest[17:20]}-{digest[20:32]}"
+
+
+def _inventory_leaf(product_id: str, *, now: datetime, seed: int, embargoed: float, artefacts: bool) -> Leaf:
+    """The leaf `inventory_corpus` records for *product_id*: one edition, its values drawn from the seed."""
+    edition_id = _uuid7_form(_sha256(seed, product_id))
+    under_embargo = corpus_embargoed(product_id, seed=seed, embargoed=embargoed)
+    name = _sdmx_id(product_id)
+    records = {
+        urn.codelist(CODR_AGENCY, f"CL_{name}_{n}"): PartialRecord(fingerprint=_sha256(seed, product_id, n))
+        for n in range(_INVENTORY_ARTEFACTS)
+    }
+    return record(
+        None,
+        product_id=product_id,
+        kind="data",
+        lifecycle="revisable",
+        edition_id=edition_id,
+        previous=None,
+        manifest_sha256=_sha256(product_id, edition_id),
+        schema_version=SCHEMA_VERSION,
+        embargo=under_embargo,
+        now=now,
+        release_at=_INVENTORY_RELEASE_AT if under_embargo else None,
+        artefacts=records if artefacts else None,
+        dataflows=[urn.dataflow(CODR_AGENCY, f"DF_{name}_1")],
+        pull_bytes=_INVENTORY_PULL_BYTES,
+    )
+
+
+def inventory_corpus(
+    writer: InventoryWriter,
+    products: int = 7000,
+    *,
+    embargoed: float = 0.1,
+    artefacts: bool = False,
+    batch: int = 500,
+    seed: int = 0,
+) -> Root:
+    """Write the Inventory of a catalog of *products* one-edition data products, with no edition behind it.
+
+    It writes ``catalog.json``, then one `InventoryWriter.try_commit` per
+    *batch* products. No commit runs a rule, since no manifest exists, so the
+    corpus suits a measurement of the Inventory read and nothing that opens an
+    edition. At the defaults it writes 14 roots and 7,000 leaves.
+
+    Each product is named by `corpus_product_id` and holds one ``revisable``
+    ``data`` entry at sdmxlib's store schema, so `sdmxlib.inventory.LiveInventory`
+    counts it. The share `corpus_embargoed` picks is embargoed, with a
+    ``release_at`` in the year 2100. Each entry carries one dataflow URN named
+    from the product id and ``pull_bytes`` 13,131,776. Its edition id, in the
+    form of a UUIDv7, and its ``manifest_sha256`` are hashes. The first commit
+    is at a fixed time in 2026, and each later one a millisecond on.
+
+    The documents depend on these arguments, the writer's actor and the
+    statcatlib version alone, so a seed writes the same bytes on each run. A
+    catalog that has a ``catalog.json`` raises `FileExistsError` from
+    `InventoryWriter.write_catalog_json`.
+
+    Args:
+        writer: An Inventory writer over a catalog with no ``catalog.json``.
+        products: The products to record, at least 1.
+        embargoed: The share of products embargoed, from 0 to 1.
+        artefacts: Give each entry 10 artefact records with 64-hex fingerprints.
+        batch: The products of each commit, at least 1.
+        seed: Chooses the hashes and the embargoed products.
+
+    Returns:
+        The last root written.
+
+    Raises:
+        ValueError: *products* or *batch* is below 1, or *embargoed* is
+            outside 0 to 1.
+    """
+    if products < 1 or batch < 1:
+        msg = f"an Inventory corpus takes at least 1 product and 1 product a commit, not {products} and {batch}"
+        raise ValueError(msg)
+    if not 0 <= embargoed <= 1:
+        msg = f"embargoed is a share from 0 to 1, not {embargoed}"
+        raise ValueError(msg)
+    writer.write_catalog_json(catalog_id=_uuid7_form(_sha256("catalog", seed)))
+    group = CorpusGroup(products)
+    ids = [corpus_product_id(group, index) for index in range(products)]
+    roots: list[Root] = []
+    for commit, start in enumerate(range(0, products, batch)):
+        now = _INVENTORY_NOW + commit * _INVENTORY_STEP
+        leaves = {
+            product_id: _inventory_leaf(product_id, now=now, seed=seed, embargoed=embargoed, artefacts=artefacts)
+            for product_id in ids[start : start + batch]
+        }
+        reason = f"inventory_corpus: commit {commit + 1}, seed {seed}"
+        roots.append(writer.try_commit(roots[-1] if roots else None, leaves, now=now, kind="seal", reason=reason))
+    return roots[-1]
 
 
 def synthetic_catalog(path: str | Path, shape: Shape, *, product_id: str = "synthetic", seed: int = 0) -> Edition:

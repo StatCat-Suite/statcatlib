@@ -346,6 +346,14 @@ read.
   SDMX-agency `CL_OBS_STATUS`, so every codelist a table cuts has a
   structure home (A5). The draws are SplitMix64 seeded by SHA-256, so they
   do not depend on Python's `random`.
+- `inventory_corpus(writer, products=7000, *, embargoed=0.1, artefacts=False,
+  batch=500, seed=0) -> Root` writes `catalog.json` and one `try_commit` per
+  `batch` products, with no manifest behind them, so no rule runs. The leaves
+  come from sdmxlib's `record`, with hashed ids, one dataflow URN, `pull_bytes`
+  13,131,776 and, with `artefacts=True`, 10 artefact records. Commits start at
+  a fixed time and step one millisecond, so a seed writes the same bytes for a
+  given actor and statcatlib version. A catalog with a `catalog.json` raises
+  `FileExistsError`. `bench/inventory_read.py` (GH-98) drives it.
 
 ## Invariants
 

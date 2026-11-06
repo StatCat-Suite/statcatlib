@@ -351,6 +351,8 @@ from a seed, for tests and benchmarks. `codr_working_copy` fills a data
 product's working copy without sealing it, for a `Catalog.seal` batch, and
 `codr_corpus` seals groups of one-table and multi-table products, a share of
 them under embargo; `bench/corpus.py` builds the Phase 4 corpus with it.
+`inventory_corpus` writes Inventory documents alone, for measuring the
+Inventory read; `bench/inventory_read.py` does that over Azurite.
 
 ---
 
