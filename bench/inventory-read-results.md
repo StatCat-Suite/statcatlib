@@ -152,5 +152,7 @@ so "No code under `src` does this" above holds for 0.86 alone. The script passes
 `leaf_threads=1` to the cold, prefill and warm readers, so a rerun measures the
 same reads. This file holds no measurement of the reader's pool.
 
-The baked-summary choice belongs to the owner, on these numbers, against the
-readiness budget of spec §7.1; this record makes no proposal.
+On 2026-11-06 the owner chose concurrent leaf reads (StatCat-Suite/sdmxlib#375,
+shipped in sdmxlib 0.87) with no baked summary. The summary returns as the
+fallback if checklist item 9 in `docs/api/blob.md` shows the concurrent read
+cannot serve plan Goal 1 on real storage.
