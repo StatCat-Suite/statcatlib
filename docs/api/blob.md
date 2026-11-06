@@ -158,6 +158,10 @@ A cached edition whose manifest differs from the Inventory's raises
 `IncompatibleCatalogError` naming the directory to delete. Phase 4 evicts nothing, so
 `cache_dir` grows by each edition viewed.
 
+Deleting an edition's directory leaves its receive stamp under `verified/`. The next view
+pulls the edition again and hashes every file it pulls against the manifest, then runs the
+`open` profile with no new `receive`. To force a new `receive`, delete the stamp as well.
+
 `Product.editions()` reads the manifest alone and pulls nothing.
 
 An edition with no bindings defers the reference check on a reader, as on upload, since a
@@ -197,9 +201,9 @@ inside a process.
 ## Real-account checklist
 
 **None of these has run.** Azurite and `pytest-httpx` test the code, and neither proves
-how real Azure behaves. No test reads a real account through DuckDB either. The owner runs this list once, with a real storage account,
-before Phase 5 relies on the blob writer and the upload, and records the results in the
-upload's pull request.
+how real Azure behaves. No test reads a real account through DuckDB either. The owner
+runs this list once, with a real storage account, before Phase 5 relies on the blob
+writer, the upload and the remote read, and records the results in GH-134.
 
 1. A commit under a workload identity: `event.actor` holds the `oid`.
 2. The anonymous `Date` `HEAD`, also behind the deployment's private endpoint.
@@ -210,3 +214,5 @@ upload's pull request.
    the account's endpoint.
 7. `import obstore.auth.azure`, which imports `azure.identity.aio`, works on a clean
    `[blob]` install.
+8. `Catalog.open(BlobLocation)` over a bearer `TokenIdentity` store with a real
+   `StoreSecret`: a view of a data edition reads rows through DuckDB.

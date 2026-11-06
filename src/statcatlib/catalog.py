@@ -1020,9 +1020,14 @@ class Product:
                 edition_dir, remote=remote, engine=cat._engine_for_views(), manifest_sha256=live.manifest_sha256
             )
         except ManifestError as exc:
+            remedy = (
+                f"run `statcat verify-catalog` on {cat._name}"
+                if cat._location is None
+                else f"delete the directory {edition_dir} to pull the edition again"
+            )
             msg = (
                 f"{self._product_id}'s live edition {live.edition_id} does not hold the manifest.json the Inventory "
-                f"recorded ({exc}); run `statcat verify-catalog` on {cat._name}"
+                f"recorded ({exc}); {remedy}"
             )
             raise IncompatibleCatalogError(msg) from exc
         opened = False

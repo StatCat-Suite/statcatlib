@@ -349,6 +349,30 @@ class TestCaching:
 
         assert edition.edition_id in str(e.value)
 
+    def test_a_manifest_changed_after_the_check_names_the_directory_to_delete(
+        self, writer, location, reading, sealed, monkeypatch
+    ) -> None:
+        edition = _stores.record_uploaded(writer, location, sealed.first)
+        real = catalog_module.check_on_open
+
+        def then_change_the_manifest(path: Path, **kwargs: Any) -> Report:
+            report = real(path, **kwargs)
+            manifest = path / MANIFEST_NAME
+            manifest.write_bytes(manifest.read_bytes() + b"\n")
+            return report
+
+        monkeypatch.setattr(catalog_module, "check_on_open", then_change_the_manifest)
+        with sc.Catalog.open(reading) as cat, pytest.raises(IncompatibleCatalogError) as e:
+            cat.product("a").view()
+
+        manifests = [p for p in _cache_files(reading) if p.name == MANIFEST_NAME]
+        assert len(manifests) == 1
+        message = str(e.value)
+        assert edition.edition_id in message
+        assert f"delete the directory {manifests[0].parent} to pull the edition again" in message
+        assert "verify-catalog" not in message
+        assert isinstance(e.value.__cause__, sl.ManifestError)
+
 
 class TestThroughTheStore:
     def test_catalog_id_is_read_once_from_the_store(self, writer, reading) -> None:
