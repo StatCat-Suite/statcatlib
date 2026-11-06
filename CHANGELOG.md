@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [0.15.0] - 2026-11-06
 
+### Breaking Changes
+
+- **deps**: Require sdmxlib>=0.86,<0.87
+- **catalog**: Raise ValueError from Catalog.open with a URI string, where it raised FileNotFoundError (GH-98)
+
 ### Bug Fixes
 
 - **upload**: Refuse token and endpoint overrides; check the store in AzureBlobRest
