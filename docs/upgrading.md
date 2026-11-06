@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: on sdmxlib 0.87
+## 0.16.0: on sdmxlib 0.87
 
 statcatlib requires `sdmxlib>=0.87,<0.88`. No catalog is rebuilt.
 

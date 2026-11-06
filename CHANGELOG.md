@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0] - 2026-11-06
+
+### Breaking Changes
+
+- **deps**: Require sdmxlib>=0.87,<0.88 (GH-140)
+- **store**: Call a custom InventoryStorage.read from worker threads through sdmxlib 0.87's reader; its read must be safe to call from several threads (GH-140)
+
+### Documentation
+
+- **upgrading**: State that a custom InventoryStorage read runs on worker threads (GH-140)
+- **blob**: Measure the reader's own pool in checklist item 9 (GH-140)
+
 ## [0.15.0] - 2026-11-06
 
 ### Breaking Changes
