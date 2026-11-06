@@ -1,4 +1,4 @@
-"""The `stores` tier: the blob Inventory writer and the upload against Azurite in a container (GH-98).
+"""The `stores` tier: the blob writer, the upload and remote catalogs against Azurite in a container (GH-98).
 
 Part of `just ci`. The pre-push hook is statcatlib's only gate, so a machine
 with no container runtime fails this tier and names the fix (W6), where
