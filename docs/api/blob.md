@@ -203,7 +203,8 @@ inside a process.
 **None of these has run.** Azurite and `pytest-httpx` test the code, and neither proves
 how real Azure behaves. No test reads a real account through DuckDB either. The owner
 runs this list once, with a real storage account, before Phase 5 relies on the blob
-writer, the upload and the remote read, and records the results in GH-134.
+writer, the upload and the remote read, and records the results in GH-134. Item 9 runs in
+the same pass and feeds Phase 6, serving.
 
 1. A commit under a workload identity: `event.actor` holds the `oid`.
 2. The anonymous `Date` `HEAD`, also behind the deployment's private endpoint.
@@ -216,3 +217,31 @@ writer, the upload and the remote read, and records the results in GH-134.
    `[blob]` install.
 8. `Catalog.open(BlobLocation)` over a bearer `TokenIdentity` store with a real
    `StoreSecret`: a view of a data edition reads rows through DuckDB.
+9. A 64-thread read of every leaf, from a machine in the account's region. The result
+   decides between concurrent reads (StatCat-Suite/sdmxlib#375) and the baked summary.
+   Record the wall time, the GET count and any throttling responses, such as 503
+   `ServerBusy` or client retries.
+
+    `bench/inventory_read.py` starts Azurite and has no real-account option, so call its
+    functions from a short script in the repository root, run with `uv run python`. Build
+    a `BlobLocation` over an empty prefix, with a store as `statcat upload` builds it. Call
+    `statcatlib.testing.inventory_corpus(InventoryWriter(BlobInventoryStorage(location)))`.
+    At its defaults it records 7,000 products in 7,016 blobs (7,000 leaves, 14 roots,
+    `catalog.json` and `CURRENT`), about 21 MB, one Put at a time.
+
+    In a new process, so the connections start cold, call
+    `bench.inventory_read.cold_prefilled(LiveInventory, fetch)` with
+    `fetch = RecordingFetch(_ObjectOps(location.store))`. `threads` defaults to 64. Time
+    the whole call, because its return value covers only the reader served from the
+    filled dictionary. `len(fetch.take())` is the GET count, expected to be 7,003.
+
+    `obstore` retries a 5xx response inside its client, and `RecordingFetch` counts calls,
+    so it misses each retry. Read the throttling from the account's `Transactions` metric
+    in Azure Monitor, split by `ResponseType`, with no other traffic on the account.
+    `ServerBusyError` counts the 503 responses, and `GetBlob` transactions above 7,003
+    count the retries. A `BlobStoreError` from the call means the retries ran out, and
+    is a result to record.
+
+    The corpus holds Inventory documents with no edition behind them. Write it once, since
+    a second `inventory_corpus` at the prefix raises `FileExistsError` and each read reuses
+    the corpus. Delete the prefix afterwards, since no other item uses it.
