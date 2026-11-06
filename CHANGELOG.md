@@ -2,6 +2,52 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.0] - 2026-11-06
+
+### Bug Fixes
+
+- **upload**: Refuse token and endpoint overrides; check the store in AzureBlobRest
+- **catalog**: Name the cached directory in a blob view's manifest error (GH-98)
+
+### Documentation
+
+- **design**: Add the Phase 4 catalog on blob storage design
+- **design**: Revise the Phase 4 blob storage design with the owner's decisions
+- **design**: Revise the Phase 4 design for the review and the owner's decisions
+- **design**: Add the EGM review reports for the Phase 4 design
+- **design**: Name the fold's receive check in the Phase 4 design
+- **design**: Apply the second review round to the Phase 4 design
+- **design**: Mark S2, S3 and S7 resolved in the Phase 4 design
+- **design**: List the Phase 4 design at revision 4 in the sitemap
+- Describe the blob Inventory writer and the blob extra (GH-98)
+- Describe statcat upload and the pending/ document (GH-98)
+- **blob**: Describe reading a remote catalog and the embargo boundary (GH-98)
+- **catalog**: State a blob view's remedy and its secrets refusal (GH-98)
+- Describe inventory_corpus and the Inventory read bench (GH-98)
+- **bench**: Record the Inventory read at 7,000 products (GH-98)
+- **blob**: Add a 64-thread leaf read to the real-account checklist
+
+### Features
+
+- **store**: Add the InventoryStorage seam and the blob Inventory writer (GH-98)
+- **store**: Add the digest read and a check for an install with no lancedb (GH-98)
+- **upload**: Add upload_edition and statcat upload (GH-98)
+- **blob**: Add pull_edition and the reader's cache checks (GH-98)
+- **catalog**: Open a catalog in object storage with BlobLocation (GH-98)
+- **testing**: Add inventory_corpus, an Inventory of documents alone (GH-98)
+- **bench**: Add the Inventory read measurement over Azurite (GH-98)
+
+### Refactoring
+
+- **store**: Load the blob extra with function-level imports (GH-98)
+
+### Testing
+
+- **stores**: Add the stores tier over Azurite to just ci (GH-98)
+- **upload**: Cover the upload, the digest read and the command (GH-98)
+- **catalog**: Cover remote catalogs over MemoryStore and Azurite (GH-98)
+- **testing**: Check the change list inventory_corpus records (GH-98)
+
 ## [0.14.0] - 2026-11-04
 
 ### Breaking Changes
