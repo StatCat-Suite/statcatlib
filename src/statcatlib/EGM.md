@@ -46,7 +46,13 @@ and test catalogs (`testing.py`).
     or with `exist_ok=True` reopens it for writing and writes nothing.
   - `Catalog.open(path)`: read-only. Raises `FileNotFoundError` when *path*
     has no `catalog.json`. A catalog with no Inventory version has no
-    products.
+    products. A URI string raises `ValueError` naming `BlobLocation`.
+  - `Catalog.open(BlobLocation)`: the same over object storage, with a
+    `_Opening` whose `root` is `<cache_dir>/<catalog_id>`. No `cache_dir` raises
+    `ValueError`, and a `catalog_id` that cannot name a directory raises
+    `IncompatibleCatalogError`. `catalog_id` is read once; `refresh` and
+    `description` read through a `BlobInventoryStorage`, and `repr` and messages
+    show `location.uri`. `Catalog.create` raises `TypeError` for one.
   - `description`: the `CatalogDescription` in the root's
     `extensions.statcat` of the Inventory version the live view holds (as of
     the last `refresh()`), read with `bundle.description_from_root`; `None`
@@ -364,8 +370,14 @@ read.
   index and before it closes the store and registry; it then seals. The
   manifest records each file's digests, so a later write fails
   `check_edition`'s files check.
-- `Catalog.open` writes nothing. No `Catalog` or `Product` method takes or
-  returns a path inside the catalog.
+- `Catalog.open` writes nothing to the catalog. Over a `BlobLocation`, `Product.view`
+  writes to `cache_dir` alone: the live edition's files, by a rename of a verified,
+  fsynced staged directory, and the receive stamp. No embargoed edition's files and no
+  leaf bytes reach it. No `Catalog` or `Product` method takes or returns a path
+  inside the catalog.
+- A library call never takes a credential from the environment: `Catalog.open` over a
+  store takes a `BlobLocation` the caller built. `catalog.py` and `store/blob.py` read
+  no environment variable.
 - Only `CatalogAdmin` changes the Inventory, apart from a seal's record and
   the journal repair. No attribute of `Catalog`, `Product` or `EditionView`
   returns a `CatalogAdmin` or an embargoed, superseded or withdrawn edition.

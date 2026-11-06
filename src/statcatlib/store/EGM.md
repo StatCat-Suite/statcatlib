@@ -199,8 +199,8 @@ raises `ImportError` naming the extra. Function-level imports with
 version, when `lazy import` (PEP 810) can replace them.
 
 - `BlobLocation(uri, store, secrets=(), cache_dir=None, ops=...)`: a frozen
-  value; `store` is prefixed at the catalog root. Part 3 of Phase 4 reads
-  `secrets` and `cache_dir`.
+  value; `store` is prefixed at the catalog root. `Catalog.open` reads `secrets`
+  and `cache_dir`.
 - `BlobInventoryStorage(location, *, actor=None, clock=None)`: an
   `InventoryStorage`, built by the caller and passed to `InventoryWriter`.
 - `TokenIdentity(provider)`: the credential provider to pass to `AzureStore`;
@@ -221,6 +221,23 @@ version, when `lazy import` (PEP 810) can replace them.
   method the account-key test path overrides. `close()`, or use it in a `with`.
 - `_statcat_check() -> Check`: `check_catalog`, or `check_catalog_no_index` when
   `lancedb` cannot be found.
+- `pull_edition(location, product_id, edition_id, manifest_bytes, dest) -> Path`:
+  the edition's `required` and `lazy` own files, from `edition_files`, each checked
+  against the manifest's size and sha256 and fsynced in a sibling `.staged-*`
+  directory, then the manifest, then each directory, then one rename to *dest*. A
+  loser of the rename uses the winner's copy, and refuses another manifest there.
+  Staged directories older than a day are swept first, a failure leaves *dest* absent,
+  and a `root: data` file is never pulled. It raises `IncompatibleCatalogError`. The caller has
+  compared the bytes with the Inventory's SHA-256.
+- `_read_remote_manifest` reads an edition's manifest first of its files, and
+  compares its SHA-256 with the Inventory's. `_cached_edition` is `Product.view`'s
+  steps 2 and 3: a cached copy's manifest compared, else `_read_remote_manifest` and
+  `pull_edition`.
+- `_SAFE_ID` (`^[A-Za-z0-9][A-Za-z0-9._-]*$`) is what a catalog, product or edition id
+  must match to name a cache directory, so no id is a dot path or a staged name;
+  `_refuse_unsafe_ids` applies it. `_is_plain_name` and `_is_safe_path` judge manifest
+  paths for `pull_edition` and for `upload.py`; `_refuse_unsafe_files` also refuses a
+  listed `manifest.json` and a `data_path` leaving the product directory.
 - `MAX_CLOCK_SKEW` (30 s). `BlobStoreError(message, *, path, outcome_unknown)`
   (`RuntimeError`): a store fault, with `outcome_unknown` true for `obstore`'s
   `GenericError`.
@@ -482,7 +499,8 @@ Imports only sdmxlib, so `inventory.py` can import it.
 - `InventoryWriter` writes `catalog.json`, leaves under `inventory/leaves/`
   and roots under `inventory/` through `sdmxlib.storage.create_exclusive`,
   and `CURRENT` through its own staged `.<name>.<pid>.<uuid>.tmp` file and
-  rename; each file and directory is fsynced. Over `BlobInventoryStorage` it
+  rename; each file and directory is fsynced. `pull_edition` writes under the
+  `cache_dir` it is given, and nothing else in `blob.py` touches local disk. Over `BlobInventoryStorage` it
   writes the same names under the store's prefix, and each `try_commit` sends
   one anonymous `HEAD` to the store's endpoint unless given a clock.
 - `discard_orphans()` drops LanceDB tables the manifest does not name.
@@ -502,6 +520,9 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `tests/test_cli_upload.py` (unit, the command) and
   `tests/stores/test_upload_store.py` (Azurite, with an account-key digest read).
   Nothing here runs on real Azure: `docs/api/blob.md` lists the real-account checklist.
+- Remote catalogs: `tests/test_blob_open.py` (unit, refusals, `pull_edition` and hostile
+  ids over `MemoryStore`) and `tests/stores/test_remote_catalog.py` (Azurite, the read
+  path through `obstore` and DuckDB, the embargo, the rename race).
 - The Inventory writer: `tests/test_inventory_writer.py` (unit),
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite and `run_history`) and `tests/test_inventory_history.py` (integration:

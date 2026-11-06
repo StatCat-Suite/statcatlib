@@ -52,7 +52,7 @@ src/
     │   ├── store.py         # _Store (private engine), EditionView, QueryBuilder
     │   ├── working_copy.py  # WorkingCopy, Edition, the journal rule, the seal
     │   ├── inventory.py     # InventoryWriter, InventoryStorage, LocalInventoryStorage: catalog.json, inventory/, CURRENT
-    │   ├── blob.py          # BlobInventoryStorage, BlobLocation, TokenIdentity: the Inventory on object storage (`statcatlib[blob]`)
+    │   ├── blob.py          # BlobInventoryStorage, BlobLocation, TokenIdentity, pull_edition: the Inventory on object storage and the reader's cache (`statcatlib[blob]`)
     │   ├── cross_product.py # The cross-product rules (§6.5 items 4, 7, 8), stale editions
     │   ├── schema.py        # DDL: statcat namespace, MAP columns, use_statcat
     │   ├── lance.py         # LanceDB search index (BM25 + vector)
@@ -104,6 +104,7 @@ immutable editions. Two class methods return one, and the constructor raises
 ```python
 cat = Catalog.create("catalog_dir", exist_ok=True)  # writable; creates or reopens
 cat = Catalog.open("catalog_dir")                   # read-only; writes nothing
+cat = Catalog.open(BlobLocation(...))               # read-only over object storage; views write to cache_dir alone
 ```
 
 `statcatlib.testing.temporary_catalog()` creates a writable catalog in a
@@ -752,7 +753,7 @@ just check-prose               # no question headings, no banned hook phrases (G
 just check-any                 # the `Any` ratchet (tools/count_any.py)
 just check-indexes             # only public PyPI named in tracked files; uv.lock is gitignored
 just coverage                  # unit + integration with coverage; fails under 85% (pyproject.toml)
-just test-stores               # the `stores` tier: the blob Inventory writer against Azurite in a container
+just test-stores               # the `stores` tier: the blob writer, the upload and remote catalogs against Azurite in a container
 just test-live                 # the `live` tier: real HTTP calls to SDMX endpoints
 ```
 

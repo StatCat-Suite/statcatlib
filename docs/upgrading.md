@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: the `blob` extra, the Inventory writer on object storage and `statcat upload`
+## Next release: the `blob` extra, the Inventory writer on object storage, `statcat upload` and remote catalogs
 
 statcatlib requires `sdmxlib>=0.86,<0.87`. sdmxlib's
 [upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists its own
@@ -32,6 +32,12 @@ runtime.
 and register it in `pending/`, where it waits for Phase 5's fold. [Object
 storage](api/blob.md) describes them. They are Azure-only, and the real-account
 checklist on that page has not run.
+
+`Catalog.open` also takes a `BlobLocation`, and reads a catalog in object storage,
+pulling each viewed live edition's catalog files to its `cache_dir`. [Reading a
+catalog](api/blob.md#reading-a-catalog) describes it. `Catalog.open("az://...")` with a
+string raises `ValueError`, where it raised `FileNotFoundError`, and `Catalog.create`
+raises `TypeError` for a `BlobLocation`.
 
 `check_catalog`, on an install with no `lancedb`, now reports a finding for an edition
 with a search index, where it raised `ModuleNotFoundError`. The new
