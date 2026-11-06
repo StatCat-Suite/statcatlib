@@ -217,31 +217,47 @@ the same pass and feeds Phase 6, serving.
    `[blob]` install.
 8. `Catalog.open(BlobLocation)` over a bearer `TokenIdentity` store with a real
    `StoreSecret`: a view of a data edition reads rows through DuckDB.
-9. A 64-thread read of every leaf, from a machine in the account's region. The result
-   decides between concurrent reads (StatCat-Suite/sdmxlib#375) and the baked summary.
-   Record the wall time, the GET count and any throttling responses, such as 503
-   `ServerBusy` or client retries.
+9. A read of every leaf on the reader's own pool, from a machine in the account's region.
+   The concurrent read shipped in sdmxlib 0.87 (StatCat-Suite/sdmxlib#375) and is the
+   default. The baked summary is the fallback if this read cannot serve plan Goal 1, a
+   cold pod with one pinned product ready in under 60 s, on real storage. Record each
+   run's wall time, GET count and any throttling responses, such as 503 `ServerBusy` or
+   client retries.
 
-    `bench/inventory_read.py` starts Azurite and has no real-account option, so call its
-    functions from a short script in the repository root, run with `uv run python`. Build
-    a `BlobLocation` over an empty prefix, with a store as `statcat upload` builds it. Call
+    `bench/inventory_read.py` starts Azurite and has no real-account option, so import
+    its `RecordingFetch` into a short script in the repository root, run with
+    `uv run python`. Build a `BlobLocation` over an empty prefix, with a store as
+    `statcat upload` builds it (`from_url` with
+    `TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))` and the one-hour
+    timeout). Call
     `statcatlib.testing.inventory_corpus(InventoryWriter(BlobInventoryStorage(location)))`.
     At its defaults it records 7,000 products in 7,016 blobs (7,000 leaves, 14 roots,
     `catalog.json` and `CURRENT`), about 21 MB, one Put at a time.
 
-    In a new process, so the connections start cold, call
-    `bench.inventory_read.cold_prefilled(LiveInventory, fetch)` with
-    `fetch = RecordingFetch(_ObjectOps(location.store))`. `threads` defaults to 64. Time
-    the whole call, because its return value covers only the reader served from the
-    filled dictionary. `len(fetch.take())` is the GET count, expected to be 7,003.
+    Run the read twice, each in a new process, so the connections start cold. Call
+    `LiveInventory(fetch).refresh().editions()` with
+    `fetch = RecordingFetch(_ObjectOps(location.store))`, at the default
+    `DEFAULT_LEAF_THREADS` (64), and time the whole call. `len(fetch.take())` is the GET
+    count, expected to be 7,003. `leaf_threads=1` gives an optional sequential comparison.
+
+    The first run uses the store above. The second uses item 8's store, built as
+    [Reading a catalog](#reading-a-catalog) shows, with
+    `AzureStore(container, prefix=prefix, account_name=account, credential_provider=TokenIdentity(provider))`
+    and `obstore`'s default timeout. Both stores hold a `TokenIdentity`, so record for each
+    run whether a request failed with an authentication error or the credential provider
+    raised. A provider that raises gives a `BlobStoreError` naming `UnauthenticatedError`,
+    and a 403 gives one naming `PermissionDeniedError`. Storage Blob Data Contributor, as
+    in item 3, covers the corpus, both reads and the deletion; a read alone needs Storage
+    Blob Data Reader.
 
     `obstore` retries a 5xx response inside its client, and `RecordingFetch` counts calls,
     so it misses each retry. Read the throttling from the account's `Transactions` metric
-    in Azure Monitor, split by `ResponseType`, with no other traffic on the account.
-    `ServerBusyError` counts the 503 responses, and `GetBlob` transactions above 7,003
-    count the retries. A `BlobStoreError` from the call means the retries ran out, and
-    is a result to record.
+    in Azure Monitor, split by `ResponseType`, with no other traffic on the account and a
+    gap between the runs wide enough to tell them apart. `ServerBusyError` counts the 503
+    responses, and `GetBlob` transactions above 7,003 a run count the retries. Any other
+    `BlobStoreError` from the call means the retries ran out, and is a result to record.
 
     The corpus holds Inventory documents with no edition behind them. Write it once, since
-    a second `inventory_corpus` at the prefix raises `FileExistsError` and each read reuses
-    the corpus. Delete the prefix afterwards, since no other item uses it.
+    a second `inventory_corpus` at the prefix raises `FileExistsError`. Both runs read that
+    one corpus, because a read writes nothing and both stores reach the same prefix. Delete
+    the prefix afterwards, since no other item uses it.
