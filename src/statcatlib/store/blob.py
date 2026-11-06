@@ -21,6 +21,12 @@ over an `obstore` store. It differs from `LocalInventoryStorage` in these ways:
 `AzureBlobRest` reads the digest Azure keeps for a single-shot Put, since
 `obstore` reads no ``Content-MD5``. `statcatlib.upload` uses it.
 
+`pull_edition` copies an edition's catalog files to a reader's ``cache_dir``, and
+`Catalog.open` over a `BlobLocation` reads through it. A file reaches the cache
+only by the rename of a staged directory whose every file was checked against the
+manifest and fsynced. Every id and path that names a local file is refused unless
+it stays where it belongs, since the Inventory and the manifest are bytes from a store.
+
 `obstore` belongs to the ``blob`` extra, so core statcatlib imports without it.
 Function-level imports with ``# noqa: PLC0415`` load the ``blob`` extra until
 Python 3.15 is the minimum version, when ``lazy import`` (PEP 810) can replace
@@ -32,19 +38,28 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import errno
+import hashlib
 import importlib.util
 import inspect
 import json
 import logging
+import os
+import posixpath
+import re
+import shutil
+import time
+import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Self, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from attrs import Factory, field, frozen
-from sdmxlib.edition import RemoteFile
+from sdmxlib.edition import MANIFEST_NAME, ManifestError, RemoteFile, decode_manifest, edition_files
 from sdmxlib.inventory import CURRENT_NAME, Current, InventoryError, decode_current, encode, sha256_hex
 
 from statcatlib.bundle import check_catalog, check_catalog_no_index
@@ -52,8 +67,10 @@ from statcatlib.store.inventory import (
     MAX_RACES,
     InventoryCommitUnknownError,
     InventoryWriteRefusedError,
+    _fsync_dir,
     current_is_older,
 )
+from statcatlib.store.store import IncompatibleCatalogError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
@@ -63,7 +80,7 @@ if TYPE_CHECKING:
     from obstore import ObjectMeta, PutMode, PutResult
     from obstore.store import AzureBearerToken, ObjectStore
     from sdmxlib import StoreSecret
-    from sdmxlib.edition import Check
+    from sdmxlib.edition import Check, EditionFile, Manifest
     from sdmxlib.inventory import Root
 
 
@@ -74,6 +91,7 @@ __all__ = [
     "BlobLocation",
     "BlobStoreError",
     "TokenIdentity",
+    "pull_edition",
 ]
 
 log = logging.getLogger(__name__)
@@ -86,6 +104,19 @@ _AZURE_VERSION = "2023-11-03"
 
 #: How long `AzureBlobRest` waits for one ``Get Blob Properties``, in seconds.
 _REST_TIMEOUT = 30.0
+
+#: What a catalog, product or edition id may be where it names a directory. It
+#: starts with a letter or digit, so no id can be a dot path or a staged name.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+#: The placement tiers a reader holds on disk; it reads the remote tier from the store.
+_LOCAL_TIERS = ("required", "lazy")
+
+#: How a staged pull's directory name starts.
+_STAGED_PREFIX = ".staged-"
+
+#: A staged directory older than this belongs to a pull that crashed.
+_STAGED_MAX_AGE = timedelta(days=1)
 
 
 def _load_obstore() -> tuple[ModuleType, ModuleType]:
@@ -580,3 +611,240 @@ class BlobInventoryStorage:
                 raise InventoryWriteRefusedError(msg)
             self._resolved_actor = resolved
         return self._resolved_actor
+
+
+def _is_plain_name(name: str) -> bool:
+    """Whether *name* is one path segment: not empty, no separator, no NUL, not a dot path."""
+    return bool(name) and not {"/", "\\", "\0"} & set(name) and name not in {".", ".."}
+
+
+def _is_safe_path(path: str) -> bool:
+    """Whether *path* stays below the directory it is joined to: relative, with only plain segments."""
+    return not PurePath(path).anchor and all(_is_plain_name(part) for part in path.split("/"))
+
+
+def _refuse_unsafe_ids(product_id: str, edition_id: str) -> None:
+    """Refuse an id from a leaf or a root that could name a directory outside the cache."""
+    for name, value in (("product_id", product_id), ("edition_id", edition_id)):
+        if not _SAFE_ID.fullmatch(value):
+            msg = f"the Inventory names {name} {value!r}, which cannot name a directory; nothing was read or written"
+            raise IncompatibleCatalogError(msg)
+
+
+def _refuse_unsafe_files(manifest: Manifest) -> None:
+    """Refuse a manifest whose ``files`` or ``data_path`` could reach outside the edition's product."""
+    where = f"{manifest.product_id}'s edition {manifest.edition_id}"
+    for entry in manifest.files:
+        if not _is_safe_path(entry.path) or (entry.root == "edition" and entry.path == MANIFEST_NAME):
+            msg = f"{where} lists the unsafe path {entry.path!r} in its manifest; nothing was written"
+            raise IncompatibleCatalogError(msg)
+    data_path = manifest.data_path
+    resolved = posixpath.normpath(posixpath.join(manifest.edition_id, data_path))
+    if PurePath(data_path).anchor or urlsplit(data_path).scheme or resolved.split("/")[0] == "..":
+        msg = f"{where} has data_path {data_path!r}, which leads outside the product; nothing was written"
+        raise IncompatibleCatalogError(msg)
+
+
+def _decode_checked(raw: bytes, product_id: str, edition_id: str, source: str) -> Manifest:
+    """The manifest in *raw*, refused when it is unreadable or names another product or edition."""
+    try:
+        manifest = decode_manifest(raw, source)
+    except ManifestError as exc:
+        msg = f"{product_id}'s edition {edition_id} has a manifest this build cannot read: {exc}"
+        raise IncompatibleCatalogError(msg) from exc
+    if (manifest.product_id, manifest.edition_id) != (product_id, edition_id):
+        msg = (
+            f"the manifest of {product_id}'s edition {edition_id} names {manifest.product_id!r}'s edition "
+            f"{manifest.edition_id!r}; nothing else of the edition was read"
+        )
+        raise IncompatibleCatalogError(msg)
+    return manifest
+
+
+def _read_remote_manifest(
+    location: BlobLocation, product_id: str, edition_id: str, manifest_sha256: str
+) -> tuple[bytes, Manifest]:
+    """The manifest the Inventory recorded for an edition, read first of the edition's files.
+
+    Args:
+        location: The catalog.
+        product_id: The product.
+        edition_id: The edition.
+        manifest_sha256: The SHA-256 the Inventory entry records.
+
+    Returns:
+        The manifest's bytes, and the manifest decoded from them.
+
+    Raises:
+        IncompatibleCatalogError: An id cannot name a directory, the manifest
+            is absent, its SHA-256 is not the entry's, it cannot be decoded, or
+            it names another product or edition.
+    """
+    _refuse_unsafe_ids(product_id, edition_id)
+    path = f"products/{product_id}/{edition_id}/{MANIFEST_NAME}"
+    got = location.ops.read(path)
+    if got is None:
+        msg = f"{location.uri}: {path} is missing, and the Inventory records it"
+        raise IncompatibleCatalogError(msg)
+    raw = got[0]
+    found = sha256_hex(raw)
+    if found != manifest_sha256:
+        msg = (
+            f"{location.uri}: {path} has SHA-256 {found}, and the Inventory records {manifest_sha256}; "
+            "nothing else of the edition was read"
+        )
+        raise IncompatibleCatalogError(msg)
+    return raw, _decode_checked(raw, product_id, edition_id, f"{location.uri}{path}")
+
+
+def _make_dirs(path: Path) -> None:
+    """Create *path* and its missing parents, and fsync each entry that was added."""
+    missing: list[Path] = []
+    existing = path
+    while not existing.exists():
+        missing.append(existing)
+        existing = existing.parent
+    path.mkdir(parents=True, exist_ok=True)
+    for directory in [*missing, existing]:
+        _fsync_dir(directory)
+
+
+def _sweep_staged(parent: Path) -> None:
+    """Delete the staged directories in *parent* older than `_STAGED_MAX_AGE`, each left by a crashed pull."""
+    cutoff = time.time() - _STAGED_MAX_AGE.total_seconds()
+    for staged in parent.glob(f"{_STAGED_PREFIX}*"):
+        with contextlib.suppress(OSError):
+            if staged.stat().st_mtime < cutoff:
+                shutil.rmtree(staged)
+
+
+def _write_synced(path: Path, data: bytes) -> None:
+    """Create the file *path* and fsync it; a name already taken raises `FileExistsError`."""
+    with path.open("xb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _pull_file(location: BlobLocation, store_path: str, target: Path, entry: EditionFile) -> None:
+    """GET one listed file, check its size and sha256 against the manifest, and write it durably."""
+    got = location.ops.read(store_path)
+    if got is None:
+        msg = f"{location.uri}: {store_path} is missing, and the edition's manifest lists it"
+        raise IncompatibleCatalogError(msg)
+    data = got[0]
+    if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.digests.get("sha256"):
+        msg = f"{location.uri}: {store_path} differs from the size or sha256 the edition's manifest lists"
+        raise IncompatibleCatalogError(msg)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_synced(target, data)
+    except (FileExistsError, IsADirectoryError, NotADirectoryError) as exc:
+        msg = f"{location.uri}: the edition's manifest lists {entry.path!r} over another listed path"
+        raise IncompatibleCatalogError(msg) from exc
+
+
+def _publish(staged: Path, dest: Path, manifest_bytes: bytes) -> None:
+    """Rename the whole *staged* directory to *dest*; a loser of the race uses the winner's copy."""
+    try:
+        staged.rename(dest)
+    except OSError as exc:
+        if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise
+        if (dest / MANIFEST_NAME).read_bytes() != manifest_bytes:
+            msg = f"{dest} holds another manifest than this edition's; delete the directory to pull it again"
+            raise IncompatibleCatalogError(msg) from exc
+        return
+    _fsync_dir(dest.parent)
+
+
+def pull_edition(location: BlobLocation, product_id: str, edition_id: str, manifest_bytes: bytes, dest: Path) -> Path:
+    """Copy an edition's ``required`` and ``lazy`` files to *dest*, all of them or none.
+
+    It stages the copy in a sibling directory: each file is read from the store,
+    checked against the manifest's size and sha256, written and fsynced, then
+    the manifest, then each directory. Only then does a rename make it visible.
+    Staged directories older than a day are swept first, and a process that loses
+    the rename uses the winner's copy. Data files stay in the store, and each file
+    is held in memory while it is checked, so peak memory is the largest file.
+
+    The caller has compared *manifest_bytes* with the Inventory's ``manifest_sha256``.
+
+    Args:
+        location: The catalog.
+        product_id: The product, which the manifest must name.
+        edition_id: The edition, which the manifest must name.
+        manifest_bytes: The edition's manifest.
+        dest: The directory to create, named by the edition id.
+
+    Returns:
+        *dest*.
+
+    An id that cannot name a directory, a manifest that is unreadable or names
+    another edition or an unsafe path, and a file missing from the store or
+    differing from the manifest raise `IncompatibleCatalogError`, and leave *dest*
+    absent.
+    """
+    _refuse_unsafe_ids(product_id, edition_id)
+    manifest = _decode_checked(manifest_bytes, product_id, edition_id, str(dest / MANIFEST_NAME))
+    _refuse_unsafe_files(manifest)
+    own = {f"{edition_id}/{entry.path}": entry for entry in manifest.files if entry.root == "edition"}
+    listed = [path for path in edition_files(manifest, tiers=_LOCAL_TIERS) if path in own]
+    _make_dirs(dest.parent)
+    _sweep_staged(dest.parent)
+    staged = dest.parent / f"{_STAGED_PREFIX}{edition_id}.{os.getpid()}.{uuid.uuid4().hex}"
+    staged.mkdir()
+    try:
+        for path in listed:
+            entry = own[path]
+            _pull_file(location, f"products/{product_id}/{path}", staged / entry.path, entry)
+        _write_synced(staged / MANIFEST_NAME, manifest_bytes)
+        directories = [found for found in staged.rglob("*") if found.is_dir()]
+        for directory in sorted(directories, key=lambda found: len(found.parts), reverse=True):
+            _fsync_dir(directory)
+        _fsync_dir(staged)
+        _publish(staged, dest, manifest_bytes)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+    return dest
+
+
+def _cached_edition(
+    location: BlobLocation, cache_root: Path, product_id: str, edition_id: str, manifest_sha256: str
+) -> tuple[Path, Manifest]:
+    """The edition's directory in the cache, pulled when absent, and its manifest: `Product.view`'s steps 2 and 3.
+
+    Args:
+        location: The catalog.
+        cache_root: ``<cache_dir>/<catalog_id>``.
+        product_id: The product.
+        edition_id: The edition.
+        manifest_sha256: The SHA-256 the Inventory entry records.
+
+    Returns:
+        The edition's directory, and the manifest.
+
+    Raises:
+        IncompatibleCatalogError: An id cannot name a directory, or the cached
+            manifest is not the one the Inventory records; the message names the
+            directory to delete. `_read_remote_manifest` and `pull_edition` raise
+            it too.
+    """
+    _refuse_unsafe_ids(product_id, edition_id)
+    dest = cache_root / "products" / product_id / edition_id
+    if not dest.exists():
+        raw, manifest = _read_remote_manifest(location, product_id, edition_id, manifest_sha256)
+        return pull_edition(location, product_id, edition_id, raw, dest), manifest
+    try:
+        raw = (dest / MANIFEST_NAME).read_bytes()
+    except OSError as exc:
+        msg = f"{dest} holds no readable {MANIFEST_NAME} ({exc}); delete the directory to pull the edition again"
+        raise IncompatibleCatalogError(msg) from exc
+    found = sha256_hex(raw)
+    if found != manifest_sha256:
+        msg = (
+            f"{dest} holds a manifest with SHA-256 {found}, and the Inventory records {manifest_sha256}; "
+            "delete the directory to pull the edition again"
+        )
+        raise IncompatibleCatalogError(msg)
+    return dest, _decode_checked(raw, product_id, edition_id, str(dest / MANIFEST_NAME))

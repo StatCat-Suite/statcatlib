@@ -41,7 +41,15 @@ from sdmxlib.edition import (
 )
 
 from statcatlib.bundle import STATCAT_SECTION
-from statcatlib.store.blob import AzureBlobRest, BlobStoreError, _load_obstore, _statcat_check, _token_identity
+from statcatlib.store.blob import (
+    AzureBlobRest,
+    BlobStoreError,
+    _is_plain_name,
+    _is_safe_path,
+    _load_obstore,
+    _statcat_check,
+    _token_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -140,10 +148,6 @@ def _lookup(rest: _DigestReader, manifest: Manifest) -> Callable[[EditionFile], 
     return lookup
 
 
-def _is_plain_name(name: str) -> bool:
-    return bool(name) and "/" not in name and name not in {".", ".."}
-
-
 def _refusals(manifest: Manifest) -> list[Finding]:
     """What the manifest must not name: a path leaving its directory, or a file above `MAX_PUT_BYTES`.
 
@@ -156,7 +160,7 @@ def _refusals(manifest: Manifest) -> list[Finding]:
         if not _is_plain_name(value)
     ]
     for entry in manifest.files:
-        if entry.path.startswith("/") or not all(_is_plain_name(part) for part in entry.path.split("/")):
+        if not _is_safe_path(entry.path):
             findings.append(Finding("upload", entry.path, "the manifest names a path outside its directory"))
         if entry.size > MAX_PUT_BYTES:
             detail = f"{entry.size} bytes, above the {MAX_PUT_BYTES} bytes one Put Blob holds"
