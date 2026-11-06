@@ -736,7 +736,7 @@ stating it.
 - **HTTP**: `httpx`
 - **SDMX dependency**: `sdmxlib` (ingest, store, query, editions and the Inventory; the domain model takes only `InternationalString`).
   Every suite library is pre-1.0, so a minor bump may break: `pyproject.toml`
-  caps each suite dependency below its next minor (`sdmxlib>=0.86,<0.87`),
+  caps each suite dependency below its next minor (`sdmxlib>=0.87,<0.88`),
   and the PR that adopts a new minor raises the cap (GH-67).
 - **Testing**: `pytest`
 - the `ruff.toml` file will NEVER be changed to fix a linting error. If a fix can't be made ask the user to change it.

@@ -6,12 +6,12 @@ with no edition behind them. The script starts Azurite with
 and with them, and counts each read through a recording `Fetch`:
 
 - a cold `LiveInventory.refresh()` then `editions()`, and a cold
-  `FullInventory.refresh()` then `leaves()`, in sequence;
+  `FullInventory.refresh()` then `leaves()`, in sequence (``leaf_threads=1``);
 - the same read with the leaves fetched first by a pool of 64 threads into a
-  dictionary, which then serves the reader. Only this script does this;
+  dictionary, which then serves a reader with ``leaf_threads=1``;
 - a cold read of one product: `LiveInventory.head`, `FullInventory.leaf`;
-- a warm reader's `refresh()` and full read after a version that changes one
-  product, and after one that changes 200.
+- a warm reader's `refresh()` and full read, with ``leaf_threads=1``, after a
+  version that changes one product, and after one that changes 200.
 
 Each read records its GETs, its bytes and its wall time. Azurite's wall time
 excludes real storage latency, so the report also gives the estimates of
@@ -238,7 +238,7 @@ def _add_repeat(readings: dict[tuple[str, str], Reading], found: Reading, served
 
 def cold_sequential(view: type[LiveInventory | FullInventory], fetch: Fetch) -> None:
     """A new reader's `refresh`, then its read of every product."""
-    read_all(view(fetch).refresh())
+    read_all(view(fetch, leaf_threads=1).refresh())
 
 
 def cold_prefilled(view: type[LiveInventory | FullInventory], fetch: Fetch, *, threads: int = THREADS) -> float:
@@ -276,7 +276,7 @@ def cold_prefilled(view: type[LiveInventory | FullInventory], fetch: Fetch, *, t
         return filled[path] if path in filled else fetch(path)
 
     start = time.perf_counter()
-    read_all(view(serve).refresh())
+    read_all(view(serve, leaf_threads=1).refresh())
     return time.perf_counter() - start
 
 
@@ -449,7 +449,7 @@ def measure_shape(
             _add_repeat(readings, _reading(shape, name, "one product, cold", fetch.take(), time.perf_counter() - start))
 
     live_fetch, full_fetch = RecordingFetch(ops), RecordingFetch(ops)
-    live, full = LiveInventory(live_fetch), FullInventory(full_fetch)
+    live, full = LiveInventory(live_fetch, leaf_threads=1), FullInventory(full_fetch, leaf_threads=1)
     warm = {"LiveInventory": (live, live_fetch), "FullInventory": (full, full_fetch)}
     for reader, fetch in warm.values():
         read_all(reader.refresh())
