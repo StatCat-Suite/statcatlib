@@ -406,7 +406,8 @@ on local disk. Any other store fault raises `statcatlib.store.blob.BlobStoreErro
 naming the object.
 
 [Object storage](blob.md) describes `statcat upload`, which copies a sealed edition
-to a catalog in Azure Blob Storage.
+to a catalog in Azure Blob Storage, and [reading a catalog](blob.md#reading-a-catalog)
+with `Catalog.open`, with its cache and the embargo boundary.
 
 ## Writing datasets
 

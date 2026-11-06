@@ -592,6 +592,11 @@ Two credentials are needed, one for `obstore` and one as DuckDB's `StoreSecret`,
 sdmxlib reads data through DuckDB. Sharing them would need both to accept one form of
 credential, which they do not.
 
+A view of an edition with data files raises `ValueError` when `secrets` is empty. W5 leaves
+the secret's form to the caller, and the owner decided this refusal on 2026-11-05. It keeps
+statcatlib from reaching DuckDB's Azure extension with no secret, a case nothing tests, and it
+rules out anonymous reads of a public container.
+
 **Cache layout:**
 
 ```text
@@ -882,6 +887,7 @@ arguments come from these sources:
 | `Catalog.open` | No `catalog.json` | `FileNotFoundError` |
 | `Catalog.create` | `BlobLocation` | `TypeError` |
 | `Product.view` | Manifest mismatch, check finding, cache mismatch, unsafe path | `IncompatibleCatalogError` |
+| `Product.view` | Edition with data files, empty `secrets` (D6) | `ValueError` |
 | Any import | Missing extra | `ImportError`, naming `statcatlib[blob]` |
 
 `InventoryCommitUnknownError`, `UploadCheckError` and `BlobStoreError` are new.
@@ -1122,8 +1128,8 @@ command. Parts release in this order, and Part 4 may land before Parts 2 and 3.
 | `statcat upload`: findings exit 1, `ManifestError`, `BlobStoreError` and a credential error exit 1 with no traceback, naive time, bad URL, `s3://`, no account, key, SAS, token or endpoint variable set and missing extra exit 2 | `tests/test_cli_upload.py` | unit, `CliRunner` | B4 |
 | `statcat upload` with `statcatlib.cli.upload_edition` and `azure.identity.DefaultAzureCredential` patched: the captured `BlobLocation` has `isinstance(location.store.credential_provider, TokenIdentity)`, `client_options` with the timeout, `prefix` and `location.uri`, and the output prints the `oid` from a hand-made JWT | `tests/test_cli_upload.py` | unit, `CliRunner` | B4 |
 
-**The real-account checklist**, one manual pass before Phase 5 relies on Parts 1 and 2,
-recorded in Part 2's PR:
+**The real-account checklist**, one manual pass before Phase 5 relies on Parts 1, 2 and 3,
+recorded in GH-134:
 
 1. A commit under a workload identity: `event.actor` holds the `oid`.
 2. The anonymous `Date` `HEAD`, also behind the deployment's private endpoint.
@@ -1134,6 +1140,8 @@ recorded in Part 2's PR:
    endpoint.
 7. `import obstore.auth.azure`, which imports `azure.identity.aio`, works on a clean
    `[blob]` install.
+8. `Catalog.open(BlobLocation)` over a bearer `TokenIdentity` store with a real
+   `StoreSecret`: a view of a data edition reads rows through DuckDB.
 
 ### Part 3: remote catalogs
 

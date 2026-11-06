@@ -2,7 +2,8 @@
 
 Generated from the docstrings. [The Inventory on object
 storage](../api/store.md#the-inventory-on-object-storage) describes what a blob
-writer does, and [Object storage](../api/blob.md) describes `statcat upload`.
+writer does, and [Object storage](../api/blob.md) describes `statcat upload` and reading a
+catalog with `Catalog.open`.
 
 ::: statcatlib.BlobLocation
 
@@ -15,6 +16,8 @@ writer does, and [Object storage](../api/blob.md) describes `statcat upload`.
 ::: statcatlib.UploadReport
 
 ::: statcatlib.UploadCheckError
+
+::: statcatlib.store.blob.pull_edition
 
 ::: statcatlib.store.blob.AzureBlobRest
 

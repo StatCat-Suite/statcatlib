@@ -6,9 +6,14 @@ gives every store one code path, and an S3 catalog can hold no real edition in
 Phase 4.
 
 `RecordingOps` records every store call and refuses the Inventory's paths.
-`KeyedRest` is `AzureBlobRest` with Azurite's account key, the one path no
-deployment uses. `record_uploaded` places an uploaded edition in a blob Inventory,
-since Phase 4 has no fold.
+`ReadingOps` records a reader's calls and fails any write. `KeyedRest` is
+`AzureBlobRest` with Azurite's account key, the one path no deployment uses.
+`record_uploaded` places an uploaded edition in a blob Inventory, since Phase 4
+has no fold.
+
+Every store and DuckDB secret here names Azurite's loopback address and its
+well-known key, so no test can reach a real account. `location` refuses any other
+host, and nothing here builds a credential.
 """
 
 from __future__ import annotations
@@ -22,23 +27,28 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, override
+from unittest import mock
+from urllib.parse import urlsplit
 
+import attrs
 import httpx
 import obstore
 import pytest
+import sdmxlib as sl
 from attrs import field, frozen
 from obstore.store import AzureStore
 from sdmxlib.edition import MANIFEST_NAME, Lifecycle, read_manifest
 from sdmxlib.inventory import CATALOG_NAME, CURRENT_NAME, Root, record, routing_fields, sha256_hex
 
-from statcatlib.store.blob import AzureBlobRest, BlobLocation, _ObjectOps
+from statcatlib.store import blob as blob_module
+from statcatlib.store.blob import AzureBlobRest, BlobLocation, _ObjectOps, pull_edition
 from statcatlib.store.inventory import InventoryWriter
 from statcatlib.store.working_copy import Edition, edition_kind, recorded_routing
 from statcatlib.upload import _upload
@@ -144,16 +154,31 @@ def _create_container(running: Running) -> None:
 
 
 def location(running: Running, prefix: str, *, endpoint: str | None = None) -> BlobLocation:
-    """A catalog at *prefix* in `CONTAINER`, with Azurite's key, reached through *endpoint* when given."""
+    """A catalog at *prefix* in `CONTAINER`, with Azurite's key, reached through *endpoint* when given.
+
+    Any endpoint off the loopback address raises, so no test store can reach a real account.
+    """
+    reached = endpoint or running.endpoint
+    if urlsplit(reached).hostname != "127.0.0.1":
+        msg = f"the stores tier reaches Azurite on 127.0.0.1 only, and was given {reached}"
+        raise ValueError(msg)
     store = AzureStore(
         CONTAINER,
         prefix=prefix,
         account_name=ACCOUNT,
         account_key=KEY,
-        endpoint=endpoint or running.endpoint,
+        endpoint=reached,
         client_options={"allow_http": True},
     )
     return BlobLocation(f"az://{CONTAINER}/{prefix}/", store)
+
+
+def secret(running: Running) -> sl.StoreSecret:
+    """The DuckDB secret reading Azurite, the only store DuckDB is given in this tier."""
+    connection = (
+        f"DefaultEndpointsProtocol=http;AccountName={ACCOUNT};AccountKey={KEY};BlobEndpoint={running.endpoint};"
+    )
+    return sl.StoreSecret("azure", options={"connection_string": connection})
 
 
 @frozen
@@ -284,6 +309,62 @@ def recording_location(running: Running, prefix: str, *, endpoint: str | None = 
     """`location`, with a `RecordingOps` as its route to the store."""
     plain = location(running, prefix, endpoint=endpoint)
     return BlobLocation(plain.uri, plain.store, ops=RecordingOps(plain.store))
+
+
+class ReadingOps(_ObjectOps):
+    """Records every read of a store, and fails the test on any write: a reader writes nothing to its catalog."""
+
+    def __init__(self, store: ObjectStore) -> None:
+        super().__init__(store)
+        self.reads: list[str] = []
+
+    def under(self, prefix: str) -> list[str]:
+        """The paths read that start with *prefix*."""
+        return [path for path in self.reads if path.startswith(prefix)]
+
+    @override
+    def read(self, path: str) -> tuple[bytes, str | None] | None:
+        self.reads.append(path)
+        return super().read(path)
+
+    @override
+    def head(self, path: str) -> ObjectMeta | None:
+        self.reads.append(path)
+        return super().head(path)
+
+    @override
+    def put(self, path: str, data: bytes, **kwargs) -> str | None:
+        pytest.fail(f"a reader wrote {path}")
+
+    @override
+    def delete(self, path: str) -> None:
+        pytest.fail(f"a reader deleted {path}")
+
+
+def reader(written: BlobLocation, running: Running, cache_dir: Path) -> BlobLocation:
+    """The location a reader opens: the catalog of *written*, with Azurite's secret, *cache_dir* and a `ReadingOps`."""
+    store = written.store
+    return attrs.evolve(written, secrets=(secret(running),), cache_dir=cache_dir, ops=ReadingOps(store))
+
+
+def pull_at_the_rename(
+    running: Running,
+    prefix: str,
+    ids: Sequence[str],
+    raw: bytes,
+    dest: Path,
+    barrier: Any,
+) -> None:
+    """Pull an edition in a process of its own, waiting at *barrier* until every other pull is ready to rename."""
+    original = blob_module._publish
+
+    def publish(*args: Any) -> None:
+        barrier.wait(120)
+        original(*args)
+
+    product_id, edition_id = ids
+    with mock.patch.object(blob_module, "_publish", publish):
+        pull_edition(location(running, prefix), product_id, edition_id, raw, dest)
 
 
 class KeyedRest(AzureBlobRest):

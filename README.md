@@ -431,7 +431,7 @@ just hooks-install
 just ci                # full gate: index guard + lint + format + docstrings + prose + Any ratchet + pyrefly + unit and integration tests + stores tier + strict docs build
 just test              # unit tests
 just test-integration  # integration tests (no network)
-just test-stores       # the blob Inventory writer against Azurite (needs a container runtime)
+just test-stores       # the blob writer, the upload and remote catalogs against Azurite (needs a container runtime)
 just test-live         # live tests against real SDMX endpoints
 just lint              # ruff check
 just typecheck         # pyrefly

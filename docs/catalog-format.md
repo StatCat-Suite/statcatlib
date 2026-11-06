@@ -67,7 +67,8 @@ not repeated here.
   a base version more than 5 minutes ahead of its clock. A writer of this
   format takes no catalog lock, so it refuses a `catalog.json` at format 2.x.
 - `Catalog.open` reads the Inventory with sdmxlib's `LiveInventory` and
-  writes nothing.
+  writes nothing to the catalog. Over a `BlobLocation`, a view writes the live
+  edition's files and its receive stamp to `cache_dir`, outside the catalog.
 - An edition without `manifest.json` is unsealed: a product's working copy.
   A product has at most one.
 - `search/` is an edition's own files: the manifest lists everything in it.

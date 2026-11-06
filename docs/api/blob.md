@@ -1,12 +1,15 @@
 # Object storage
 
 `statcat upload` copies a sealed edition from a publish job's local disk to a
-catalog in Azure Blob Storage, and registers it in `pending/`. Install it with
+catalog in Azure Blob Storage, and registers it in `pending/`. `Catalog.open`
+reads a catalog there, returning live editions only. Install both with
 `uv add 'statcatlib[blob]'`, or `pip install 'statcatlib[blob]'`.
 
 An uploaded edition waits in `pending/`. Phase 5's fold records it in the
-Inventory, so nothing reads it until then. Upload supports Azure only in Phase
-4, and refuses an `S3Store`, because `obstore` cannot set or read CRC32C.
+Inventory, so no reader sees it until then, and until that fold a catalog holding
+real editions comes only from the test helper `record_uploaded`. Upload supports
+Azure only in Phase 4, and refuses an `S3Store`, because `obstore` cannot set or read
+CRC32C.
 
 [The Inventory on object storage](store.md#the-inventory-on-object-storage)
 describes the Inventory writer, and [the reference](../reference/blob.md) lists
@@ -99,12 +102,108 @@ report = upload_edition(edition_dir, BlobLocation("az://catalogs/stc/", store))
 `upload_edition` raises `TypeError` for any store but an `AzureStore`, and `ValueError`
 when its credential provider is no `TokenIdentity`.
 
+## Reading a catalog
+
+```python
+from pathlib import Path
+
+import sdmxlib as sl
+from obstore.store import AzureStore
+from statcatlib import AggregateDataset, BlobLocation, Catalog, TokenIdentity
+
+location = BlobLocation(
+    "az://catalogs/stc/",
+    store=AzureStore("catalogs", prefix="stc", account_name="acct", credential_provider=TokenIdentity(provider)),
+    secrets=[sl.StoreSecret("azure", options=options)],
+    cache_dir=Path("/var/cache/statcat"),
+)
+with Catalog.open(location) as cat:
+    view = cat.product("14100287").view()
+    view.query(AggregateDataset).limit(5).collect()
+```
+
+The caller builds both credentials, one for `obstore` and one as DuckDB's
+`StoreSecret`, because sdmxlib reads data files through DuckDB. A library call never
+takes a credential from the environment, so `Catalog.open("az://...")` with a string
+raises `ValueError`. `cache_dir` is required, so disk use stays visible. A view of an
+edition with data files raises `ValueError` when `secrets` is empty. Phase 6 decides
+the production form of the secret.
+
+`Catalog.open` writes nothing to the catalog, and neither does anything else a reader
+calls. It reads `catalog.json` once, for `catalog_id`, and the Inventory. `refresh()`
+reads `CURRENT`, one root and one probe, and only the leaves that changed. `products()`
+reads every leaf, and keeps them in memory.
+
+The first `view()` of an edition:
+
+1. Reads `manifest.json` and compares its SHA-256 with the Inventory entry. A difference
+   raises `IncompatibleCatalogError`, before any other file of the edition is read.
+2. Pulls the `required` and `lazy` files with `pull_edition`. Each file goes to a staged
+   directory beside the destination, is checked against the manifest's size and sha256
+   and is fsynced. Only then does one rename make the edition visible. A process that
+   loses the rename uses the winner's copy.
+3. Runs `sdmxlib.edition.check_on_open`, whose `receive` profile writes a stamp, and a
+   finding raises `IncompatibleCatalogError`.
+4. Opens the edition with observations read from the store through DuckDB. statcatlib
+   never caches a data file.
+
+Later views use the cached files and run the `open` profile. The cache holds:
+
+```text
+<cache_dir>/<catalog_id>/products/<product_id>/<edition_id>/   manifest, metadata.duckdb, tables.ducklake, search/
+<cache_dir>/<catalog_id>/verified/<product_id>/<edition_id>    the receive stamp
+```
+
+A cached edition whose manifest differs from the Inventory's raises
+`IncompatibleCatalogError` naming the directory to delete. Phase 4 evicts nothing, so
+`cache_dir` grows by each edition viewed.
+
+Deleting an edition's directory leaves its receive stamp under `verified/`. The next view
+pulls the edition again and hashes every file it pulls against the manifest, then runs the
+`open` profile with no new `receive`. To force a new `receive`, delete the stamp as well.
+
+`Product.editions()` reads the manifest alone and pulls nothing.
+
+An edition with no bindings defers the reference check on a reader, as on upload, since a
+structure product's references may resolve in another structure product. The bytes hash to
+a manifest the Inventory recorded, and Phase 5's fold owns that check.
+
+### Ids and paths
+
+The Inventory and the manifest are bytes from a store, and each names local files.
+
+- A `catalog_id`, `product_id` or `edition_id` that names a directory matches
+  `^[A-Za-z0-9][A-Za-z0-9._-]*$`. `Catalog.product` raises `ValueError` for another
+  product id. A leaf's edition id or `catalog.json`'s `catalog_id` that fails raises
+  `IncompatibleCatalogError` before anything under it is read or written.
+- A manifest naming another product or edition than its Inventory entry raises
+  `IncompatibleCatalogError` before any other file is read.
+- A manifest `files` path that is absolute, holds `..`, `.` or an empty segment, holds a
+  backslash or a NUL, or names `manifest.json` raises it too, as does a `data_path`
+  leaving the product directory.
+
+### The embargo boundary
+
+The boundary is the storage account or container, and statcatlib cannot enforce it from
+inside a process.
+
+- A principal that can run `Catalog.open` holds a role that can read embargoed bytes.
+  `Catalog.open` keeps the public API from returning them, as on local disk. An
+  analyst's identity belongs on a live-only export, never on the catalog's container.
+- `Catalog` holds only live entries. `products()` and `view()` never return an embargoed
+  one, and an embargoed product raises `NoLiveEditionError`.
+- Leaf bytes name embargoed editions, so they stay in memory and never reach `cache_dir`.
+  Only live editions' files do.
+- A cached edition stays after a rollback or a withdrawal until an operator deletes its
+  directory. Delete it to remove the edition from that disk. Nothing purges pod disks
+  until `expunge` exists.
+
 ## Real-account checklist
 
 **None of these has run.** Azurite and `pytest-httpx` test the code, and neither proves
-how real Azure behaves. The owner runs this list once, with a real storage account,
-before Phase 5 relies on the blob writer and the upload, and records the results in the
-upload's pull request.
+how real Azure behaves. No test reads a real account through DuckDB either. The owner
+runs this list once, with a real storage account, before Phase 5 relies on the blob
+writer, the upload and the remote read, and records the results in GH-134.
 
 1. A commit under a workload identity: `event.actor` holds the `oid`.
 2. The anonymous `Date` `HEAD`, also behind the deployment's private endpoint.
@@ -115,3 +214,5 @@ upload's pull request.
    the account's endpoint.
 7. `import obstore.auth.azure`, which imports `azure.identity.aio`, works on a clean
    `[blob]` install.
+8. `Catalog.open(BlobLocation)` over a bearer `TokenIdentity` store with a real
+   `StoreSecret`: a view of a data edition reads rows through DuckDB.
