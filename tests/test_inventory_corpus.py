@@ -70,6 +70,14 @@ def test_a_commit_per_batch_rounds_up_the_last_commit() -> None:
     assert len(root.products) == 25
 
 
+def test_the_last_root_records_its_commits_change_list() -> None:
+    root = inventory_corpus(_writer(MemoryStore()), 25, batch=10)
+
+    assert isinstance(root.changes, tuple)
+    assert len(root.changes) == 5
+    assert root.changes[-1].product_id == corpus_product_id(CorpusGroup(25), 24)
+
+
 def test_every_entry_holds_the_listed_values() -> None:
     store = _built(40)
 
