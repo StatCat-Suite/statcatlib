@@ -261,29 +261,42 @@ the same pass and feeds Phase 6, serving.
     a second `inventory_corpus` at the prefix raises `FileExistsError`. Both runs read that
     one corpus, because a read writes nothing and both stores reach the same prefix. Delete
     the prefix afterwards, since no other item uses it.
-10. Which credential writes when another credential's variable sits beside
-    `credential_provider`. Record `obstore.__version__` with the results.
+10. Which identity writes when other credential variables sit beside
+    `credential_provider`. An offline run with a stub provider, on `obstore` 0.12.1, shows
+    the store sends the provider's bearer token beside each variable below. This item shows
+    which identity Azure records under a real `DefaultAzureCredential`. Record
+    `obstore.__version__` with the results.
 
-    In a new process per case, with the variable set, call `_azure_location` from
-    `statcatlib.cli`, which skips the refusal in `_azure_account`, and create one small
-    blob at a scratch prefix with `obstore.put(location.store, path, data, mode="create")`.
-    Print `location.store.credential_provider.object_id()`. Run the cases with an identity
-    that holds Storage Blob Data Contributor, and first run one with no extra variable as
-    the baseline.
+    Use an identity that holds Storage Blob Data Contributor. Run this script from the
+    repository root with `uv run python`, once per case, each in a new process with the
+    case's variables set. `_azure_location` skips the refusal in `_azure_account`, so a
+    refused variable reaches the store.
 
-    | Case | Set to | The result that shows the provider's token wrote |
+    ```python
+    import os
+    import sys
+
+    import obstore
+    from statcatlib.cli import _azure_location
+
+    container, case = sys.argv[1:]
+    location = _azure_location(f"az://{container}/checklist-10/", os.environ["AZURE_STORAGE_ACCOUNT_NAME"])
+    print(obstore.__version__, location.store.credential_provider.object_id())
+    obstore.put(location.store, f"{case}.txt", b"x", mode="create")
+    ```
+
+    | Case | Variables | Expected |
     |---|---|---|
-    | `AZURE_STORAGE_ACCOUNT_KEY` | `Ym9ndXM=` | The create succeeds. |
-    | `AZURE_STORAGE_SAS_TOKEN` | `sv=bogus` | The create succeeds. |
-    | `AZURE_STORAGE_TOKEN` | `bogus` | The create succeeds. |
-    | `AZURE_CREDENTIAL_TYPE` | `access_key` | The create succeeds. |
-    | `AZURE_STORAGE_CLIENT_ID`, `AZURE_STORAGE_CLIENT_SECRET` and `AZURE_STORAGE_TENANT_ID` together | `bogus` | The create succeeds. |
-    | `AZURE_USE_AZURE_CLI` | `true`, on a machine with no `az` login | The create succeeds. |
-    | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID` together, which `azure.identity` reads too | A second service principal with no role on the account | The printed `oid` is the second principal's, and the create fails with `PermissionDeniedError`. |
+    | `baseline` | None beyond the identity's own. | The create succeeds. |
+    | `bogus` | `AZURE_STORAGE_ACCOUNT_KEY=Ym9ndXM=`, `AZURE_STORAGE_SAS_TOKEN=sv=bogus`, `AZURE_STORAGE_TOKEN=bogus`, `AZURE_CREDENTIAL_TYPE=access_key`, `AZURE_STORAGE_CLIENT_ID=bogus`, `AZURE_STORAGE_CLIENT_SECRET=bogus`, `AZURE_STORAGE_TENANT_ID=bogus` and `AZURE_USE_AZURE_CLI=true`. | The create succeeds and the `oid` equals the baseline's. A bogus value authorizes nothing, so the provider's token wrote the blob. |
+    | `second` | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID` of a service principal with no role on the account. `azure.identity` reads these too. | The printed `oid` is that principal's, and the create raises `PermissionDeniedError`. |
 
-    A bogus value authorizes nothing, so a create that succeeds came from the provider. To
-    name the writer, turn on the account's diagnostic setting for blob writes before the
-    run, and read `AuthenticationType` and `RequesterObjectId` from `StorageBlobLogs` for
-    each blob: expect `OAuth` and the printed `oid`. An upload records no `event.actor`, so
-    these logs are the account's only record of the writer. Without the setting, record
-    that the writer stays inferred. Delete the prefix afterwards.
+    To name the writer, turn on the account's diagnostic setting for `StorageWrite` before
+    the run, and read `AuthenticationType` and `RequesterObjectId` from `StorageBlobLogs`
+    for each blob. Expect `OAuth` and the printed `oid`. An upload records no `event.actor`,
+    so these logs are the account's only record of the writer. Without the setting, record
+    that the `bogus` case infers the writer. Delete the prefix afterwards.
+
+    Leave out `AZURE_STORAGE_USE_EMULATOR`, `AZURE_USE_FABRIC_ENDPOINT`,
+    `AZURE_SKIP_SIGNATURE` and the endpoint variables. The offline run settled them, and
+    each sends the write to another host or unsigned.
