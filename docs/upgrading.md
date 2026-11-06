@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: the `blob` extra, the Inventory writer on object storage, `statcat upload` and remote catalogs
+## 0.15.0: the `blob` extra, the Inventory writer on object storage, `statcat upload` and remote catalogs, on sdmxlib 0.86
 
 statcatlib requires `sdmxlib>=0.86,<0.87`. sdmxlib's
 [upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) lists its own
