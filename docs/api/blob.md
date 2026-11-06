@@ -261,3 +261,29 @@ the same pass and feeds Phase 6, serving.
     a second `inventory_corpus` at the prefix raises `FileExistsError`. Both runs read that
     one corpus, because a read writes nothing and both stores reach the same prefix. Delete
     the prefix afterwards, since no other item uses it.
+10. Which credential writes when another credential's variable sits beside
+    `credential_provider`. Record `obstore.__version__` with the results.
+
+    In a new process per case, with the variable set, call `_azure_location` from
+    `statcatlib.cli`, which skips the refusal in `_azure_account`, and create one small
+    blob at a scratch prefix with `obstore.put(location.store, path, data, mode="create")`.
+    Print `location.store.credential_provider.object_id()`. Run the cases with an identity
+    that holds Storage Blob Data Contributor, and first run one with no extra variable as
+    the baseline.
+
+    | Case | Set to | The result that shows the provider's token wrote |
+    |---|---|---|
+    | `AZURE_STORAGE_ACCOUNT_KEY` | `Ym9ndXM=` | The create succeeds. |
+    | `AZURE_STORAGE_SAS_TOKEN` | `sv=bogus` | The create succeeds. |
+    | `AZURE_STORAGE_TOKEN` | `bogus` | The create succeeds. |
+    | `AZURE_CREDENTIAL_TYPE` | `access_key` | The create succeeds. |
+    | `AZURE_STORAGE_CLIENT_ID`, `AZURE_STORAGE_CLIENT_SECRET` and `AZURE_STORAGE_TENANT_ID` together | `bogus` | The create succeeds. |
+    | `AZURE_USE_AZURE_CLI` | `true`, on a machine with no `az` login | The create succeeds. |
+    | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID` together, which `azure.identity` reads too | A second service principal with no role on the account | The printed `oid` is the second principal's, and the create fails with `PermissionDeniedError`. |
+
+    A bogus value authorizes nothing, so a create that succeeds came from the provider. To
+    name the writer, turn on the account's diagnostic setting for blob writes before the
+    run, and read `AuthenticationType` and `RequesterObjectId` from `StorageBlobLogs` for
+    each blob: expect `OAuth` and the printed `oid`. An upload records no `event.actor`, so
+    these logs are the account's only record of the writer. Without the setting, record
+    that the writer stays inferred. Delete the prefix afterwards.
