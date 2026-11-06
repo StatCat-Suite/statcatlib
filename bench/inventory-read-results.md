@@ -145,5 +145,12 @@ The tables under "Writes" and "Reads" are its output as printed. `just
 ci` runs the module's functions at 50 products
 (`tests/stores/test_inventory_read_counts.py`) and never the full run.
 
+These tables come from sdmxlib 0.86, whose reader fetched every leaf in the
+calling thread. From sdmxlib 0.87 the reader fetches leaves on a pool of 64
+threads by default, and `Catalog` and `InventoryWriter` read through that pool,
+so "No code under `src` does this" above holds for 0.86 alone. The script passes
+`leaf_threads=1` to the cold, prefill and warm readers, so a rerun measures the
+same reads. This file holds no measurement of the reader's pool.
+
 The baked-summary choice belongs to the owner, on these numbers, against the
 readiness budget of spec §7.1; this record makes no proposal.
