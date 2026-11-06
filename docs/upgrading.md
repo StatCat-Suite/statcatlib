@@ -5,6 +5,18 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## Next release: on sdmxlib 0.87
+
+statcatlib requires `sdmxlib>=0.87,<0.88`. No catalog is rebuilt.
+
+sdmxlib's reader now fetches leaves on worker threads, up to 64 at once, for
+`Catalog.products()`, and for the cross-product rules, `statcat verify-catalog`
+and `statcat doctor`. An `InventoryStorage` of your own must have a `read` that is safe
+to call from several threads, and it does not see the caller's thread-locals or
+context variables. sdmxlib's
+[upgrading guide](https://statcat-suite.github.io/sdmxlib/upgrading/) describes the
+change.
+
 ## 0.15.0: the `blob` extra, the Inventory writer on object storage, `statcat upload` and remote catalogs, on sdmxlib 0.86
 
 statcatlib requires `sdmxlib>=0.86,<0.87`. sdmxlib's

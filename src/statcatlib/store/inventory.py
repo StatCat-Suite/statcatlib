@@ -322,7 +322,7 @@ class InventoryStorage(Protocol):
         ...
 
     def read(self, path: str) -> bytes | None:
-        """The bytes at *path* under the catalog root, or ``None``: the reader's `Fetch`."""
+        """The bytes at *path* under the catalog root, or ``None``: a `Fetch` that several threads call at once."""
         ...
 
     def create(self, path: str, data: bytes) -> None:

@@ -150,7 +150,8 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 ### `inventory.py`
 
 - `InventoryStorage` (a runtime-checkable `Protocol`): `location`,
-  `read(path) -> bytes | None`, `create(path, data)` (`FileExistsError` when
+  `read(path) -> bytes | None` (sdmxlib's reader calls it from worker threads,
+  up to 64 at once), `create(path, data)` (`FileExistsError` when
   the name is taken), `write_leaf(path, data)`, `advance_current(root, data)`,
   `now()`, `actor()`. `LocalInventoryStorage(root)` holds the local code, and
   `root` names its directory. `current_is_older(held, root) -> bool` is the rule
