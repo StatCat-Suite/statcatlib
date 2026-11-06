@@ -9,22 +9,26 @@ catalog directory, and calls one library function. The work itself lives in
 `statcatlib.WorkingCopy.build_index` (`../store/working_copy.py`), which
 delegates to the private `_Store.build_index` (`../store/store.py`), and in
 `statcatlib.diagnostics` (`../diagnostics.py`) for `verify-catalog` and
-`doctor`, and in `statcatlib.CatalogAdmin.prune` (`../admin.py`) for `prune`.
+`doctor`, in `statcatlib.CatalogAdmin.prune` (`../admin.py`) for `prune`, and in
+`statcatlib.upload_edition` (`../upload.py`) for `upload`.
 
 The CLI needs the `search` extra (`uv add 'statcatlib[search]'`, or
 `pip install 'statcatlib[search]'`), which supplies `typer`, `rich`,
 `lancedb` and `sentence-transformers`. Importing the module without `typer`
-and `rich` fails.
+and `rich` fails. `upload` needs the `blob` extra, which supplies `typer`, `rich`,
+`obstore` and `azure-identity`, and `build-index` is the only command that needs
+`search`.
 
-The console script is `statcat`, with four commands: `build-index`,
-`verify-catalog`, `doctor` and `prune`.
+The console script is `statcat`, with five commands: `build-index`,
+`verify-catalog`, `doctor`, `prune` and `upload`.
 
 ## Interface
 
 Exported names (`__all__`):
 
 - `app` — the root `typer.Typer` (`name="statcat"`, `no_args_is_help=True`,
-  `add_completion=False`). Tests drive it with `typer.testing.CliRunner`.
+  `add_completion=False`, `pretty_exceptions_show_locals=False`, so a printed frame
+  never shows a token). Tests drive it with `typer.testing.CliRunner`.
 - `main()` — console-script entry point; calls `app()`.
 
 Commands:
@@ -35,6 +39,7 @@ Commands:
 | `statcat verify-catalog PATH` | `verify_catalog` | `diagnostics.verify_catalog(path)` | any finding, each printed as `FAIL <file>: <detail>`; exit 2 on `CatalogUnreadableError`. Each stale data edition prints as `STALE <StaleEdition>` and leaves the exit code alone |
 | `statcat doctor PATH` | `doctor` | `diagnostics.doctor(path)` | the report holds a warning (topic `stale data editions`: a stale embargoed data edition is one; a stale live edition is `info` and leaves the exit code alone; topic `partials with no structure home`: each item is one) |
 | `statcat prune PATH --older-than DAYS --reason TEXT [--apply]` | `prune` | `sc.CatalogAdmin.open(path).prune(older_than=timedelta(days=DAYS), reason=TEXT, dry_run=not apply)` | `catalog.json` is missing, the catalog cannot be opened, the retire commit is refused, or a deletion failed (each printed as `FAIL <path>: <error>`) |
+| `statcat upload EDITION_DIR AZ_URL [--release-at TIME]` | `upload` | `upload_edition(edition_dir, location, release_at=)` | a finding, each printed as `FAIL <file>: <detail>`, or a `ManifestError`, `BlobStoreError` or `ClientAuthenticationError`, printed as `ERROR <message>`; exit 2 on a usage error, a bad `AZ_URL`, `s3://`, no `AZURE_STORAGE_ACCOUNT_NAME`, a key, SAS, token or endpoint variable set, even empty (`_REFUSED_VARIABLES`), a naive time, or a missing `blob` extra |
 
 `build-index` options and their `WorkingCopy.build_index` keyword:
 
@@ -68,6 +73,12 @@ Private helpers that tests and later commands rely on:
   `soft_wrap=True`, so a path in a finding is never split or styled.
 - `console` — the shared `rich.console.Console`; `log` — the
   `statcatlib.cli` logger (currently unused).
+- `_usage(message)` — prints it and exits 2. `_release_time(raw)`, `_catalog_uri(raw)`
+  and `_azure_account()` parse `upload`'s inputs, each through `_usage`.
+  `_azure_location(uri, account)` builds the store with `obstore.store.from_url`,
+  `TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))` and the one-hour
+  timeout; `upload` is the only code in statcatlib that reads the environment for a
+  store.
 - `_parse_codelist_policy(raw)` — accepts only mode `fts_only`
   (`_ACCEPTED_CODELIST_MODES`); raises `typer.BadParameter` otherwise.
 - `_parse_reference_metadata_blend(raw)` — `max_chars` must be a positive
@@ -107,6 +118,8 @@ Private helpers that tests and later commands rely on:
 - Imports of `sentence_transformers` and `transformers`
   stay inside the functions that use them, so `statcat --help` loads no
   encoder.
+- Imports of `azure.identity`, `azure.core` and `obstore` stay inside the functions
+  that use them, with `# noqa: PLC0415`, so `statcat --help` needs no `blob` extra.
 - Every install hint names `uv add` first and `pip install` second.
 
 ## Side Effects

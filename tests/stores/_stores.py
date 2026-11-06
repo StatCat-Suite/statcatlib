@@ -1,9 +1,14 @@
-"""Azurite in a container, for the `stores` tier (GH-98).
+"""Azurite in a container, for the `stores` tier (GH-98), and what the tier's tests record with.
 
 Azurite runs from an image pinned by digest, the one sdmxlib's tier pins, on a
-free local port, for the session. Part 1 of Phase 4 needs one emulator: the
-leaf rule gives every store one code path, and an S3 catalog can hold no real
-edition in Phase 4.
+free local port, for the session. Phase 4 needs one emulator: the leaf rule
+gives every store one code path, and an S3 catalog can hold no real edition in
+Phase 4.
+
+`RecordingOps` records every store call and refuses the Inventory's paths.
+`KeyedRest` is `AzureBlobRest` with Azurite's account key, the one path no
+deployment uses. `record_uploaded` places an uploaded edition in a blob Inventory,
+since Phase 4 has no fold.
 """
 
 from __future__ import annotations
@@ -19,19 +24,28 @@ import threading
 import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, override
 
 import httpx
+import obstore
 import pytest
 from attrs import field, frozen
 from obstore.store import AzureStore
-from sdmxlib.inventory import Root
+from sdmxlib.edition import MANIFEST_NAME, Lifecycle, read_manifest
+from sdmxlib.inventory import CATALOG_NAME, CURRENT_NAME, Root, record, routing_fields, sha256_hex
 
-from statcatlib.store.blob import BlobLocation
+from statcatlib.store.blob import AzureBlobRest, BlobLocation, _ObjectOps
 from statcatlib.store.inventory import InventoryWriter
+from statcatlib.store.working_copy import Edition, edition_kind, recorded_routing
+from statcatlib.upload import _upload
+
+if TYPE_CHECKING:
+    from obstore import ObjectMeta
+    from obstore.store import ObjectStore
 
 #: Azurite's image, at the digest sdmxlib's `tests/stores/_stores.py` pins.
 IMAGE = (
@@ -223,3 +237,97 @@ def race_once(monkeypatch: pytest.MonkeyPatch, writer: InventoryWriter, competin
         return original(*args, **kwargs)
 
     monkeypatch.setattr(writer, "try_commit", raced)
+
+
+class RecordingOps(_ObjectOps):
+    """Records every store call, and refuses any call naming ``catalog.json``, ``inventory/`` or ``CURRENT``.
+
+    A publish job has no access to those paths (spec §10.1), so a read there
+    fails the test as a write does.
+    """
+
+    def __init__(self, store: ObjectStore) -> None:
+        super().__init__(store)
+        self.calls: list[tuple[str, str]] = []
+        self.writes: list[str] = []
+        self.before_put: Callable[[str], None] = lambda _path: None
+
+    def _note(self, call: str, path: str) -> None:
+        if path in {CATALOG_NAME, CURRENT_NAME} or path.startswith("inventory/"):
+            pytest.fail(f"an upload called {call} on {path}")
+        self.calls.append((call, path))
+
+    def called(self, call: str) -> list[str]:
+        """The paths of each call named *call*."""
+        return [path for name, path in self.calls if name == call]
+
+    @override
+    def read(self, path: str) -> tuple[bytes, str | None] | None:
+        self._note("read", path)
+        return super().read(path)
+
+    @override
+    def head(self, path: str) -> ObjectMeta | None:
+        self._note("head", path)
+        return super().head(path)
+
+    @override
+    def put(self, path: str, data: bytes, **kwargs) -> str | None:
+        self._note("put", path)
+        self.before_put(path)
+        written = super().put(path, data, **kwargs)
+        self.writes.append(path)
+        return written
+
+
+def recording_location(running: Running, prefix: str, *, endpoint: str | None = None) -> BlobLocation:
+    """`location`, with a `RecordingOps` as its route to the store."""
+    plain = location(running, prefix, endpoint=endpoint)
+    return BlobLocation(plain.uri, plain.store, ops=RecordingOps(plain.store))
+
+
+class KeyedRest(AzureBlobRest):
+    """`AzureBlobRest` over Azurite's account key: a ``HEAD`` to a signed GET URL (F8)."""
+
+    @override
+    def _send(self, path: str) -> httpx.Response:
+        return self._client.head(obstore.sign(self._store, "GET", path, timedelta(hours=1)))
+
+
+def record_uploaded(
+    writer: InventoryWriter,
+    location: BlobLocation,
+    edition_dir: Path,
+    *,
+    lifecycle: Lifecycle = "revisable",
+    release_at: datetime | None = None,
+) -> Edition:
+    """Upload an edition and record it in the blob Inventory, with no cross-product rule, as the fold will (D8)."""
+    with KeyedRest(location) as rest:
+        _upload(edition_dir, location, release_at=release_at, rest=rest)
+    manifest = read_manifest(edition_dir)
+    product = manifest.product_id
+    kind = edition_kind(manifest)
+    full = writer.full()
+    head = None if full is None else full.root
+    sha = sha256_hex((edition_dir / MANIFEST_NAME).read_bytes())
+    dataflows, pull_bytes, artefacts = recorded_routing(routing_fields(manifest), kind)
+    leaf = record(
+        full.leaf(product) if full is not None and product in full.products() else None,
+        product_id=product,
+        now=writer.storage.now(),
+        kind=kind,
+        previous=manifest.previous,
+        schema_version=manifest.schema_version,
+        edition_id=manifest.edition_id,
+        lifecycle=lifecycle,
+        embargo=full.embargo if full is not None else False,
+        release_at=release_at,
+        retired={t.edition_id for t in full.retired if t.product_id == product} if full is not None else (),
+        manifest_sha256=sha,
+        dataflows=dataflows,
+        pull_bytes=pull_bytes,
+        artefacts=artefacts,
+    )
+    writer.try_commit(head, {product: leaf}, kind="seal", reason="record_uploaded")
+    return Edition(manifest.edition_id, product, manifest.previous, sha)

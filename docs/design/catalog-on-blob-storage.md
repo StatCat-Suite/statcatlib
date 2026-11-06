@@ -303,7 +303,7 @@ The owner decided these on 2026-11-04, except W24. W2 and W8 move with `correct`
 | W14 | S2, S3 and S7 go into sdmxlib's `docs/phase-4-restated` PR. | Done: resolved by sdmxlib#372, handoff row 1. |
 | W15 | `view` and upload pass `references=False` when the manifest has no bindings, and statcatlib passes no `structures=` in Phase 4. The fold owns that check. | D6, D7, handoff row 9. |
 | W16 | The CLI's credential is `DefaultAzureCredential` in `AzureCredentialProvider` in `TokenIdentity`, with `azure-identity`, `typer` and `rich` in `blob`. | D2, D7. |
-| W17 | The CLI's grammar, variables and codes: `az://<container>[/<prefix>]`, `AZURE_STORAGE_ACCOUNT_NAME`, a refusal when key or SAS variables are set, RFC 3339 with a zone, exit codes 0, 1 and 2, and a one-hour timeout. | D7. |
+| W17 | The CLI's grammar, variables and codes: `az://<container>[/<prefix>]`, `AZURE_STORAGE_ACCOUNT_NAME`, a refusal when key or SAS variables are set, and from 2026-11-05 when token or endpoint variables are set, RFC 3339 with a zone, exit codes 0, 1 and 2, and a one-hour timeout. | D7. |
 | W18 | `lancedb` stays out of `blob`, and a `[blob]`-only install skips the search index check. | D2. |
 | W19 | `record_uploaded` lives in `tests/stores/_stores.py`, runs no cross-product rule, and takes `lifecycle=`. | D8. |
 | W20 | `exclusive()` and the internal commit split wait for GH-125. | D1. |
@@ -776,6 +776,7 @@ statcat upload EDITION_DIR AZ_URL [--release-at TIME]
 | Account | `AZURE_STORAGE_ACCOUNT_NAME`, required. Missing exits 2. | `obstore`'s documented variable (`_store/_azure.pyi`), so no new name. The CLI passes it as `account_name=`, since `store.config` omits a value read from the environment (F23). |
 | Identity | `azure.identity`'s own variables, such as `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE` for a workload identity. | A publish job's pod already has them. |
 | Keys | `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY` or a SAS variable set exits 2. | §10.1 says no keys, and which credential wins is unconfirmed. |
+| Overrides | `AZURE_STORAGE_TOKEN`, `AZURE_STORAGE_ENDPOINT` or its other spelling `AZURE_ENDPOINT` set exits 2, an empty value included. The owner decided this on 2026-11-05. | `obstore` reads them (`_store/_azure.pyi`). A token writes under another identity than the upload records, and an endpoint sends the writes to another host than the digest read. |
 | `--release-at` | RFC 3339 with `Z` or an offset, parsed with `datetime.fromisoformat`. A naive time exits 2. Omitted writes `null`. | §6.3's instant, with no silent time zone. |
 | Output | Sent and kept counts, the identity's `oid`, and whether it registered. | A chained credential can pick an unintended identity, and this shows which one acted. |
 | Exit codes | 0: uploaded, or already registered with the same bytes. 1: `UploadCheckError`, each finding printed as `FAIL <file>: <detail>`, or a `ManifestError`, `BlobStoreError` or `azure.core.exceptions.ClientAuthenticationError`, printed as `ERROR <message>`. 2: usage, and an `ImportError` naming the extra. | `verify-catalog`'s `FAIL` form, Typer's 2, and no traceback. |
@@ -1118,7 +1119,7 @@ command. Parts release in this order, and Part 4 may land before Parts 2 and 3.
 | An unsealed directory, a differing manifest, an oversize file, a rotted local file, an `S3Store`, no `TokenIdentity` | `tests/test_upload.py` | unit | D7, W3 |
 | `AzureBlobRest.head`: bearer header, `x-ms-version`, MD5 parsing, 404 returns `None`, and 401, 403 and 500 raise `BlobStoreError`, with `pytest-httpx` | `tests/test_azure_blob_rest.py` | unit | D7 |
 | `[blob]`-only: `_check_search` and `_statcat_check` with `lancedb` absent give no crash at upload | `tests/test_upload.py` | unit | D2 |
-| `statcat upload`: findings exit 1, `ManifestError`, `BlobStoreError` and a credential error exit 1 with no traceback, naive time, bad URL, `s3://`, no account, key variable set and missing extra exit 2 | `tests/test_cli_upload.py` | unit, `CliRunner` | B4 |
+| `statcat upload`: findings exit 1, `ManifestError`, `BlobStoreError` and a credential error exit 1 with no traceback, naive time, bad URL, `s3://`, no account, key, SAS, token or endpoint variable set and missing extra exit 2 | `tests/test_cli_upload.py` | unit, `CliRunner` | B4 |
 | `statcat upload` with `statcatlib.cli.upload_edition` and `azure.identity.DefaultAzureCredential` patched: the captured `BlobLocation` has `isinstance(location.store.credential_provider, TokenIdentity)`, `client_options` with the timeout, `prefix` and `location.uri`, and the output prints the `oid` from a hand-made JWT | `tests/test_cli_upload.py` | unit, `CliRunner` | B4 |
 
 **The real-account checklist**, one manual pass before Phase 5 relies on Parts 1 and 2,

@@ -1,14 +1,18 @@
 """statcatlib command-line interface.
 
 Top-level entry point installed as the ``statcat`` console script. It has
-four commands: `build_index`, which builds the search index of a product's
+five commands: `build_index`, which builds the search index of a product's
 working copy; `verify_catalog`, which checks a catalog's integrity; `doctor`,
-which reports on a catalog for support; and `prune`, which retires old
-editions and deletes the files no edition needs. The CLI is intentionally
-thin — the work lives in `statcatlib.WorkingCopy.build_index`,
-`statcatlib.diagnostics` and `statcatlib.CatalogAdmin.prune`.
+which reports on a catalog for support; `prune`, which retires old editions
+and deletes the files no edition needs; and `upload`, which copies a sealed
+edition to Azure Blob Storage. The CLI is intentionally thin — the work lives
+in `statcatlib.WorkingCopy.build_index`, `statcatlib.diagnostics`,
+`statcatlib.CatalogAdmin.prune` and `statcatlib.upload_edition`.
 
-Requires the ``[search]`` extra (typer + sentence-transformers + lancedb).
+`build_index` requires the ``[search]`` extra (typer + sentence-transformers +
+lancedb), and `upload` the ``[blob]`` extra (typer + obstore + azure-identity).
+Function-level imports with ``# noqa: PLC0415`` load the ``blob`` extra until
+Python 3.15 is the minimum version.
 """
 
 from __future__ import annotations
@@ -19,9 +23,9 @@ import os
 import sys
 import time
 import warnings
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import typer
 from rich.console import Console
@@ -38,9 +42,13 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from sdmxlib.edition import ManifestError
+
 import statcatlib as sc
 from statcatlib import diagnostics
+from statcatlib.store.blob import BlobLocation, BlobStoreError, TokenIdentity, _token_identity
 from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES, IncompatibleCatalogError
+from statcatlib.upload import UploadCheckError, upload_edition
 
 if TYPE_CHECKING:
     from sdmxlib.edition import Lifecycle
@@ -51,6 +59,23 @@ __all__ = ["app", "main"]
 _DEFAULT_MODEL = "intfloat/multilingual-e5-base"
 
 _ACCEPTED_CODELIST_MODES = frozenset({"fts_only"})
+
+#: The `obstore` variables `statcat upload` refuses, as `_store/_azure.pyi` spells them. Keys and SAS break spec
+#: §10.1. A token writes under another identity than the one the upload records. An endpoint sends the writes to
+#: another host than the digest read.
+_REFUSED_VARIABLES = (
+    "AZURE_STORAGE_ACCOUNT_KEY",
+    "AZURE_STORAGE_ACCESS_KEY",
+    "AZURE_STORAGE_MASTER_KEY",
+    "AZURE_STORAGE_SAS_KEY",
+    "AZURE_STORAGE_SAS_TOKEN",
+    "AZURE_STORAGE_TOKEN",
+    "AZURE_STORAGE_ENDPOINT",
+    "AZURE_ENDPOINT",
+)
+
+#: How long one request may take: a 5,000 MiB Put at about 1.4 MB/s.
+_UPLOAD_TIMEOUT = "1h"
 
 
 def _parse_codelist_policy(raw: str) -> sc.CodelistIndexPolicy:
@@ -100,6 +125,8 @@ app = typer.Typer(
     help="Operational tools for statcatlib catalogs.",
     no_args_is_help=True,
     add_completion=False,
+    # Stated, since the floor is typer 0.15: a printed frame must never show a token.
+    pretty_exceptions_show_locals=False,
 )
 
 from statcatlib.store.store import EmbeddingModel
@@ -573,6 +600,117 @@ def prune(
         _say(f"{done} {len(report.failed)} deletion(s) failed; the next run tries them again.", style="red")
         raise typer.Exit(code=1)
     _say(done, style="green")
+
+
+def _usage(message: str) -> NoReturn:
+    """Print *message*, and exit 2: the usage error's code, as Typer gives."""
+    _say(message, style="red")
+    raise typer.Exit(code=2) from None
+
+
+def _release_time(raw: str | None) -> datetime | None:
+    """``--release-at`` as an aware time; anything else exits 2."""
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        _usage(f"--release-at {raw!r} is no RFC 3339 time")
+    if parsed.tzinfo is None:
+        _usage(f"--release-at {raw!r} has no time zone: end it with Z or an offset")
+    return parsed
+
+
+def _catalog_uri(raw: str) -> str:
+    """``AZ_URL`` as ``az://<container>[/<prefix>]/``; anything else exits 2, and ``s3://`` names the reason."""
+    if raw.startswith("s3://"):
+        _usage(f"{raw}: upload supports Azure only in Phase 4 (W3), since obstore cannot set or read CRC32C")
+    scheme, sep, rest = raw.partition("://")
+    segments = rest.removesuffix("/").split("/")
+    usable = all(part and part not in {".", ".."} for part in segments) and not set(rest) & set("?#")
+    if scheme != "az" or not sep or not usable:
+        _usage(f"{raw}: expected az://<container>[/<prefix>]")
+    return f"az://{'/'.join(segments)}/"
+
+
+def _azure_account() -> str:
+    """The storage account from the environment; a refused variable, even empty, or no account, exits 2."""
+    if found := [name for name in _REFUSED_VARIABLES if name in os.environ]:
+        _usage(f"upload acts under one identity at the account's URL; unset {', '.join(found)}")
+    account = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
+    if not account:
+        _usage("set AZURE_STORAGE_ACCOUNT_NAME to the storage account's name")
+    return account
+
+
+def _azure_location(uri: str, account: str) -> BlobLocation:
+    """The catalog at *uri*, reached with `DefaultAzureCredential`; a missing ``blob`` extra exits 2."""
+    try:
+        from azure.identity import DefaultAzureCredential  # noqa: PLC0415
+        from obstore.auth.azure import AzureCredentialProvider  # noqa: PLC0415
+        from obstore.store import from_url  # noqa: PLC0415
+    except ImportError:
+        _usage("upload needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')")
+    store = from_url(
+        uri.removesuffix("/"),
+        account_name=account,
+        credential_provider=TokenIdentity(AzureCredentialProvider(DefaultAzureCredential())),
+        client_options={"timeout": _UPLOAD_TIMEOUT},
+    )
+    return BlobLocation(uri, store)
+
+
+@app.command("upload")
+def upload(
+    edition_dir: Path = typer.Argument(
+        ..., metavar="EDITION_DIR", help="The sealed edition's directory.", exists=True, file_okay=False, dir_okay=True
+    ),
+    az_url: str = typer.Argument(
+        ..., metavar="AZ_URL", help="The catalog root: az://<container>, or az://<container>/<prefix>."
+    ),
+    release_at: str | None = typer.Option(
+        None,
+        "--release-at",
+        metavar="TIME",
+        help="When the edition may be released: RFC 3339 with Z or an offset. Omitted schedules no release.",
+    ),
+) -> None:
+    """Copy a sealed edition to a catalog in Azure Blob Storage, and register it in ``pending/``.
+
+    It runs `statcatlib.upload_edition`, with `DefaultAzureCredential` and the
+    account in ``AZURE_STORAGE_ACCOUNT_NAME``. It sends only what the store lacks,
+    checks every listed file against the digest the store keeps, and writes
+    nothing under ``inventory/``, so the edition waits in ``pending/`` for the
+    release job. It exits 0 when the edition is uploaded, or already registered
+    with the same bytes; 1 on any finding, each printed as ``FAIL <file>: <detail>``,
+    or on a store or credential failure, printed as ``ERROR <message>``; and 2 on
+    a usage error, a missing ``blob`` extra, or any of these variables set, even
+    empty: ``AZURE_STORAGE_ACCOUNT_KEY``, ``AZURE_STORAGE_ACCESS_KEY``,
+    ``AZURE_STORAGE_MASTER_KEY``, ``AZURE_STORAGE_SAS_KEY``,
+    ``AZURE_STORAGE_SAS_TOKEN``, ``AZURE_STORAGE_TOKEN``,
+    ``AZURE_STORAGE_ENDPOINT`` and ``AZURE_ENDPOINT``.
+    """
+    when = _release_time(release_at)
+    uri = _catalog_uri(az_url)
+    location = _azure_location(uri, _azure_account())
+    from azure.core.exceptions import ClientAuthenticationError  # noqa: PLC0415
+
+    identity = _token_identity(location.store)
+    try:
+        oid = identity.object_id() if identity is not None else None
+        report = upload_edition(edition_dir, location, release_at=when)
+    except UploadCheckError as exc:
+        for finding in exc.findings:
+            _say(f"FAIL {finding.subject}: {finding.detail}", style="red")
+        raise typer.Exit(code=1) from None
+    except (ManifestError, BlobStoreError, ClientAuthenticationError) as exc:
+        _say(f"ERROR {exc}", style="red")
+        raise typer.Exit(code=1) from None
+    except ImportError as exc:
+        _usage(str(exc))
+    _say(f"identity {oid or 'unknown: the token has no oid claim'}")
+    state = "registered in pending/" if report.registered else "already registered in pending/"
+    _say(f"{report.product_id} {report.edition_id}: {len(report.sent)} sent, {len(report.kept)} kept, {state}.")
 
 
 def main() -> None:

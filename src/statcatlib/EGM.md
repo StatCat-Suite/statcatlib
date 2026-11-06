@@ -7,7 +7,7 @@
 `SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
 `InventoryContentionError`, `InventoryRuleError`, `InventoryWriteRefusedError`,
 `NonFastForwardError` and `CrossProductRuleError` from `store/inventory.py`; `BlobLocation` and `TokenIdentity`
-from `store/blob.py`; `WorkingCopyExistsError`,
+from `store/blob.py`; `upload_edition`, `UploadReport` and `UploadCheckError` from `upload.py`; `WorkingCopyExistsError`,
 `WorkingCopyClosedError`, `SealCheckError`, `EditionCheckError` and `JournalError` from
 `store/working_copy.py`; `NotLoadedError` and `is_unloaded` from the store's
 sentinel module; and part of `expr` (listed below). It exposes `checks`,
@@ -17,7 +17,7 @@ products (`catalog.py`), the operational changes to its Inventory
 (`admin.py`), seal checks (`checks.py`), the `statcat` section of
 an sdmxlib edition manifest (`bundle.py`), the integrity and support
 checks behind `statcat verify-catalog` and `statcat doctor`
-(`diagnostics.py`), composable query filters
+(`diagnostics.py`), the copy of a sealed edition to object storage (`upload.py`), composable query filters
 (`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`)
 and test catalogs (`testing.py`).
 
@@ -202,6 +202,33 @@ The module keeps its 0.11 name and describes editions. Imported from
 - `ROOT_SECTION_FORMAT = "3"`: the root section's `format_version`.
 - `STATCAT_SECTION = "statcat"`, `STATCAT_SECTION_FORMAT = 3`,
   `PRODUCT_KINDS = ("data", "structure")`.
+
+- `check_catalog_no_index(root, manifest, reg, profile) -> list[Finding]`:
+  `check_catalog` without the search index check, for an install with no
+  `lancedb`. `store/blob.py`'s `_statcat_check()` chooses between the two.
+
+### `upload.py`
+
+`statcat upload`'s work, on the `blob` extra. It reads and writes nothing under
+`catalog.json`, `inventory/` or `CURRENT`.
+
+- `upload_edition(edition_dir, location, *, release_at=None) -> UploadReport`:
+  refuses a store other than `AzureStore` (`TypeError`, naming W3) and a store with
+  no `TokenIdentity` (`ValueError`), then runs `_upload` with an `AzureBlobRest`.
+- `_upload(edition_dir, location, *, release_at=None, rest)`: the steps, over any
+  store and any digest client with `head(path) -> RemoteFile | None`. Tests and
+  `record_uploaded` call it. A naive `release_at` raises `ValueError`.
+- `UploadReport(edition_id, product_id, sent, kept, registered)`: `sent` and `kept`
+  hold store paths, and `registered` is advisory, since a retried create can report
+  false against its own earlier success.
+- `UploadCheckError(findings)` (`RuntimeError`): any finding, an oversize file, a
+  path leaving its directory, a rotted local file, a differing manifest, or a
+  differing `pending/` document.
+- `_pending_document(edition_id, release_at) -> bytes`: the `pending/` document's
+  bytes, the contract `docs/catalog-format.md` §1.5 states.
+- `_lookup(rest, manifest)`: adapts `rest.head` to sdmxlib's `Lookup`, asking once per
+  file. `_store_path(manifest, entry)` normalises `../data/`, which `obstore` refuses.
+- `MAX_PUT_BYTES`: Put Blob's limit, 5,000 MiB.
 
 ### `diagnostics.py`
 

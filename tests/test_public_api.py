@@ -169,6 +169,13 @@ class TestStoreExports:
             assert name in sc.__all__, name
             assert getattr(sc, name) is not None
 
+    def test_upload(self) -> None:
+        import statcatlib as sc
+
+        for name in ("upload_edition", "UploadReport", "UploadCheckError"):
+            assert name in sc.__all__, name
+            assert getattr(sc, name) is not None
+
     def test_core_imports_without_the_blob_extra(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """`obstore` belongs to the ``blob`` extra, so importing statcatlib must not need it."""
         for name in [n for n in sys.modules if n == "statcatlib" or n.startswith("statcatlib.")]:

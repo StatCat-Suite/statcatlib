@@ -405,6 +405,9 @@ A `catalog.json` at format 2.x is refused with `InventoryWriteRefusedError`, as
 on local disk. Any other store fault raises `statcatlib.store.blob.BlobStoreError`,
 naming the object.
 
+[Object storage](blob.md) describes `statcat upload`, which copies a sealed edition
+to a catalog in Azure Blob Storage.
+
 ## Writing datasets
 
 The write methods are `WorkingCopy` methods.
