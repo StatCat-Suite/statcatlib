@@ -39,7 +39,11 @@ design decisions in full. This file indexes the code contracts.
 - `bench`: `corpus.py`, the Phase 4 corpus build and measurement of the
   cross-product rules (GH-124), run by hand outside `just ci`, and
   `corpus-results.md`, its results. `tests/test_codr_corpus.py` runs it at
-  two products.
+  two products. `inventory_read.py`, the Phase 4 Part 4 measurement of the
+  Inventory read over Azurite (GH-98), also by hand, and
+  `inventory-read-results.md`, its results.
+  `tests/stores/test_inventory_read_counts.py` runs its functions at 50
+  products.
 
 ## Global Invariants
 

@@ -74,7 +74,7 @@ src/
     ├── expr.py         # Sub-traversal expressions for scopes (sc.each)
     ├── bundle.py       # The `statcat` manifest section: catalog_section, check_catalog, check_catalog_no_index
     ├── upload.py       # upload_edition, UploadReport, UploadCheckError: a sealed edition to Azure Blob Storage and `pending/`
-    ├── testing.py      # temporary_catalog(); synthetic_catalog(); the CODR generator (codr_structures, codr_product, codr_corpus)
+    ├── testing.py      # temporary_catalog(); synthetic_catalog(); the CODR generator (codr_structures, codr_product, codr_corpus); inventory_corpus
     ├── urn.py          # Convenience URN builders for SDMX artefacts
     └── __init__.py     # Public API re-exports
 ```
