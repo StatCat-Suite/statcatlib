@@ -1007,7 +1007,13 @@ class Product:
                 raise it too, and a product with no live edition raises
                 `NoLiveEditionError`. On a catalog in object storage, so do a
                 cached manifest that differs, a file that differs from the
-                manifest, an unsafe id or path, and a check finding.
+                manifest, an unsafe id or path, and a check finding. There, the
+                message for a cached manifest that is unreadable or differs
+                names the cached directory to delete, so the edition is pulled
+                again.
+
+        An edition with data files raises `ValueError` when its `BlobLocation`
+        holds no ``secrets`` for DuckDB to read them with.
         """
         live = self._head()
         cat = self._catalog

@@ -389,7 +389,9 @@ read.
   `sdmxlib.LocalRegistry.edition`, which hashes the bytes of
   `manifest.json` it parses. A missing, malformed or different manifest
   raises sdmxlib's `ManifestError`, which `view` re-raises as
-  `IncompatibleCatalogError` naming `statcat verify-catalog`, chained. Every view a `Catalog` returns shares one
+  `IncompatibleCatalogError`, chained. A local catalog's message names
+  `statcat verify-catalog`, and a blob catalog's names the cached directory to
+  delete, so the edition is pulled again. Every view a `Catalog` returns shares one
   `sdmxlib.EditionEngine`, and `Catalog.close` closes them all.
 - A seal check only reads: `seal` runs every check against `wc.view()`
   before writing anything, and any finding raises `SealCheckError`.
