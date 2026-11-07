@@ -5,7 +5,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
 import sys
+import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,6 +91,45 @@ def captured(env: pytest.MonkeyPatch) -> list[tuple[Path, BlobLocation, datetime
 
     env.setattr(cli, "upload_edition", fake)
     return calls
+
+
+class _Untouched:
+    """Stands for `DefaultAzureCredential` where no token may be asked for."""
+
+    def get_token(self, *_scopes: str, **_kwargs: object) -> SimpleNamespace:
+        pytest.fail("no credential may be asked for a token")
+
+
+@pytest.fixture
+def proxy(env: pytest.MonkeyPatch) -> Iterator[list[bytes]]:
+    """A local proxy that records each request line and forwards nothing.
+
+    The store's HTTP client reads ``HTTPS_PROXY`` and ``HTTP_PROXY``, so every request opens here: an ``https``
+    one as ``CONNECT <host>:443``, an ``http`` one as ``GET http://<host>/...``. The proxy answers 403.
+    """
+    lines: list[bytes] = []
+    server = socket.create_server(("127.0.0.1", 0))
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                lines.append(conn.recv(4096).split(b"\r\n", 1)[0])
+                conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.getsockname()[1]}"
+    for name in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
+        env.delenv(name, raising=False)
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        env.setenv(name, url)
+    yield lines
+    server.close()
+    thread.join(timeout=5)
 
 
 def _raising(env: pytest.MonkeyPatch, exc: Exception) -> None:
@@ -349,6 +391,24 @@ class TestExit2:
         _raising(env, ImportError("object storage needs the blob extra"))
 
         assert "blob extra" in self._refused(tmp_path, "az://c")
+
+    @pytest.mark.parametrize("value", ["junk", ""], ids=["junk", "empty"])
+    @pytest.mark.parametrize("name", ["AZURE_DISABLE_TAGGING", "AZURE_Disable_Tagging"])
+    def test_a_value_obstore_cannot_parse_exits_2_and_sends_nothing(
+        self, tmp_path: Path, env, captured, httpx_mock: HTTPXMock, proxy: list[bytes], name: str, value: str
+    ) -> None:
+        """obstore 0.12.1 raises `GenericError` from the store build; the command names the variable."""
+        env.setattr("azure.identity.DefaultAzureCredential", _Untouched)
+        env.setenv(name, value)
+
+        output = self._refused(tmp_path, "az://c")
+
+        assert f'failed to parse "{value}" as boolean' in output
+        assert f"{name} takes true or false" in output
+        assert "Traceback" not in output
+        assert captured == []
+        assert httpx_mock.get_requests() == []
+        assert proxy == []
 
     def test_a_missing_directory(self, tmp_path: Path, captured) -> None:
         result = runner.invoke(app, ["upload", str(tmp_path / "nothing"), "az://c"])

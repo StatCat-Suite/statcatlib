@@ -39,7 +39,7 @@ Commands:
 | `statcat verify-catalog PATH` | `verify_catalog` | `diagnostics.verify_catalog(path)` | any finding, each printed as `FAIL <file>: <detail>`; exit 2 on `CatalogUnreadableError`. Each stale data edition prints as `STALE <StaleEdition>` and leaves the exit code alone |
 | `statcat doctor PATH` | `doctor` | `diagnostics.doctor(path)` | the report holds a warning (topic `stale data editions`: a stale embargoed data edition is one; a stale live edition is `info` and leaves the exit code alone; topic `partials with no structure home`: each item is one) |
 | `statcat prune PATH --older-than DAYS --reason TEXT [--apply]` | `prune` | `sc.CatalogAdmin.open(path).prune(older_than=timedelta(days=DAYS), reason=TEXT, dry_run=not apply)` | `catalog.json` is missing, the catalog cannot be opened, the retire commit is refused, or a deletion failed (each printed as `FAIL <path>: <error>`) |
-| `statcat upload EDITION_DIR AZ_URL [--release-at TIME]` | `upload` | `upload_edition(edition_dir, location, release_at=)` | a finding, each printed as `FAIL <file>: <detail>`, or a `ManifestError`, `BlobStoreError` or `ClientAuthenticationError`, printed as `ERROR <message>`; exit 2 on a usage error, a bad `AZ_URL`, `s3://`, no `AZURE_STORAGE_ACCOUNT_NAME`, a refused `obstore` variable set, even empty, in any spelling `obstore` reads (`_REFUSED_VARIABLES`, matched by `_refused_variables`: `AZURE_` then any case), a naive time, or a missing `blob` extra |
+| `statcat upload EDITION_DIR AZ_URL [--release-at TIME]` | `upload` | `upload_edition(edition_dir, location, release_at=)` | a finding, each printed as `FAIL <file>: <detail>`, or a `ManifestError`, `BlobStoreError` or `ClientAuthenticationError`, printed as `ERROR <message>`; exit 2 on a usage error, a bad `AZ_URL`, `s3://`, no `AZURE_STORAGE_ACCOUNT_NAME`, a refused `obstore` variable set, even empty, in any spelling `obstore` reads (`_REFUSED_VARIABLES`, matched by `_refused_variables`: `AZURE_` then any case), a naive time, a missing `blob` extra, or an environment value `obstore` cannot parse, such as `AZURE_DISABLE_TAGGING=junk` (`GenericError` from the store build, before any request) |
 
 `build-index` options and their `WorkingCopy.build_index` keyword:
 
@@ -78,8 +78,10 @@ Private helpers that tests and later commands rely on:
   `_refused_variables()` lists the environment's names that `obstore` would parse as a
   refused key, as spelled. `_azure_location(uri, account)` builds the store with `obstore.store.from_url`,
   `TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))` and the one-hour
-  timeout; `upload` is the only code in statcatlib that reads the environment for a
-  store.
+  timeout, and turns obstore's `GenericError` from that build into `_usage`, with the text from
+  `_store_build_message(exc)`: obstore's first line, and the `AZURE_DISABLE_TAGGING` spelling the
+  environment sets, since obstore 0.12.1's message omits the variable. `upload` is the only code in
+  statcatlib that reads the environment for a store.
 - `_parse_codelist_policy(raw)` — accepts only mode `fts_only`
   (`_ACCEPTED_CODELIST_MODES`); raises `typer.BadParameter` otherwise.
 - `_parse_reference_metadata_blend(raw)` — `max_chars` must be a positive
