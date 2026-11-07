@@ -5,6 +5,18 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## 0.16.1: `statcat upload` refuses more `obstore` variables
+
+`statcat upload` exits 2 when `AZURE_STORAGE_USE_EMULATOR`,
+`AZURE_USE_FABRIC_ENDPOINT`, `AZURE_SKIP_SIGNATURE` or `AZURE_STORAGE_ENCRYPTION_KEY`
+is set, even to `false` or an empty value. Each sends the writes to another host, unsigned
+or under a customer-provided key that the digest read omits. Unset them in the publish
+job's environment.
+
+The command also refuses a refused variable spelled `AZURE_` and then any case, such as
+`AZURE_storage_endpoint`, since `obstore` reads that spelling. 0.16.0 accepted it. [Object
+storage](api/blob.md#the-command) lists the refused variables.
+
 ## 0.16.0: on sdmxlib 0.87
 
 statcatlib requires `sdmxlib>=0.87,<0.88`. No catalog is rebuilt.
