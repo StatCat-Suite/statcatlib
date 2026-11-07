@@ -107,11 +107,12 @@ class _Untouched:
 
 
 @pytest.fixture
-def proxy(env: pytest.MonkeyPatch) -> Iterator[list[bytes]]:
-    """A local proxy that records each request line and forwards nothing.
+def proxy() -> Iterator[tuple[str, list[bytes]]]:
+    """A local proxy's URL, and the request lines it records; it forwards nothing and answers 403.
 
-    The store's HTTP client reads ``HTTPS_PROXY`` and ``HTTP_PROXY``, so every request opens here: an ``https``
-    one as ``CONNECT <host>:443``, an ``http`` one as ``GET http://<host>/...``. The proxy answers 403.
+    A store given this URL as ``proxy_url`` opens every request here: an ``https`` one as
+    ``CONNECT <host>:443``, an ``http`` one as ``GET http://<host>/...``. On obstore 0.12.1 an explicit
+    ``proxy_url`` takes precedence over ``HTTPS_PROXY`` and ignores ``NO_PROXY``.
     """
     lines: list[bytes] = []
     server = socket.create_server(("127.0.0.1", 0))
@@ -128,12 +129,7 @@ def proxy(env: pytest.MonkeyPatch) -> Iterator[list[bytes]]:
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
-    url = f"http://127.0.0.1:{server.getsockname()[1]}"
-    for name in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
-        env.delenv(name, raising=False)
-    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
-        env.setenv(name, url)
-    yield lines
+    yield f"http://127.0.0.1:{server.getsockname()[1]}", lines
     server.close()
     thread.join(timeout=5)
 
@@ -226,25 +222,28 @@ class TestSuccess:
         assert len(captured) == 1
 
     def test_allow_http_alone_leaves_every_request_on_the_account_https_url(
-        self, tmp_path: Path, env, proxy: list[bytes]
+        self, tmp_path: Path, env, proxy: tuple[str, list[bytes]]
     ) -> None:
         """D7: `client_options` replace the options `from_env` read, so ``AZURE_ALLOW_HTTP`` changes no URL."""
 
         def one_try(
             url: str, *, account_name: str, credential_provider: TokenIdentity, client_options: ClientConfig
         ) -> ObjectStore:
-            """The command's store, with one try per request in place of obstore's ten retries."""
+            """The command's store, sent through the proxy, with one try per request in place of ten retries."""
             return _from_url(
                 url,
                 account_name=account_name,
                 credential_provider=credential_provider,
-                client_options=client_options,
+                client_options={**client_options, "proxy_url": proxy_url},
                 retry_config={"max_retries": 0},
             )
 
+        proxy_url, lines = proxy
         errors: list[str] = []
+        options: list[ClientConfig] = []
 
         def probe(_edition_dir: Path, location: BlobLocation, *, release_at: datetime | None = None) -> UploadReport:
+            options.append(location.store.client_options)
             try:
                 location.store.head("probe")
             except GenericError as exc:
@@ -258,8 +257,9 @@ class TestSuccess:
         result = runner.invoke(app, ["upload", str(tmp_path), "az://catalogs/stc"])
 
         assert result.exit_code == 0, result.output
-        assert proxy
-        assert set(proxy) == {b"CONNECT acct.blob.core.windows.net:443 HTTP/1.1"}
+        assert options == [{"timeout": "1h", "proxy_url": proxy_url}]
+        assert lines
+        assert set(lines) == {b"CONNECT acct.blob.core.windows.net:443 HTTP/1.1"}
         assert "https://acct.blob.core.windows.net/catalogs/stc/probe" in errors[0]
 
 
@@ -438,7 +438,7 @@ class TestExit2:
     @pytest.mark.parametrize("value", ["junk", ""], ids=["junk", "empty"])
     @pytest.mark.parametrize("name", ["AZURE_DISABLE_TAGGING", "AZURE_Disable_Tagging"])
     def test_a_value_obstore_cannot_parse_exits_2_and_sends_nothing(
-        self, tmp_path: Path, env, captured, httpx_mock: HTTPXMock, proxy: list[bytes], name: str, value: str
+        self, tmp_path: Path, env, captured, httpx_mock: HTTPXMock, name: str, value: str
     ) -> None:
         """obstore 0.12.1 raises `GenericError` from the store build; the command names the variable."""
         env.setattr("azure.identity.DefaultAzureCredential", _Untouched)
@@ -451,7 +451,6 @@ class TestExit2:
         assert "Traceback" not in output
         assert captured == []
         assert httpx_mock.get_requests() == []
-        assert proxy == []
 
     def test_a_missing_directory(self, tmp_path: Path, captured) -> None:
         result = runner.invoke(app, ["upload", str(tmp_path / "nothing"), "az://c"])
