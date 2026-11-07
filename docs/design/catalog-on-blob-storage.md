@@ -829,7 +829,7 @@ stub credential provider, on `obstore` 0.12.1, as GH-134 records.
 | `AZURE_CONTAINER_NAME` | `build` parses the `az://` URL after the environment, and the URL's container replaces it. |
 | `AZURE_DISABLE_TAGGING` | An upload sets no tags. A value that is no boolean, empty included, fails the store's build with obstore's `GenericError` (`Generic Config error: failed to parse "junk" as boolean` on 0.12.1, a message that omits the variable), before any request; the command exits 2 through `_usage` with obstore's first line and the variable as the environment spells it (GH-146). |
 | `AZURE_ENCRYPTION_KEY` | `from_str` has no such key, and the offline run sent no customer-key headers with it. |
-| `AZURE_PROXY_URL`, `AZURE_ALLOW_HTTP` | Client options: `_azure_location` passes `client_options`, which replaces those `from_env` read; the offline run left a dead proxy unused. With every endpoint variable refused, the account's URL is `https`. |
+| `AZURE_PROXY_URL`, `AZURE_ALLOW_HTTP` | Client options: `_azure_location` passes `client_options`, which replaces those `from_env` read; the offline run left a dead proxy unused. With every endpoint variable refused, the account's URL is `https`: a unit test sets `AZURE_ALLOW_HTTP=true` alone, routes the store's client through a local recording proxy with `HTTPS_PROXY`, and sees every request open as `CONNECT <account>.blob.core.windows.net:443` (GH-146). |
 | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_AUTHORITY_HOST` | `azure.identity`'s settings, which choose the identity `DefaultAzureCredential` gives. `obstore` reads all five too, only when no provider is given. |
 
 The provider's precedence rests on offline runs with a stub provider. Checklist item 10

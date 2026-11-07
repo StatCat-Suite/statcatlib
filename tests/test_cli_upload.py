@@ -12,9 +12,12 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 from azure.core.exceptions import ClientAuthenticationError
+from obstore.exceptions import GenericError
+from obstore.store import from_url as _from_url
 from pytest_httpx import HTTPXMock
 from sdmxlib.edition import Finding, ManifestError
 from typer.testing import CliRunner
@@ -23,6 +26,9 @@ from statcatlib import cli
 from statcatlib.cli import app
 from statcatlib.store.blob import BlobLocation, BlobStoreError, TokenIdentity
 from statcatlib.upload import UploadCheckError, UploadReport
+
+if TYPE_CHECKING:
+    from obstore.store import ClientConfig, ObjectStore
 
 pytestmark = pytest.mark.unit
 
@@ -218,6 +224,43 @@ class TestSuccess:
 
         assert result.exit_code == 0, result.output
         assert len(captured) == 1
+
+    def test_allow_http_alone_leaves_every_request_on_the_account_https_url(
+        self, tmp_path: Path, env, proxy: list[bytes]
+    ) -> None:
+        """D7: `client_options` replace the options `from_env` read, so ``AZURE_ALLOW_HTTP`` changes no URL."""
+
+        def one_try(
+            url: str, *, account_name: str, credential_provider: TokenIdentity, client_options: ClientConfig
+        ) -> ObjectStore:
+            """The command's store, with one try per request in place of obstore's ten retries."""
+            return _from_url(
+                url,
+                account_name=account_name,
+                credential_provider=credential_provider,
+                client_options=client_options,
+                retry_config={"max_retries": 0},
+            )
+
+        errors: list[str] = []
+
+        def probe(_edition_dir: Path, location: BlobLocation, *, release_at: datetime | None = None) -> UploadReport:
+            try:
+                location.store.head("probe")
+            except GenericError as exc:
+                errors.append(str(exc))
+            return UploadReport("e1", "p", (), (), registered=True)
+
+        env.setenv("AZURE_ALLOW_HTTP", "true")
+        env.setattr("obstore.store.from_url", one_try)
+        env.setattr(cli, "upload_edition", probe)
+
+        result = runner.invoke(app, ["upload", str(tmp_path), "az://catalogs/stc"])
+
+        assert result.exit_code == 0, result.output
+        assert proxy
+        assert set(proxy) == {b"CONNECT acct.blob.core.windows.net:443 HTTP/1.1"}
+        assert "https://acct.blob.core.windows.net/catalogs/stc/probe" in errors[0]
 
 
 class TestExit1:
