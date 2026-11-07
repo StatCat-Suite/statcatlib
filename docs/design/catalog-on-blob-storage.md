@@ -6,8 +6,9 @@
     ([report](egm/catalog-on-blob-storage/review_report.md): 4 Blocker, 37 Major, 33 Minor)
     and round 2 ([report](egm/catalog-on-blob-storage/round-2/review_report.md): 0 Blocker, 4
     Major, 20 Minor). The owner's decision of 2026-11-06 on the leaf read updates checklist
-    item 9 and Part 4's closing paragraph.
-*   **Date:** 2026-11-06
+    item 9 and Part 4's closing paragraph. The owner's decisions of 2026-11-07 on the
+    `obstore` variables (GH-134) update D7.
+*   **Date:** 2026-11-07
 *   **Issue:** GH-98. Stage 2's later needs: GH-125. Suite tracker:
     StatCat-Suite/statcat-suite.github.io#19.
 *   **Read against:** statcatlib `e7eba47`, whose code equals `origin/main` `974ea27`
@@ -89,7 +90,7 @@ Three findings from checking `obstore` 0.12.1 shape the design:
 | Live edition | A product's entry in state `live`, the one a reader gets. |
 | Stage 2 | The catalog lock and expiry of §6.9, GH-125 parts 2 and 3. |
 | Fold | Phase 5's job step that records `pending/` registrations as entries (§11.2). |
-| Baked summary | A possible single document of all leaves (plan, Future Improvements), decided by Part 4's numbers. |
+| Baked summary | A single document of all leaves (plan, Future Improvements). The owner chose concurrent leaf reads instead on 2026-11-06 (sdmxlib#375, `leaf_threads` default 64); the summary is the fallback if checklist item 9 shows the read misses plan Goal 1 on real storage. |
 | The cross-product rules | §6.5 items 4, 7 and 8, in `store/cross_product.py`. |
 | Probe | The reader's GET of `seq + 1`, which finds it absent (§6.6). |
 | GH-98 question N | The Nth question in GH-98's "Local design first". |
@@ -120,7 +121,9 @@ The spec's blob protocol has five needs the local writer does not meet:
     `pending/` entry however often it runs.
 *   A remote `Catalog.open` that never returns an embargoed entry and refuses a wrong
     manifest before it reads any other file of the edition.
-*   A recorded Inventory read cost that lets the owner decide on the baked summary.
+*   A recorded Inventory read cost. On it the owner chose concurrent leaf reads on
+    2026-11-06 (sdmxlib#375, `leaf_threads` default 64), with the baked summary as the
+    fallback if checklist item 9 shows the read misses plan Goal 1 on real storage.
 
 ## Non-Goals
 
@@ -278,7 +281,8 @@ answers each Azure item, and the Risks table has a row for each.
 - Whether a real Azure duplicate create answers 409 or 412. The crate maps both to
   `AlreadyExistsError`.
 - That `AzureStore.from_url("az://c/p", credential_provider=...)` uses the provider when account-key
-  variables are also set. The CLI refuses those variables (D7).
+  variables are also set. Offline runs on 0.12.1 show the provider's token sent, and checklist
+  item 10 confirms it on a real account. The CLI refuses those variables (D7).
 - The request `timeout` on a large single-shot Put. The stub documents the 30 s default for streams.
 - Any AWS behaviour, which matters only when an S3 deployment exists.
 
@@ -304,7 +308,7 @@ The owner decided these on 2026-11-04, except W24. W2 and W8 move with `correct`
 | W14 | S2, S3 and S7 go into sdmxlib's `docs/phase-4-restated` PR. | Done: resolved by sdmxlib#372, handoff row 1. |
 | W15 | `view` and upload pass `references=False` when the manifest has no bindings, and statcatlib passes no `structures=` in Phase 4. The fold owns that check. | D6, D7, handoff row 9. |
 | W16 | The CLI's credential is `DefaultAzureCredential` in `AzureCredentialProvider` in `TokenIdentity`, with `azure-identity`, `typer` and `rich` in `blob`. | D2, D7. |
-| W17 | The CLI's grammar, variables and codes: `az://<container>[/<prefix>]`, `AZURE_STORAGE_ACCOUNT_NAME`, a refusal when key or SAS variables are set, and from 2026-11-05 when token or endpoint variables are set, RFC 3339 with a zone, exit codes 0, 1 and 2, and a one-hour timeout. | D7. |
+| W17 | The CLI's grammar, variables and codes: `az://<container>[/<prefix>]`, `AZURE_STORAGE_ACCOUNT_NAME`, a refusal when key or SAS variables are set, from 2026-11-05 when token or endpoint variables are set, and from 2026-11-07 when emulator, Fabric endpoint, skip-signature or encryption-key variables are set in any spelling `obstore` reads, RFC 3339 with a zone, exit codes 0, 1 and 2, and a one-hour timeout. | D7. |
 | W18 | `lancedb` stays out of `blob`, and a `[blob]`-only install skips the search index check. | D2. |
 | W19 | `record_uploaded` lives in `tests/stores/_stores.py`, runs no cross-product rule, and takes `lifecycle=`. | D8. |
 | W20 | `exclusive()` and the internal commit split wait for GH-125. | D1. |
@@ -781,8 +785,7 @@ statcat upload EDITION_DIR AZ_URL [--release-at TIME]
 | Store | `AzureStore.from_url(AZ_URL, account_name=<the variable>, credential_provider=TokenIdentity(AzureCredentialProvider(DefaultAzureCredential())), client_options={"timeout": "1h"})` | The caller of a console command has nothing to pass. One hour covers a 5,000 MiB Put at about 1.4 MB/s; the real-account checklist tests a large file. |
 | Account | `AZURE_STORAGE_ACCOUNT_NAME`, required. Missing exits 2. | `obstore`'s documented variable (`_store/_azure.pyi`), so no new name. The CLI passes it as `account_name=`, since `store.config` omits a value read from the environment (F23). |
 | Identity | `azure.identity`'s own variables, such as `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE` for a workload identity. | A publish job's pod already has them. |
-| Keys | `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY` or a SAS variable set exits 2. | §10.1 says no keys, and which credential wins is unconfirmed. |
-| Overrides | `AZURE_STORAGE_TOKEN`, `AZURE_STORAGE_ENDPOINT` or its other spelling `AZURE_ENDPOINT` set exits 2, an empty value included. The owner decided this on 2026-11-05. | `obstore` reads them (`_store/_azure.pyi`). A token writes under another identity than the upload records, and an endpoint sends the writes to another host than the digest read. |
+| Refused variables | Twelve `obstore` variables, below, set exit 2 before a credential is built, an empty value or `false` included. The owner decided the keys and SAS first, the token and endpoints on 2026-11-05, and the rest on 2026-11-07. | Each changes the credential, the host, the signing or the encryption of the writes. |
 | `--release-at` | RFC 3339 with `Z` or an offset, parsed with `datetime.fromisoformat`. A naive time exits 2. Omitted writes `null`. | §6.3's instant, with no silent time zone. |
 | Output | Sent and kept counts, the identity's `oid`, and whether it registered. | A chained credential can pick an unintended identity, and this shows which one acted. |
 | Exit codes | 0: uploaded, or already registered with the same bytes. 1: `UploadCheckError`, each finding printed as `FAIL <file>: <detail>`, or a `ManifestError`, `BlobStoreError` or `azure.core.exceptions.ClientAuthenticationError`, printed as `ERROR <message>`. 2: usage, and an `ImportError` naming the extra. | `verify-catalog`'s `FAIL` form, Typer's 2, and no traceback. |
@@ -793,6 +796,44 @@ statcat upload EDITION_DIR AZ_URL [--release-at TIME]
 | **`DefaultAzureCredential` (chosen).** | Works on a pod and on an operator's laptop with no flag. | The chain can pick an unintended identity, which the output line reveals. |
 | `WorkloadIdentityCredential` only. | Exactly one identity. | A laptop cannot run the command, so a first upload needs a pod. |
 | A dotted-path provider option. | Any credential. | An import from the command line, with no production need. |
+
+**The `obstore` variables.** `obstore` 0.12.1 bundles object_store 0.14.2, whose
+`MicrosoftAzureBuilder::from_env` (`src/azure/builder.rs`) reads each variable whose name
+starts with `AZURE_`, case-sensitive, lowercases the whole name with ASCII rules, and
+parses it with `AzureConfigKey::from_str`. So `AZURE_storage_endpoint` is the endpoint,
+and `azure_storage_endpoint` is ignored. `_refused_variables` matches the same way: an
+ASCII name starting with `AZURE_` whose lowercased form is a refused key's. Only
+`from_str`'s spellings that start with `azure_` are reachable from the environment, and
+for the refused keys those are exactly the twelve names below, so the list needs no other
+alias. The message names each variable as the environment spells it. Refusal is by
+presence, so `AZURE_SKIP_SIGNATURE=false` exits 2 too, where a value `obstore` cannot parse
+as a boolean raised a traceback. The offline results come from a recording server with a
+stub credential provider, on `obstore` 0.12.1, as GH-134 records.
+
+| Refused | Reason |
+|---|---|
+| `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY`, `AZURE_STORAGE_SAS_KEY`, `AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_TOKEN` | §10.1 allows the publish job no account key or SAS. `build` uses a given credential provider before any of them, and the offline run sent the provider's token beside each, but a later `obstore` could change that order. |
+| `AZURE_STORAGE_ENDPOINT`, `AZURE_ENDPOINT` | The writes and the token go to that host, and the digest read to the account's host. |
+| `AZURE_STORAGE_USE_EMULATOR` | The writes go to `127.0.0.1:10000` (or `AZURITE_BLOB_STORAGE_URL`) signed with the emulator key, since the emulator branch ignores the provider, and the digest read goes to the account's host. |
+| `AZURE_USE_FABRIC_ENDPOINT` | The writes and the token go to `<account>.blob.fabric.microsoft.com`. |
+| `AZURE_SKIP_SIGNATURE` | The writes go unsigned. Against a server that accepts them the upload exits 0 and records an `oid` that signed nothing. |
+| `AZURE_STORAGE_ENCRYPTION_KEY` | The writes carry a customer-provided key, which the digest read omits, and a lost key makes the data unrecoverable. |
+
+| Accepted | Reason |
+|---|---|
+| `AZURE_FABRIC_SESSION_TOKEN`, `AZURE_FABRIC_TOKEN_SERVICE_URL`, `AZURE_FABRIC_WORKLOAD_HOST`, `AZURE_FABRIC_CLUSTER_IDENTIFIER` | Only `resolve_credential_auto` reads them, and `build` skips it when a credential provider is given; the offline run sent the provider's token with each and with all four. |
+| `AZURE_CREDENTIAL_TYPE` | `build` reads it only when no credential provider is given; the offline run sent the provider's token for every value, junk and empty included. |
+| `AZURE_STORAGE_CLIENT_ID`, `AZURE_STORAGE_CLIENT_SECRET`, `AZURE_STORAGE_TENANT_ID`, `AZURE_STORAGE_AUTHORITY_ID`, `AZURE_AUTHORITY_ID`, `AZURE_STORAGE_AUTHORITY_HOST` | `obstore`'s own service principal settings, read only when no provider is given; the offline run sent the provider's token. |
+| `AZURE_MSI_ENDPOINT`, `AZURE_IDENTITY_ENDPOINT`, `IDENTITY_ENDPOINT`, `AZURE_OBJECT_ID`, `AZURE_MSI_RESOURCE_ID` | Managed identity settings, read only when no provider is given; the offline run sent the provider's token. |
+| `AZURE_USE_AZURE_CLI` | Read only when no provider is given; the offline run sent the provider's token for `true` and for junk. |
+| `AZURE_CONTAINER_NAME` | `build` parses the `az://` URL after the environment, and the URL's container replaces it. |
+| `AZURE_DISABLE_TAGGING` | An upload sets no tags. A value that is no boolean fails the store's build with a traceback. |
+| `AZURE_ENCRYPTION_KEY` | `from_str` has no such key, and the offline run sent no customer-key headers with it. |
+| `AZURE_PROXY_URL`, `AZURE_ALLOW_HTTP` | Client options: `_azure_location` passes `client_options`, which replaces those `from_env` read; the offline run left a dead proxy unused. With every endpoint variable refused, the account's URL is `https`. |
+| `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_AUTHORITY_HOST` | `azure.identity`'s settings, which choose the identity `DefaultAzureCredential` gives. `obstore` reads all five too, only when no provider is given. |
+
+The provider's precedence rests on offline runs with a stub provider. Checklist item 10
+shows which identity Azure records under a real `DefaultAzureCredential`.
 
 D6 refuses a string URI because a library call should not reach into the environment. The
 console command is the opposite case: it has no caller, and its environment is its input. So

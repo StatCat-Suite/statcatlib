@@ -29,13 +29,23 @@ statcat upload EDITION_DIR AZ_URL [--release-at TIME]
 | `AZURE_STORAGE_ACCOUNT_NAME` | The storage account. Required. |
 | `azure.identity`'s variables | Such as `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE` for a workload identity. `DefaultAzureCredential` reads them. |
 
-The command exits 2 when any of `AZURE_STORAGE_ACCOUNT_KEY`,
-`AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY`, `AZURE_STORAGE_SAS_KEY`,
-`AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_TOKEN`, `AZURE_STORAGE_ENDPOINT` or
-`AZURE_ENDPOINT` is set, even to an empty value, before it builds a credential. The
-publish job acts under one identity, and `obstore` reads each of these variables: a key
-or token would write under another identity, and an endpoint would send the writes to
-another host than the digest read.
+The command exits 2 before it builds a credential when any of these `obstore` variables
+is set, even to an empty value or `false`:
+
+| Variable | Why the command refuses it |
+|---|---|
+| `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY`, `AZURE_STORAGE_SAS_KEY`, `AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_TOKEN` | Spec §10.1 allows the publish job no account key or SAS. On `obstore` 0.12.1 the credential provider's token wins beside each of them, and a later `obstore` could change that order. |
+| `AZURE_STORAGE_ENDPOINT`, `AZURE_ENDPOINT` | The writes go to that host, and the digest read goes to the account's host. |
+| `AZURE_STORAGE_USE_EMULATOR` | The writes go to `127.0.0.1:10000`, signed with the emulator's key, and the digest read goes to the account's host. |
+| `AZURE_USE_FABRIC_ENDPOINT` | The writes and the token go to the Fabric host. |
+| `AZURE_SKIP_SIGNATURE` | The writes go unsigned, so an upload can exit 0 and print an `oid` that signed nothing. |
+| `AZURE_STORAGE_ENCRYPTION_KEY` | The blobs are encrypted with a customer-provided key, which the digest read omits. A lost key leaves the data unrecoverable. |
+
+`obstore` reads every variable whose name starts with `AZURE_` and matches the rest in
+any case, so the command refuses `AZURE_storage_endpoint` too, and names each variable as
+the environment spells it. It accepts `azure_storage_endpoint`, which `obstore` ignores.
+The [design's D7](../design/catalog-on-blob-storage.md#d7-statcat-upload) lists the
+variables the command accepts, with the reason for each.
 
 The identity reads and writes under `products/` and `pending/`, as Storage Blob Data
 Contributor grants. The command reads nothing under `catalog.json`, `inventory/` or
@@ -49,7 +59,7 @@ check that the `oid` is the identity you meant.
 |---|---|
 | 0 | The edition is uploaded, or already registered with the same bytes. |
 | 1 | A finding, printed as `FAIL <file>: <detail>`, or a store, manifest or credential failure, printed as `ERROR <message>`. |
-| 2 | A usage error, a key or SAS variable, or a missing `blob` extra. |
+| 2 | A usage error, a refused variable, or a missing `blob` extra. |
 
 ## What an upload does
 
@@ -261,3 +271,42 @@ the same pass and feeds Phase 6, serving.
     a second `inventory_corpus` at the prefix raises `FileExistsError`. Both runs read that
     one corpus, because a read writes nothing and both stores reach the same prefix. Delete
     the prefix afterwards, since no other item uses it.
+10. Which identity writes when other credential variables sit beside
+    `credential_provider`. An offline run with a stub provider, on `obstore` 0.12.1, shows
+    the store sends the provider's bearer token beside each variable below. This item shows
+    which identity Azure records under a real `DefaultAzureCredential`. Record
+    `obstore.__version__` with the results.
+
+    Use an identity that holds Storage Blob Data Contributor. Run this script from the
+    repository root with `uv run python`, once per case, each in a new process with the
+    case's variables set. `_azure_location` skips the refusal in `_azure_account`, so a
+    refused variable reaches the store.
+
+    ```python
+    import os
+    import sys
+
+    import obstore
+    from statcatlib.cli import _azure_location
+
+    container, case = sys.argv[1:]
+    location = _azure_location(f"az://{container}/checklist-10/", os.environ["AZURE_STORAGE_ACCOUNT_NAME"])
+    print(obstore.__version__, location.store.credential_provider.object_id())
+    obstore.put(location.store, f"{case}.txt", b"x", mode="create")
+    ```
+
+    | Case | Variables | Expected |
+    |---|---|---|
+    | `baseline` | None beyond the identity's own. | The create succeeds. |
+    | `bogus` | `AZURE_STORAGE_ACCOUNT_KEY=Ym9ndXM=`, `AZURE_STORAGE_SAS_TOKEN=sv=bogus`, `AZURE_STORAGE_TOKEN=bogus`, `AZURE_CREDENTIAL_TYPE=access_key`, `AZURE_STORAGE_CLIENT_ID=bogus`, `AZURE_STORAGE_CLIENT_SECRET=bogus`, `AZURE_STORAGE_TENANT_ID=bogus` and `AZURE_USE_AZURE_CLI=true`. | The create succeeds and the `oid` equals the baseline's. A bogus value authorizes nothing, so the provider's token wrote the blob. |
+    | `second` | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID` of a service principal with no role on the account. `azure.identity` reads these too. | The printed `oid` is that principal's, and the create raises `PermissionDeniedError`. |
+
+    To name the writer, turn on the account's diagnostic setting for `StorageWrite` before
+    the run, and read `AuthenticationType` and `RequesterObjectId` from `StorageBlobLogs`
+    for each blob. Expect `OAuth` and the printed `oid`. An upload records no `event.actor`,
+    so these logs are the account's only record of the writer. Without the setting, record
+    that the `bogus` case infers the writer. Delete the prefix afterwards.
+
+    Leave out `AZURE_STORAGE_USE_EMULATOR`, `AZURE_USE_FABRIC_ENDPOINT`,
+    `AZURE_SKIP_SIGNATURE` and the endpoint variables. The offline run settled them, and
+    each sends the write to another host or unsigned.
