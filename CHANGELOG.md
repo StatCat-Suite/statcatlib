@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.1] - 2026-11-07
+
+### Bug Fixes
+
+- **upload**: Refuse obstore's emulator, Fabric, skip-signature and encryption-key variables in any spelling (GH-134)
+
+### Documentation
+
+- **design**: Record the owner's choice of concurrent leaf reads
+- **blob**: Add a credential-precedence item to the real-account checklist (GH-134)
+- **blob**: Limit checklist item 10 to what an offline run leaves open (GH-134)
+- **design**: Record the obstore variable decisions in D7 and the concurrent leaf read (GH-134)
+- **upgrading**: List the obstore variables statcat upload refuses in 0.16.1 (GH-134)
+
 ## [0.16.0] - 2026-11-06
 
 ### Breaking Changes
