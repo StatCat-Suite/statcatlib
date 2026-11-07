@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.2] - 2026-11-07
+
+### Bug Fixes
+
+- **upload**: Exit 2 when obstore cannot build the store from the environment (GH-146)
+
+### Testing
+
+- **upload**: Check AZURE_ALLOW_HTTP alone keeps every request on https (GH-146)
+- **upload**: Send the AZURE_ALLOW_HTTP test's store through an explicit proxy_url (GH-146)
+
 ## [0.16.1] - 2026-11-07
 
 ### Bug Fixes
