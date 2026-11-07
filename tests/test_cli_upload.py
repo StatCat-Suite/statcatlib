@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,7 +37,14 @@ _REFUSED = (
     "AZURE_STORAGE_TOKEN",
     "AZURE_STORAGE_ENDPOINT",
     "AZURE_ENDPOINT",
+    "AZURE_STORAGE_USE_EMULATOR",
+    "AZURE_USE_FABRIC_ENDPOINT",
+    "AZURE_SKIP_SIGNATURE",
+    "AZURE_STORAGE_ENCRYPTION_KEY",
 )
+
+#: Spellings `obstore` reads as a refused key: ``AZURE_``, then any case.
+_MIXED_CASE = ("AZURE_storage_endpoint", "AZURE_Endpoint", "AZURE_Storage_Use_Emulator", "AZURE_skip_signature")
 
 
 def _jwt(claims: dict[str, str]) -> str:
@@ -60,9 +68,10 @@ class _NoCredential:
 
 @pytest.fixture
 def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """An account and a stand-in credential, with no refused variable set."""
-    for name in _REFUSED:
-        monkeypatch.delenv(name, raising=False)
+    """An account and a stand-in credential, with no refused variable set in any spelling."""
+    refused = {name.lower() for name in _REFUSED}
+    for name in [name for name in os.environ if name.startswith("AZURE_") and name.lower() in refused]:
+        monkeypatch.delenv(name)
     monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_NAME", "acct")
     monkeypatch.setattr("azure.identity.DefaultAzureCredential", _Credential)
     return monkeypatch
@@ -157,6 +166,16 @@ class TestSuccess:
 
     def test_the_app_shows_no_locals_in_a_traceback(self) -> None:
         assert app.pretty_exceptions_show_locals is False
+
+    @pytest.mark.parametrize("name", ["azure_storage_endpoint", "azure_skip_signature", "Azure_Endpoint"])
+    def test_a_name_obstore_ignores_is_accepted(self, tmp_path: Path, env, captured, name: str) -> None:
+        """`from_env` reads only names that start with ``AZURE_`` in capitals."""
+        env.setenv(name, "https://elsewhere.example")
+
+        result = runner.invoke(app, ["upload", str(tmp_path), "az://c"])
+
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
 
 
 class TestExit1:
@@ -259,6 +278,35 @@ class TestExit2:
 
         assert name in self._refused(tmp_path, "az://c")
         assert captured == []
+
+    @pytest.mark.parametrize(
+        "name", ["AZURE_STORAGE_USE_EMULATOR", "AZURE_USE_FABRIC_ENDPOINT", "AZURE_SKIP_SIGNATURE"]
+    )
+    def test_a_switch_set_to_false_counts(self, tmp_path: Path, env, captured, name: str) -> None:
+        """Refusal is by presence, so ``false`` exits 2, where a value obstore cannot parse raised a traceback."""
+        env.setenv(name, "false")
+
+        assert name in self._refused(tmp_path, "az://c")
+        assert captured == []
+
+    @pytest.mark.parametrize("value", ["https://elsewhere.example", ""], ids=["set", "empty"])
+    @pytest.mark.parametrize("name", _MIXED_CASE)
+    def test_a_mixed_case_spelling_is_refused_as_spelled(
+        self, tmp_path: Path, env, captured, httpx_mock: HTTPXMock, name: str, value: str
+    ) -> None:
+        def untouched(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("the refusal comes first")
+
+        env.setattr("azure.identity.DefaultAzureCredential", untouched)
+        env.setattr("obstore.store.from_url", untouched)
+        env.setenv(name, value)
+
+        output = self._refused(tmp_path, "az://c")
+
+        assert name in output
+        assert name.upper() not in output
+        assert captured == []
+        assert httpx_mock.get_requests() == []
 
     def test_the_message_names_only_the_variables_that_are_set(self, tmp_path: Path, env, captured) -> None:
         env.setenv("AZURE_ENDPOINT", "https://elsewhere.example")

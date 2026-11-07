@@ -29,13 +29,23 @@ statcat upload EDITION_DIR AZ_URL [--release-at TIME]
 | `AZURE_STORAGE_ACCOUNT_NAME` | The storage account. Required. |
 | `azure.identity`'s variables | Such as `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE` for a workload identity. `DefaultAzureCredential` reads them. |
 
-The command exits 2 when any of `AZURE_STORAGE_ACCOUNT_KEY`,
-`AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY`, `AZURE_STORAGE_SAS_KEY`,
-`AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_TOKEN`, `AZURE_STORAGE_ENDPOINT` or
-`AZURE_ENDPOINT` is set, even to an empty value, before it builds a credential. The
-publish job acts under one identity, and `obstore` reads each of these variables: a key
-or token would write under another identity, and an endpoint would send the writes to
-another host than the digest read.
+The command exits 2 before it builds a credential when any of these `obstore` variables
+is set, even to an empty value or `false`:
+
+| Variable | Why the command refuses it |
+|---|---|
+| `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_MASTER_KEY`, `AZURE_STORAGE_SAS_KEY`, `AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_TOKEN` | Spec §10.1 allows the publish job no account key or SAS. On `obstore` 0.12.1 the credential provider's token wins beside each of them, and a later `obstore` could change that order. |
+| `AZURE_STORAGE_ENDPOINT`, `AZURE_ENDPOINT` | The writes go to that host, and the digest read goes to the account's host. |
+| `AZURE_STORAGE_USE_EMULATOR` | The writes go to `127.0.0.1:10000`, signed with the emulator's key, and the digest read goes to the account's host. |
+| `AZURE_USE_FABRIC_ENDPOINT` | The writes and the token go to the Fabric host. |
+| `AZURE_SKIP_SIGNATURE` | The writes go unsigned, so an upload can exit 0 and print an `oid` that signed nothing. |
+| `AZURE_STORAGE_ENCRYPTION_KEY` | The blobs are encrypted with a customer-provided key, which the digest read omits. A lost key leaves the data unrecoverable. |
+
+`obstore` reads every variable whose name starts with `AZURE_` and matches the rest in
+any case, so the command refuses `AZURE_storage_endpoint` too, and names each variable as
+the environment spells it. It accepts `azure_storage_endpoint`, which `obstore` ignores.
+The [design's D7](../design/catalog-on-blob-storage.md#d7-statcat-upload) lists the
+variables the command accepts, with the reason for each.
 
 The identity reads and writes under `products/` and `pending/`, as Storage Blob Data
 Contributor grants. The command reads nothing under `catalog.json`, `inventory/` or
@@ -49,7 +59,7 @@ check that the `oid` is the identity you meant.
 |---|---|
 | 0 | The edition is uploaded, or already registered with the same bytes. |
 | 1 | A finding, printed as `FAIL <file>: <detail>`, or a store, manifest or credential failure, printed as `ERROR <message>`. |
-| 2 | A usage error, a key or SAS variable, or a missing `blob` extra. |
+| 2 | A usage error, a refused variable, or a missing `blob` extra. |
 
 ## What an upload does
 

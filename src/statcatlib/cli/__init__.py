@@ -60,9 +60,12 @@ _DEFAULT_MODEL = "intfloat/multilingual-e5-base"
 
 _ACCEPTED_CODELIST_MODES = frozenset({"fts_only"})
 
-#: The `obstore` variables `statcat upload` refuses, as `_store/_azure.pyi` spells them. Keys and SAS break spec
-#: §10.1. A token writes under another identity than the one the upload records. An endpoint sends the writes to
-#: another host than the digest read.
+#: The `obstore` variables `statcat upload` refuses: every ``azure_`` spelling that object_store 0.14.2's
+#: `AzureConfigKey::from_str` accepts for these keys, the crate obstore 0.12.1 bundles. Spec §10.1 allows the
+#: publish job no account key or SAS. The credential provider's token wins beside the key, SAS and token variables
+#: on obstore 0.12.1, and a later obstore could change that order. An endpoint, the emulator or the Fabric
+#: endpoint sends the writes to another host than the digest read. Skipping the signature sends unsigned writes. A
+#: customer-provided key encrypts blobs that the digest read sends no key for.
 _REFUSED_VARIABLES = (
     "AZURE_STORAGE_ACCOUNT_KEY",
     "AZURE_STORAGE_ACCESS_KEY",
@@ -72,7 +75,15 @@ _REFUSED_VARIABLES = (
     "AZURE_STORAGE_TOKEN",
     "AZURE_STORAGE_ENDPOINT",
     "AZURE_ENDPOINT",
+    "AZURE_STORAGE_USE_EMULATOR",
+    "AZURE_USE_FABRIC_ENDPOINT",
+    "AZURE_SKIP_SIGNATURE",
+    "AZURE_STORAGE_ENCRYPTION_KEY",
 )
+
+#: The refused names as `MicrosoftAzureBuilder::from_env` compares them: it reads each variable whose name starts
+#: with ``AZURE_`` and parses the name lowercased.
+_REFUSED_KEYS = frozenset(name.lower() for name in _REFUSED_VARIABLES)
 
 #: How long one request may take: a 5,000 MiB Put at about 1.4 MB/s.
 _UPLOAD_TIMEOUT = "1h"
@@ -633,10 +644,24 @@ def _catalog_uri(raw: str) -> str:
     return f"az://{'/'.join(segments)}/"
 
 
+def _refused_variables() -> list[str]:
+    """The environment's names that `obstore` parses as a refused key, spelled as the environment spells them.
+
+    `MicrosoftAzureBuilder::from_env` lowercases ASCII letters only, so a name with any other character never
+    matches a key there, and is not refused here.
+    """
+    return sorted(
+        name for name in os.environ if name.startswith("AZURE_") and name.isascii() and name.lower() in _REFUSED_KEYS
+    )
+
+
 def _azure_account() -> str:
     """The storage account from the environment; a refused variable, even empty, or no account, exits 2."""
-    if found := [name for name in _REFUSED_VARIABLES if name in os.environ]:
-        _usage(f"upload acts under one identity at the account's URL; unset {', '.join(found)}")
+    if found := _refused_variables():
+        _usage(
+            "upload writes with its own credential, signed and with no customer-provided key, "
+            f"to the account's URL; unset {', '.join(found)}"
+        )
     account = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
     if not account:
         _usage("set AZURE_STORAGE_ACCOUNT_NAME to the storage account's name")
@@ -688,7 +713,11 @@ def upload(
     empty: ``AZURE_STORAGE_ACCOUNT_KEY``, ``AZURE_STORAGE_ACCESS_KEY``,
     ``AZURE_STORAGE_MASTER_KEY``, ``AZURE_STORAGE_SAS_KEY``,
     ``AZURE_STORAGE_SAS_TOKEN``, ``AZURE_STORAGE_TOKEN``,
-    ``AZURE_STORAGE_ENDPOINT`` and ``AZURE_ENDPOINT``.
+    ``AZURE_STORAGE_ENDPOINT``, ``AZURE_ENDPOINT``,
+    ``AZURE_STORAGE_USE_EMULATOR``, ``AZURE_USE_FABRIC_ENDPOINT``,
+    ``AZURE_SKIP_SIGNATURE`` and ``AZURE_STORAGE_ENCRYPTION_KEY``. Any case
+    after ``AZURE_`` counts, such as ``AZURE_storage_endpoint``, since
+    ``obstore`` reads that spelling too.
     """
     when = _release_time(release_at)
     uri = _catalog_uri(az_url)
