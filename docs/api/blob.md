@@ -47,6 +47,11 @@ the environment spells it. It accepts `azure_storage_endpoint`, which `obstore` 
 The [design's D7](../design/catalog-on-blob-storage.md#d7-statcat-upload) lists the
 variables the command accepts, with the reason for each.
 
+The command also exits 2 when `obstore` cannot build the store from an accepted
+variable's value, such as `AZURE_DISABLE_TAGGING=junk` or an empty
+`AZURE_DISABLE_TAGGING`. It prints `obstore`'s reason and the variable, and sends no
+request. It has built `DefaultAzureCredential` by then and asked it for no token.
+
 The identity reads and writes under `products/` and `pending/`, as Storage Blob Data
 Contributor grants. The command reads nothing under `catalog.json`, `inventory/` or
 `CURRENT`.

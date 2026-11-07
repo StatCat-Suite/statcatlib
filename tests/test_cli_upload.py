@@ -5,13 +5,19 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
 import sys
+import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 from azure.core.exceptions import ClientAuthenticationError
+from obstore.exceptions import GenericError
+from obstore.store import from_url as _from_url
 from pytest_httpx import HTTPXMock
 from sdmxlib.edition import Finding, ManifestError
 from typer.testing import CliRunner
@@ -20,6 +26,9 @@ from statcatlib import cli
 from statcatlib.cli import app
 from statcatlib.store.blob import BlobLocation, BlobStoreError, TokenIdentity
 from statcatlib.upload import UploadCheckError, UploadReport
+
+if TYPE_CHECKING:
+    from obstore.store import ClientConfig, ObjectStore
 
 pytestmark = pytest.mark.unit
 
@@ -88,6 +97,41 @@ def captured(env: pytest.MonkeyPatch) -> list[tuple[Path, BlobLocation, datetime
 
     env.setattr(cli, "upload_edition", fake)
     return calls
+
+
+class _Untouched:
+    """Stands for `DefaultAzureCredential` where no token may be asked for."""
+
+    def get_token(self, *_scopes: str, **_kwargs: object) -> SimpleNamespace:
+        pytest.fail("no credential may be asked for a token")
+
+
+@pytest.fixture
+def proxy() -> Iterator[tuple[str, list[bytes]]]:
+    """A local proxy's URL, and the request lines it records; it forwards nothing and answers 403.
+
+    A store given this URL as ``proxy_url`` opens every request here: an ``https`` one as
+    ``CONNECT <host>:443``, an ``http`` one as ``GET http://<host>/...``. On obstore 0.12.1 an explicit
+    ``proxy_url`` takes precedence over ``HTTPS_PROXY`` and ignores ``NO_PROXY``.
+    """
+    lines: list[bytes] = []
+    server = socket.create_server(("127.0.0.1", 0))
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                lines.append(conn.recv(4096).split(b"\r\n", 1)[0])
+                conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.getsockname()[1]}", lines
+    server.close()
+    thread.join(timeout=5)
 
 
 def _raising(env: pytest.MonkeyPatch, exc: Exception) -> None:
@@ -176,6 +220,47 @@ class TestSuccess:
 
         assert result.exit_code == 0, result.output
         assert len(captured) == 1
+
+    def test_allow_http_alone_leaves_every_request_on_the_account_https_url(
+        self, tmp_path: Path, env, proxy: tuple[str, list[bytes]]
+    ) -> None:
+        """D7: `client_options` replace the options `from_env` read, so ``AZURE_ALLOW_HTTP`` changes no URL."""
+
+        def one_try(
+            url: str, *, account_name: str, credential_provider: TokenIdentity, client_options: ClientConfig
+        ) -> ObjectStore:
+            """The command's store, sent through the proxy, with one try per request in place of ten retries."""
+            return _from_url(
+                url,
+                account_name=account_name,
+                credential_provider=credential_provider,
+                client_options={**client_options, "proxy_url": proxy_url},
+                retry_config={"max_retries": 0},
+            )
+
+        proxy_url, lines = proxy
+        errors: list[str] = []
+        options: list[ClientConfig] = []
+
+        def probe(_edition_dir: Path, location: BlobLocation, *, release_at: datetime | None = None) -> UploadReport:
+            options.append(location.store.client_options)
+            try:
+                location.store.head("probe")
+            except GenericError as exc:
+                errors.append(str(exc))
+            return UploadReport("e1", "p", (), (), registered=True)
+
+        env.setenv("AZURE_ALLOW_HTTP", "true")
+        env.setattr("obstore.store.from_url", one_try)
+        env.setattr(cli, "upload_edition", probe)
+
+        result = runner.invoke(app, ["upload", str(tmp_path), "az://catalogs/stc"])
+
+        assert result.exit_code == 0, result.output
+        assert options == [{"timeout": "1h", "proxy_url": proxy_url}]
+        assert lines
+        assert set(lines) == {b"CONNECT acct.blob.core.windows.net:443 HTTP/1.1"}
+        assert "https://acct.blob.core.windows.net/catalogs/stc/probe" in errors[0]
 
 
 class TestExit1:
@@ -349,6 +434,23 @@ class TestExit2:
         _raising(env, ImportError("object storage needs the blob extra"))
 
         assert "blob extra" in self._refused(tmp_path, "az://c")
+
+    @pytest.mark.parametrize("value", ["junk", ""], ids=["junk", "empty"])
+    @pytest.mark.parametrize("name", ["AZURE_DISABLE_TAGGING", "AZURE_Disable_Tagging"])
+    def test_a_value_obstore_cannot_parse_exits_2_and_sends_nothing(
+        self, tmp_path: Path, env, captured, httpx_mock: HTTPXMock, name: str, value: str
+    ) -> None:
+        """obstore 0.12.1 raises `GenericError` from the store build; the command names the variable."""
+        env.setattr("azure.identity.DefaultAzureCredential", _Untouched)
+        env.setenv(name, value)
+
+        output = self._refused(tmp_path, "az://c")
+
+        assert f'failed to parse "{value}" as boolean' in output
+        assert f"{name} takes true or false" in output
+        assert "Traceback" not in output
+        assert captured == []
+        assert httpx_mock.get_requests() == []
 
     def test_a_missing_directory(self, tmp_path: Path, captured) -> None:
         result = runner.invoke(app, ["upload", str(tmp_path / "nothing"), "az://c"])

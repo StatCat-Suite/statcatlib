@@ -669,20 +669,47 @@ def _azure_account() -> str:
 
 
 def _azure_location(uri: str, account: str) -> BlobLocation:
-    """The catalog at *uri*, reached with `DefaultAzureCredential`; a missing ``blob`` extra exits 2."""
+    """The catalog at *uri*, reached with `DefaultAzureCredential`.
+
+    A missing ``blob`` extra exits 2, and so does an environment value `obstore` cannot parse, such as
+    ``AZURE_DISABLE_TAGGING=junk``: obstore 0.12.1 raises `GenericError` from the store build, before any request.
+    """
     try:
         from azure.identity import DefaultAzureCredential  # noqa: PLC0415
         from obstore.auth.azure import AzureCredentialProvider  # noqa: PLC0415
+        from obstore.exceptions import GenericError  # noqa: PLC0415
         from obstore.store import from_url  # noqa: PLC0415
     except ImportError:
         _usage("upload needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')")
-    store = from_url(
-        uri.removesuffix("/"),
-        account_name=account,
-        credential_provider=TokenIdentity(AzureCredentialProvider(DefaultAzureCredential())),
-        client_options={"timeout": _UPLOAD_TIMEOUT},
-    )
+    credential = TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))
+    try:
+        store = from_url(
+            uri.removesuffix("/"),
+            account_name=account,
+            credential_provider=credential,
+            client_options={"timeout": _UPLOAD_TIMEOUT},
+        )
+    except GenericError as exc:
+        _usage(_store_build_message(exc))
     return BlobLocation(uri, store)
+
+
+def _store_build_message(exc: Exception) -> str:
+    """The exit-2 text for a store build that failed on the environment.
+
+    obstore 0.12.1's message names the value and omits the variable, so the text names
+    ``AZURE_DISABLE_TAGGING`` when the environment sets it, in any case after ``AZURE_``.
+    """
+    reason = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+    message = f"obstore cannot build the store from the environment ({reason})"
+    tagging = sorted(
+        name
+        for name in os.environ
+        if name.startswith("AZURE_") and name.isascii() and name.lower() == "azure_disable_tagging"
+    )
+    if tagging:
+        message += f"; {', '.join(tagging)} takes true or false"
+    return message
 
 
 @app.command("upload")
@@ -709,8 +736,10 @@ def upload(
     release job. It exits 0 when the edition is uploaded, or already registered
     with the same bytes; 1 on any finding, each printed as ``FAIL <file>: <detail>``,
     or on a store or credential failure, printed as ``ERROR <message>``; and 2 on
-    a usage error, a missing ``blob`` extra, or any of these variables set, even
-    empty: ``AZURE_STORAGE_ACCOUNT_KEY``, ``AZURE_STORAGE_ACCESS_KEY``,
+    a usage error, a missing ``blob`` extra, an environment value ``obstore``
+    cannot parse, such as ``AZURE_DISABLE_TAGGING=junk``, or any of these
+    variables set, even empty: ``AZURE_STORAGE_ACCOUNT_KEY``,
+    ``AZURE_STORAGE_ACCESS_KEY``,
     ``AZURE_STORAGE_MASTER_KEY``, ``AZURE_STORAGE_SAS_KEY``,
     ``AZURE_STORAGE_SAS_TOKEN``, ``AZURE_STORAGE_TOKEN``,
     ``AZURE_STORAGE_ENDPOINT``, ``AZURE_ENDPOINT``,
