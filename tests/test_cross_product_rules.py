@@ -4,7 +4,9 @@ Each test builds an Inventory version with sdmxlib's rules (`record`) and
 answers every edition's artefacts from a dict, so the rules of specification
 §6.5 items 4, 7 and 8 are checked without a catalog on disk.
 `tests/test_cross_product.py` drives the same rules through seals and
-releases.
+releases. `TestRecordsFromLeaves` checks where the rules take each entry's
+records from: the incoming entry's manifest, and every other entry's leaf
+entry when it is filled (Phase 5 D6, GH-125 part 4).
 """
 
 from __future__ import annotations
@@ -17,9 +19,12 @@ import pytest
 from sdmxlib.inventory import FullInventory, Kind, Leaf, PartialRecord, record, release
 from sdmxlib.storage.schema import SCHEMA_VERSION
 
+import statcatlib as sc
+from statcatlib import testing
 from statcatlib.store import cross_product
 from statcatlib.store.cross_product import Refusal
 from statcatlib.store.inventory import InventoryWriter
+from statcatlib.testing import CodrShape
 
 pytestmark = pytest.mark.unit
 
@@ -52,9 +57,15 @@ class Catalog:
         return {} if full is None else dict(full.leaves())
 
     def seal(
-        self, product: str, kind: Kind, artefacts: Mapping[str, PartialRecord], *, embargo: bool = False
+        self,
+        product: str,
+        kind: Kind,
+        artefacts: Mapping[str, PartialRecord],
+        *,
+        embargo: bool = False,
+        filled: bool = False,
     ) -> tuple[str, Leaf]:
-        """The product's next leaf with a new edition recorded; nothing is written."""
+        """The product's next leaf with a new edition recorded, *filled* with *artefacts*; nothing is written."""
         self._n += 1
         edition = _edition(self._n)
         leaf = self.leaves.get(product)
@@ -70,6 +81,7 @@ class Catalog:
             schema_version=SCHEMA_VERSION,
             embargo=embargo,
             now=_NOW,
+            artefacts=artefacts if filled else None,
         )
         self.held[edition] = dict(artefacts)
         return edition, nxt
@@ -291,3 +303,99 @@ class TestHomelessPartials:
         assert cross_product.stale_editions(cat.full(), cat.read) == [], "a URN with no home is not stale"
         released = release(table, embargoed, now=_NOW, explicit=True)
         assert "has no structure home" in cat.refusals({"table-a": released})["table-a"].message
+
+
+class TestRecordsFromLeaves:
+    """The rules read the incoming manifest, no manifest of another product's filled entry, and an unfilled one's."""
+
+    @pytest.fixture
+    def mixed(self, tmp_path: Path) -> Catalog:
+        """structure-geo filled, table-b live and unfilled (recorded before Phase 5), table-c live and filled."""
+        c = Catalog(tmp_path / "cat")
+        _, geo = c.seal("structure-geo", "structure", {GEO: full("g1")}, filled=True)
+        c.keep("structure-geo", geo)
+        _, unfilled = c.seal("table-b", "data", {GEO: cut("g1"), DSD: full("d1")})
+        c.keep("table-b", unfilled)
+        _, filled = c.seal("table-c", "data", {GEO: cut("g1"), DSD: full("d1")}, filled=True)
+        c.keep("table-c", filled)
+        return c
+
+    def test_a_record_reads_the_incoming_manifest_and_the_unfilled_entrys(self, mixed: Catalog) -> None:
+        incoming, leaf = mixed.seal("table-a", "data", {GEO: cut("g1"), DSD: full("d1")}, filled=True)
+        unfilled = mixed.leaves["table-b"].editions[0].edition_id
+        reads: list[tuple[str, str]] = []
+
+        def recording(product: str, edition: str, sha: str) -> Mapping[str, PartialRecord]:
+            reads.append((product, edition))
+            return mixed.read(product, edition, sha)
+
+        assert cross_product.refusals(mixed.full(), {"table-a": leaf}, recording) == {}
+
+        assert set(reads) == {("table-a", incoming), ("table-b", unfilled)}
+
+    def test_an_incoming_entrys_records_come_from_its_manifest(self, mixed: Catalog) -> None:
+        """The leaf says the partial was cut from g1, and the manifest the reader checks says g0."""
+        incoming, leaf = mixed.seal("table-a", "data", {GEO: cut("g1")}, filled=True)
+        mixed.held[incoming] = {GEO: cut("g0")}
+
+        refusal = mixed.refusals({"table-a": leaf})["table-a"]
+
+        assert (refusal.rule, refusal.urn) == ("full-artefacts", GEO)
+
+    def test_the_derived_lists_read_no_manifest_of_a_filled_entry(self, cat: Catalog) -> None:
+        geo = cat.leaves["structure-geo"]
+        filled = record(
+            geo,
+            product_id="structure-geo",
+            kind="structure",
+            lifecycle="revisable",
+            edition_id=_edition(99),
+            previous=geo.editions[0].edition_id,
+            manifest_sha256="0" * 64,
+            schema_version=SCHEMA_VERSION,
+            embargo=False,
+            now=_NOW,
+            artefacts={GEO: full("g2")},
+        )
+        cat.keep("structure-geo", filled)
+        _, table = cat.seal("table-a", "data", {GEO: cut("g1")}, filled=True)
+        cat.keep("table-a", table)
+        reads: list[str] = []
+
+        def recording(product: str, edition: str, sha: str) -> Mapping[str, PartialRecord]:
+            reads.append(edition)
+            return cat.read(product, edition, sha)
+
+        assert [s.urn for s in cross_product.stale_editions(cat.full(), recording)] == [GEO]
+        assert cross_product.homeless_partials(cat.full(), recording) == []
+        superseded = geo.editions[0].edition_id
+        assert cross_product.cited_structures(cat.full(), recording) == {("structure-geo", superseded)}
+        assert set(reads) == {superseded}, "only the structure entry recorded before Phase 5 is read"
+
+
+_SHAPE = CodrShape(geography_codes=6, geography_depth=2, classification_codes=(3, 3, 3), observations=4)
+
+
+def test_a_seal_reads_no_manifest_of_another_products_filled_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every entry of a catalog sealed from Phase 5 on is filled, so a seal reads its own manifest alone."""
+    root = tmp_path / "catalog"
+    with sc.Catalog.create(root) as cat:
+        testing.codr_structures(cat, seed=1, shape=_SHAPE)
+        testing.codr_product(cat, "table-a", seed=1, shape=_SHAPE)
+        reads: list[str] = []
+        real = cross_product.ManifestArtefacts.__call__
+
+        def recording(
+            self: cross_product.ManifestArtefacts, product: str, edition: str, sha: str
+        ) -> Mapping[str, PartialRecord]:
+            reads.append(product)
+            return real(self, product, edition, sha)
+
+        monkeypatch.setattr(cross_product.ManifestArtefacts, "__call__", recording)
+        edition = testing.codr_product(cat, "table-b", seed=1, shape=_SHAPE)
+
+    assert edition.product_id == "table-b"
+    assert reads, "the commit reads the incoming manifest"
+    assert set(reads) == {"table-b"}

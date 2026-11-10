@@ -118,10 +118,17 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 - `settle_journal(writer, product_dir, product_id, lifecycle, *,
   exclude=())` applies the journal rule catalog-wide (`_Repair` runs the
   publish checks and the one commit, with each edition's `routing_fields`);
-  `recorded_routing(fields, kind)` gives `record` both routing fields, and
-  `artefacts` for a structure edition only; `record_journalled(...)` is its pure
+  `recorded_routing(fields)` gives `record` both routing fields and
+  `artefacts`, for every kind (GH-125 part 4); `record_journalled(...)` is its pure
   part per product, taking each entry as `(JournalEntry, manifest_sha256,
   schema_version, kind)`.
+- `fold_lifecycle(leaf, manifest) -> Lifecycle`: the lifecycle the release
+  job's fold records an uploaded edition with (Phase 5 D3, spec §11.2 step 2):
+  the leaf's when the head records the product and the `statcat` section's
+  `lifecycle` is absent or equal; the section's for a product the head does
+  not record. A different value, or none for a new product, raises
+  `InventoryRuleError(rule="lifecycle")`, the second naming statcatlib 0.17.
+  `tests/stores/_stores.py`'s `record_uploaded` uses it until the fold exists.
 - `Planned(product_id, edition_id, leaf, read=None)` and
   `precheck_refusals(writer, full, planned, fixed=())`: the seal's
   cross-product pre-check over provisional leaves, each working copy's
@@ -160,8 +167,8 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `InventoryStorage`; `storage`; `root` (a `TypeError` on a storage that is not
   local); `artefacts` (the
   reader the rules use; `cross_product.ManifestArtefacts(root)` by default on a
-  directory, and on any other storage a reader raising `NotImplementedError`
-  naming Phase 5);
+  directory, and `cross_product.ManifestArtefacts(storage.read)` on any other
+  storage);
   `catalog_document()`, `has_version()`, `full() -> FullInventory | None`,
   `head() -> Root | None`, `write_catalog_json(*, catalog_id=None)`,
   `check_writable(base, *, now=None) -> CatalogDocument` (the two stage-1
@@ -247,6 +254,12 @@ version, when `lazy import` (PEP 810) can replace them.
 
 Imports only sdmxlib, so `inventory.py` can import it.
 
+- `_records(product_id, entry, artefacts, *, incoming)`: where every read site
+  takes an entry's records (Phase 5 D6). An incoming entry's come from
+  *artefacts*, which reads its manifest and checks its SHA-256 (spec §6.5 item
+  2); any other entry's from `entry.artefacts` when filled, else from
+  *artefacts*. `refusals`, `stale_editions`, `homeless_partials`,
+  `cited_structures` and `working_copy`'s `_may_be_refused` call it.
 - `refusals(full, leaves, artefacts) -> dict[str, Refusal]`: the rules over
   the version *leaves* would write on *full*, for each incoming entry (one
   that becomes live or embargoed, `incoming(full, leaves)`), comparing
@@ -255,10 +268,13 @@ Imports only sdmxlib, so `inventory.py` can import it.
   message)`.
 - `type Artefacts = Callable[[str, str, str], Mapping[str, PartialRecord]]`:
   `(product, edition, manifest_sha256)` to the edition's full artefacts and
-  its partials that record a `partial_of`. `ManifestArtefacts(root)` reads
-  `manifest.json`, checks its SHA-256 (`ManifestError` otherwise) and caches
-  by `(edition_id, sha)`; `StoreArtefacts(edition_id, read, *, fallback)`
-  answers one working copy's edition with `read()` and the rest with
+  its partials that record a `partial_of`. `ManifestArtefacts(source: Path |
+  Fetch)` reads `products/<p>/<e>/manifest.json` from a catalog directory, or
+  through an `sdmxlib.inventory.Fetch` such as `InventoryStorage.read`, checks
+  its SHA-256 and decodes it with `decode_manifest` (`ManifestError` for an
+  absent, unreadable, mismatched or malformed manifest; a fetch's own error,
+  such as `BlobStoreError`, propagates) and caches by `(edition_id, sha)`;
+  `StoreArtefacts(edition_id, read, *, fallback)` answers one working copy's edition with `read()` and the rest with
   *fallback*. The conversion is `sdmxlib.inventory.manifest_records`.
 - `StaleEdition` and `stale_editions(full, artefacts)`: each live or
   embargoed data edition and URN whose fingerprint (a partial's
@@ -364,7 +380,7 @@ Imports only sdmxlib, so `inventory.py` can import it.
   says a rule could refuse it; `_own_artefacts` fingerprints the store's
   artefacts as the seal does, each partial's `partial_of` from `_cuts`),
   whose `CrossProductRuleError` leaves the working copy open; rebuild the search index and `drop_carried`;
-  `catalog_section(store, kind=...)`; read `_meta.partial_of`, kept to the
+  `catalog_section(store, kind=..., lifecycle=...)`; read `_meta.partial_of`, kept to the
   URNs `sdmx.artefact` holds as partials; close the store and registry;
   `sdmxlib.edition.seal(partial_of=...)`, which writes the journal entry and
   then the manifest, and carries the previous manifest's `partial_of` for a
@@ -467,9 +483,18 @@ Imports only sdmxlib, so `inventory.py` can import it.
   and a `MemoryStore` without one refuses. `actor()` resolves once: the `oid` of
   a `TokenIdentity` on the store, else `actor=`, else
   `InventoryWriteRefusedError`.
-- A blob `commit` with an incoming entry and no `artefacts=` raises
-  `NotImplementedError` naming Phase 5 from `_refuse`, before the rules read
-  every leaf. `check_writable` refuses a 2.x `catalog.json` on blob as on disk.
+- Every entry a seal, a batched seal or the journal repair records carries
+  `dataflows`, `pull_bytes` and `artefacts` equal to its manifest's
+  `routing_fields`, data and structure editions alike (GH-125 part 4). The
+  cross-product rules take an incoming entry's records from its manifest, after
+  the SHA-256 check, and never from its leaf entry, so no edition becomes live
+  or embargoed on a manifest the Inventory does not record; another product's
+  filled entry is read from its leaf, and an entry recorded before 0.17 from its
+  manifest (`cross_product._records`).
+- A blob `commit` with an incoming entry runs the rules through
+  `ManifestArtefacts(storage.read)`: each incoming manifest is fetched and
+  checked, and an absent one raises `ManifestError` before anything is
+  written. `check_writable` refuses a 2.x `catalog.json` on blob as on disk.
 - Structural queries read sdmxlib's tables by JOIN, and this package keeps no copy of codes or hierarchies. The filter SQL, including hierarchy descent over `hierarchy_applicability`, is built in `../query.py`; `store.py` compiles it through `_QueryContext`. An absent `sdmx` reference is `NULL`, never `''`.
 - `include()` accepts only names in `VALID_INCLUDE_RELS` and raises `ValueError` otherwise. Unloaded fields hold a per-field cached sentinel whose `__bool__` is `False` and whose attribute, iteration, `len` or index access raises `NotLoadedError`. A NULL foreign key yields `None` regardless of `include()`. `get()` always loads every relationship.
 - Every public `lang` parameter and `.lang()` setter passes its tag through `sdmxlib.normalize_tag` once on entry; a malformed tag raises `sdmxlib.InvalidTagError`. Internal helpers trust the value. `add_language_alternates` stores each tag as `normalize_tag` spells it.

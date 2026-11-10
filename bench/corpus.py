@@ -21,8 +21,13 @@ each process (`install_meter`); the library holds no measuring hook.
 
 At the size reached it also records a `Catalog.seal` of a small batch (warm,
 then cold) and `CatalogAdmin.release` of embargoed editions (the first in a
-new process reads every manifest; the second, through the same
+new process reads every manifest it needs; the second, through the same
 `CatalogAdmin`, reads its warm cache).
+
+From statcatlib 0.17 every leaf entry carries its artefact records, and the
+rules read the manifest of the incoming edition and of each entry recorded
+before 0.17 only (Phase 5 D6), so a corpus built with 0.17 shows one manifest
+read a seal.
 
 Usage, from the repository root:
 
@@ -328,8 +333,8 @@ def cold_batch(root: Path, product_ids: list[str], seed: int, shape: CodrShape) 
 def cold_releases(root: Path, product_ids: list[str]) -> Record:
     """Release each product's embargoed edition through one `CatalogAdmin`, in this process.
 
-    A new process runs it: the first release reads every manifest, and the
-    next ones read the admin's warm cache.
+    A new process runs it: the first release reads every manifest it needs,
+    and the next ones read the admin's warm cache.
     """
     install_meter()
     admin = CatalogAdmin.open(root)

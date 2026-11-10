@@ -14,17 +14,19 @@ from pathlib import Path
 from typing import Any
 
 import attrs
+import msgspec
 import polars as pl
 import pytest
 import sdmxlib
 import sdmxlib.edition
 from sdmxlib import InternationalString, Ref
-from sdmxlib.inventory import Current, encode, sha256_hex
+from sdmxlib.inventory import Current, PartialRecord, encode, sha256_hex
 from typer.testing import CliRunner
 
 import statcatlib as sc
 from statcatlib import diagnostics, testing
 from statcatlib.cli import app
+from statcatlib.store.inventory import InventoryWriter
 from statcatlib.testing import STRUCTURE_PRODUCTS, CodrShape
 from tests.conftest import concept_of
 
@@ -151,6 +153,30 @@ def test_a_skipped_root_exits_1_and_names_it(root: Path) -> None:
     code, output = _verify(root)
     assert code == 1, output
     assert "FAIL inventory/000000000003.json:" in output
+
+
+def test_a_data_entry_whose_artefacts_differ_from_its_manifest_exits_1_and_names_its_leaf(root: Path) -> None:
+    """GH-125 part 4: a data entry carries its manifest's artefact records, and verify-catalog checks them."""
+    writer = InventoryWriter(root)
+    full = writer.full()
+    assert full is not None
+    leaf = full.leaf("p")
+    (entry,) = leaf.editions
+    assert entry.artefacts, "a data entry is filled"
+    urn = next(iter(entry.artefacts))
+    edited = msgspec.structs.replace(
+        leaf,
+        editions=(
+            msgspec.structs.replace(entry, artefacts={**entry.artefacts, urn: PartialRecord(fingerprint="0" * 64)}),
+        ),
+    )
+    written = writer.try_commit(full.root, {"p": edited}, kind="correct", reason="an edit").products["p"].leaf
+
+    code, output = _verify(root)
+
+    assert code == 1, output
+    assert f"FAIL {written}:" in output
+    assert "artefacts differ from its manifest's records" in output
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,36 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## Next release: artefact records in every leaf entry, and the section's `lifecycle`
+
+No catalog is rebuilt, and statcatlib still requires `sdmxlib>=0.87,<0.88`.
+
+Every leaf entry a seal, a batched seal or the journal repair records now carries
+`artefacts`, its manifest's artefact records, for data editions as well as structure
+editions. A data entry with ten records grows from about 665 to about 2,600 bytes. An
+entry recorded earlier keeps no records until its product records again. The
+cross-product rules read another product's filled entry from its leaf, and read the
+manifest of the incoming edition and of each unfilled entry, so a seal on a catalog
+recorded with this release reads one manifest. `statcat verify-catalog` checks a data
+entry's records against its manifest, as it checks a structure entry's.
+
+The seal writes the product's lifecycle into the manifest's `statcat` section as
+`lifecycle` (`"final"` or `"revisable"`). The section format stays `3`, and
+`check_catalog` refuses another value. Phase 5's release job records a product the
+Inventory does not record yet with that lifecycle, so an edition of a new product
+sealed with 0.16 or earlier is refused there; seal it again with this release.
+[The catalog format](catalog-format.md#31-versions) lists the rule.
+
+`statcatlib.bundle.catalog_section(store, *, kind="data", lifecycle)` takes the
+lifecycle as a required keyword.
+
+An `InventoryWriter` over object storage reads each incoming manifest through the
+storage (`cross_product.ManifestArtefacts(storage.read)`), so a `commit` with an entry
+that becomes live or embargoed runs the cross-product rules in place of raising
+`NotImplementedError`. A missing manifest raises `sdmxlib.edition.ManifestError`.
+`cross_product.ManifestArtefacts` takes a catalog directory or an
+`sdmxlib.inventory.Fetch`.
+
 ## 0.16.1: `statcat upload` refuses more `obstore` variables
 
 `statcat upload` exits 2 when `AZURE_STORAGE_USE_EMULATOR`,

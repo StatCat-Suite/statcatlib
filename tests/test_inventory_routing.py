@@ -1,9 +1,10 @@
-"""The routing fields each recorded leaf entry carries (Inventory routing fields, GH-98).
+"""The routing fields and artefact records each recorded leaf entry carries (GH-98, GH-125 part 4).
 
-A seal and the journal repair record ``dataflows`` and ``pull_bytes`` for every
-edition and ``artefacts`` for a structure edition, from the edition's manifest.
-A rollback and a reinstate keep them, and ``statcat verify-catalog`` detects an
-edited field.
+A seal, a batched seal and the journal repair record ``dataflows``,
+``pull_bytes`` and ``artefacts`` for every edition, data and structure, from
+the edition's manifest. A rollback and a reinstate keep them, and ``statcat
+verify-catalog`` detects an edited field. `tests/stores/test_upload_store.py`
+checks the same for `record_uploaded`, the fold's stand-in.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from statcatlib import diagnostics, testing
 from statcatlib.cli import app
 from statcatlib.store.inventory import Change, InventoryWriter
 from statcatlib.testing import STRUCTURE_PRODUCTS, CodrShape
-from tests.conftest import concept_of
+from tests.conftest import GEO, GEO_HIERARCHY, concept_of, structure_source
 
 pytestmark = pytest.mark.integration
 
@@ -100,17 +101,19 @@ def structure_catalog(tmp_path: Path) -> tuple[Path, str]:
 
 
 class TestRecorded:
-    def test_a_data_edition_records_both_routing_fields_and_no_artefacts(
+    def test_a_data_edition_records_both_routing_fields_and_its_artefacts(
         self, data_catalog: tuple[Path, str, str]
     ) -> None:
         root, edition_id, urn = data_catalog
         entry = _entries(root, "p")[edition_id]
-        expected = routing_fields(_manifest(root, "p", edition_id))
+        manifest = _manifest(root, "p", edition_id)
+        expected = routing_fields(manifest)
         assert entry.has_routing
         assert entry.dataflows == expected.dataflows == (urn,)
         assert entry.pull_bytes == expected.pull_bytes
         assert expected.pull_bytes > 0
-        assert entry.artefacts is None
+        assert entry.artefacts == manifest_records(manifest)
+        assert entry.artefacts
 
     def test_a_structure_edition_records_its_artefacts_and_no_dataflow(
         self, structure_catalog: tuple[Path, str]
@@ -124,13 +127,16 @@ class TestRecorded:
             assert entry.artefacts == manifest_records(manifest)
             assert entry.artefacts
 
-    def test_a_batched_data_edition_records_no_artefacts(self, structure_catalog: tuple[Path, str]) -> None:
+    def test_a_batched_data_edition_records_its_artefacts(self, structure_catalog: tuple[Path, str]) -> None:
         root, edition_id = structure_catalog
         entry = _entries(root, "table-a")[edition_id]
+        manifest = _manifest(root, "table-a", edition_id)
         assert entry.has_routing
         assert isinstance(entry.dataflows, tuple)
         assert len(entry.dataflows) == 1
-        assert entry.artefacts is None
+        records = manifest_records(manifest)
+        assert entry.artefacts == records
+        assert any(record.partial_of is not None for record in records.values()), "a table holds partials"
 
     def test_a_journal_repair_records_them(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A seal killed before its record: the next working copy records the edition with its routing fields."""
@@ -155,9 +161,39 @@ class TestRecorded:
         with sc.Catalog.create(root, exist_ok=True) as cat:
             cat.product("p").working_copy().discard()
         entry = _entries(root, "p")[edition_id]
+        manifest = _manifest(root, "p", edition_id)
         assert entry.dataflows == (urn,)
-        assert entry.pull_bytes == routing_fields(_manifest(root, "p", edition_id)).pull_bytes
-        assert entry.artefacts is None
+        assert entry.pull_bytes == routing_fields(manifest).pull_bytes
+        assert entry.artefacts == manifest_records(manifest)
+        assert entry.artefacts
+
+    def test_a_journal_repair_records_a_structure_editions_artefacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A structure seal killed before its record: the next working copy records it with its artefact records."""
+
+        class Killed(BaseException):
+            """The process died here."""
+
+        root = tmp_path / "catalog"
+        product = "structure-geo"
+        with structure_source(tmp_path / "source") as source, sc.Catalog.create(root) as cat:
+            wc = cat.product(product).working_copy(kind="structure")
+            wc.fill_structures(source, artefacts=[GEO.urn, GEO_HIERARCHY.urn])
+            edition_id = wc.edition_id
+
+            def killed(_change: object, **_kwargs: object) -> None:
+                raise Killed
+
+            with monkeypatch.context() as patched:
+                patched.setattr(wc._writer, "commit", killed)
+                with pytest.raises(Killed):
+                    wc.seal()
+        with sc.Catalog.create(root, exist_ok=True) as cat:
+            cat.product(product).working_copy(kind="structure").discard()
+        entry = _entries(root, product)[edition_id]
+        assert entry.artefacts == manifest_records(_manifest(root, product, edition_id))
+        assert entry.artefacts
 
 
 class TestKept:
@@ -179,9 +215,13 @@ class TestKept:
             assert after[edition_id].dataflows == before[edition_id].dataflows
             assert after[edition_id].pull_bytes == before[edition_id].pull_bytes
             assert after[edition_id].has_routing
+            assert after[edition_id].artefacts == before[edition_id].artefacts
 
     def test_a_reinstated_entry_keeps_them(self, tmp_path: Path) -> None:
-        """statcatlib's admin has no reinstate yet (GH-98), so the writer commits sdmxlib's rule directly."""
+        """statcatlib's admin has no reinstate yet (GH-130), so the writer commits sdmxlib's rule directly.
+
+        ``reinstate(artefacts=)`` keeps the artefact records (GH-125 part 4), as GH-130's reinstate will pass them.
+        """
         root = tmp_path / "catalog"
         with sc.Catalog.create(root) as cat:
             wc = cat.product("p").working_copy()
@@ -215,6 +255,7 @@ class TestKept:
                 now=now,
                 dataflows=fields.dataflows,
                 pull_bytes=fields.pull_bytes,
+                artefacts=fields.artefacts,
             )
             return Change(leaves={"p": leaf}, retired=stones)
 
@@ -222,6 +263,8 @@ class TestKept:
         entry = _entries(root, "p")[first.edition_id]
         assert entry.state == "superseded"
         assert (entry.dataflows, entry.pull_bytes) == (recorded.dataflows, recorded.pull_bytes)
+        assert entry.artefacts == recorded.artefacts == fields.artefacts
+        assert entry.artefacts
 
 
 class TestVerify:

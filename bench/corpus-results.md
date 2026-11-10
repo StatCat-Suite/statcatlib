@@ -6,6 +6,13 @@ data products, short of 7,000, because the full corpus needs about 117 GB
 of disk and the brief capped it at 50 GB. The numbers at 7,000 are
 extrapolated from the samples.
 
+From statcatlib 0.17 (Phase 5 Part 1, GH-52) every leaf entry carries its
+manifest's artefact records, and the cross-product rules read another
+product's filled entry from its leaf. The manifest reads and the cold rules
+times below describe the manifest path the rules took before that: a corpus
+built with 0.17 reads one manifest a seal, the incoming edition's, plus one
+for each entry recorded before 0.17.
+
 ## Machine and versions
 
 | | |

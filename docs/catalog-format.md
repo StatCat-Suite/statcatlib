@@ -58,11 +58,12 @@ not repeated here.
   root records `null` and its products. A root an earlier statcatlib wrote has
   neither field, and the next root links it the same way.
 - Every leaf entry a statcatlib of this format records carries `dataflows`,
-  its manifest's binding URNs sorted and without duplicates, and `pull_bytes`,
-  the size of its `required`-tier files. A structure edition's entry also
-  carries `artefacts`, its manifest's records. A data edition's entry leaves
-  `artefacts` out. An entry without the fields is read from its manifest, and
-  `statcat verify-catalog` checks each filled field against the manifest.
+  its manifest's binding URNs sorted and without duplicates, `pull_bytes`,
+  the size of its `required`-tier files, and `artefacts`, its manifest's
+  artefact records. statcatlib 0.17 fills `artefacts` for data and structure
+  editions; 0.14 to 0.16 filled it for structure editions only. An entry
+  without the fields is read from its manifest, and `statcat verify-catalog`
+  checks each filled field against the manifest.
 - `created_at` is at least the base version's plus 1 ms, and a writer refuses
   a base version more than 5 minutes ahead of its clock. A writer of this
   format takes no catalog lock, so it refuses a `catalog.json` at format 2.x.
@@ -216,7 +217,8 @@ languages, the section is:
 {
   "format": 3,
   "kind": "data",
-  "statcatlib_version": "0.12.0",
+  "lifecycle": "revisable",
+  "statcatlib_version": "0.17.0",
   "datasets": 1,
   "search": {
     "index_version": 3,
@@ -239,6 +241,7 @@ languages, the section is:
 | --- | --- | --- |
 | `format` | required | The section format: `3` for this page. |
 | `kind` | required | The product's kind: `"data"`, or `"structure"` for a structure product, which holds full artefacts only (§3.2). |
+| `lifecycle` | optional | The product's lifecycle: `"final"` or `"revisable"`, the one the seal compacted the edition by. statcatlib 0.17 and later write it. |
 | `statcatlib_version` | required | The version of statcatlib that wrote the section. |
 | `datasets` | required | How many rows `statcat.dataset` holds. |
 | `search` | required | The search index: a `SearchSection`, or `null` when the edition has no `search/`. |
@@ -265,6 +268,24 @@ Format 2 added `search.annotations`. Format 3 added `kind`. A reader that
 checks the section (`check_catalog`) MUST refuse a format other than the one
 it reads, and statcatlib reads exactly `3`. A reader that only opens the
 catalog MAY ignore the section; `Product.view` does not read it.
+
+statcatlib 0.17 added `lifecycle` to format 3 as an optional key, so the
+format stays `3` and an edition sealed earlier has none. A reader that checks
+the section MUST refuse a `lifecycle` other than `"final"` or `"revisable"`.
+The release job's fold (sharded catalog specification §11.2 step 2) records an
+uploaded edition with a lifecycle:
+
+| The Inventory records the product | Section `lifecycle` | The fold records |
+| --- | --- | --- |
+| yes | absent | the leaf's |
+| yes | equal to the leaf's | the leaf's |
+| yes | different | nothing: the registration is refused, rule `lifecycle`, naming both |
+| no | `"final"` or `"revisable"` | the section's |
+| no | absent | nothing: the registration is refused, rule `lifecycle`; seal the edition with statcatlib 0.17 or later |
+
+A product keeps the lifecycle it was first recorded with, so the third row is
+the only guard against a relabel. `statcatlib.store.working_copy.fold_lifecycle`
+applies the table.
 
 A `structure` edition holds full SDMX structures and no observations: a
 reader MUST refuse one whose manifest binds a dataflow to observations, or
@@ -309,9 +330,15 @@ artefact.
 | 4 | a data edition entering `live`, full artefact with no structure home | another data product's edition, live once the version is written, holds another fingerprint | `full-artefacts` |
 | 8 | a data edition entering `live`, full artefact with a home, or partial | only an embargoed home edition holds its fingerprint | `publish-order` |
 
-The rules read each edition's artefacts from its `manifest.json`, after
-checking the file's SHA-256 against the Inventory's `manifest_sha256`. A
-partial with no `partial_of` is skipped. A refusal raises
+The rules read an incoming edition's artefacts from its `manifest.json`,
+after checking the file's SHA-256 against the Inventory's `manifest_sha256`
+(specification §6.5 item 2), whether or not its leaf entry is filled. They
+read every other edition's from its leaf entry's `artefacts` when the writer
+filled it (§1), and from its manifest otherwise, so a seal on a catalog
+recorded with statcatlib 0.17 reads one manifest, the incoming edition's.
+On object storage the writer reads each manifest through the storage, and a
+missing one raises `ManifestError`. A partial with no `partial_of` is
+skipped. A refusal raises
 `CrossProductRuleError`, naming the rule, the item, the URN and the editions
 compared.
 
