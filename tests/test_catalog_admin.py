@@ -284,6 +284,31 @@ class TestFastForward:
         assert caught.value.rule == "if-live"
 
 
+class TestManifestOfTheReleasedEdition:
+    """Phase 5 Goal 2: no edition goes live with a manifest the Inventory does not record, its entry filled or not."""
+
+    @pytest.mark.parametrize("damage", ["altered", "removed"])
+    def test_a_release_is_refused_with_manifest_error_and_writes_nothing(
+        self, root: Path, embargoed: tuple[CatalogAdmin, sc.Edition, sc.Edition], damage: str
+    ) -> None:
+        admin, _, b = embargoed
+        full = FullInventory(local_fetch(root)).refresh()
+        (entry,) = [e for e in full.entries("p") if e.edition_id == b.edition_id]
+        assert entry.artefacts is not None, "the entry is filled, and the release still reads the manifest"
+        manifest = root / "products" / "p" / b.edition_id / sdmxlib.edition.MANIFEST_NAME
+        if damage == "altered":
+            manifest.write_bytes(manifest.read_bytes() + b" ")
+        else:
+            manifest.unlink()
+        seq = _newest(root).seq
+
+        with pytest.raises(sdmxlib.edition.ManifestError, match=b.edition_id):
+            admin.release("p", b.edition_id, reason="release B")
+
+        assert _newest(root).seq == seq
+        assert _states(admin)[b.edition_id] == "embargoed"
+
+
 class TestWithdrawnStaysWithdrawn:
     """RFC D14."""
 

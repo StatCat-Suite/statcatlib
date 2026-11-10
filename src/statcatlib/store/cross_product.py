@@ -33,28 +33,32 @@ structure edition holds full, after its structure home drops the URN.
 edition's release, and `homeless_partials` lists each such partial for
 ``statcat doctor``.
 
-The rules read an edition's artefacts through an `Artefacts` callable:
-`ManifestArtefacts` reads sealed manifests, and `StoreArtefacts` answers for
-a working copy that is not sealed yet, for the seal's pre-check. This module
-depends on sdmxlib only; `statcatlib.store.inventory.InventoryWriter` turns
-each `Refusal` into a `CrossProductRuleError`.
+The rules take an incoming entry's artefacts from its manifest, through an
+`Artefacts` callable, which checks the manifest's SHA-256 against the entry's
+(specification §6.5 item 2). Every other entry's come from the leaf entry's
+``artefacts`` when the writer filled them, and from the callable otherwise
+(`_records`). `ManifestArtefacts` reads sealed manifests, from a catalog
+directory or through a `sdmxlib.inventory.Fetch`, and `StoreArtefacts` answers
+for a working copy that is not sealed yet, for the seal's pre-check. This
+module depends on sdmxlib only; `statcatlib.store.inventory.InventoryWriter`
+turns each `Refusal` into a `CrossProductRuleError`.
 """
 
 from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from attrs import frozen
-from sdmxlib.edition import MANIFEST_NAME, ManifestError, read_manifest
-from sdmxlib.inventory import manifest_records
+from sdmxlib.edition import MANIFEST_NAME, ManifestError, decode_manifest
+from sdmxlib.inventory import local_fetch, manifest_records
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
-    from pathlib import Path
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
-    from sdmxlib.inventory import FullInventory, Kind, Leaf, LeafEntry, PartialRecord, State
+    from sdmxlib.inventory import Fetch, FullInventory, Kind, Leaf, LeafEntry, PartialRecord, State
 
 __all__ = [
     "ACTIVE",
@@ -125,18 +129,23 @@ class _Held:
 class ManifestArtefacts:
     """The `Artefacts` reader over sealed manifests, ``products/<product>/<edition>/manifest.json``.
 
-    It compares the manifest's SHA-256 with the one the Inventory records
-    (specification §6.3) before it parses it, and caches each edition's
-    records by ``(edition_id, manifest_sha256)`` for its own life.
+    It reads a catalog directory, or any storage through a
+    `sdmxlib.inventory.Fetch`, such as `InventoryStorage.read`. It compares
+    the manifest's SHA-256 with the one the Inventory records (specification
+    §6.3) before it parses it, and caches each edition's records by
+    ``(edition_id, manifest_sha256)`` for its own life.
     """
 
-    def __init__(self, root: Path) -> None:
-        """Read the manifests of the catalog at *root*.
+    def __init__(self, source: Path | Fetch) -> None:
+        """Read the manifests of the catalog *source* holds.
 
         Args:
-            root: The catalog directory.
+            source: The catalog directory, or a `Fetch` that returns the
+                bytes at a path under the catalog root, or ``None`` when the
+                path is absent.
         """
-        self._root = root
+        self._root: Path | None = source if isinstance(source, Path) else None
+        self._fetch: Fetch = local_fetch(source) if isinstance(source, Path) else source
         self._cache: dict[tuple[str, str], dict[str, PartialRecord]] = {}
 
     def __call__(self, product_id: str, edition_id: str, manifest_sha256: str) -> Mapping[str, PartialRecord]:
@@ -153,19 +162,24 @@ class ManifestArtefacts:
         Raises:
             ManifestError: The manifest is missing, unreadable, or not the one
                 the Inventory records; the rules refuse to reason about it.
+
+        A `Fetch` that fails, such as with
+        `statcatlib.store.blob.BlobStoreError`, raises its own error.
         """
         key = (edition_id, manifest_sha256)
         held = self._cache.get(key)
         if held is not None:
             return held
-        edition_dir = self._root / "products" / product_id / edition_id
+        path = f"products/{product_id}/{edition_id}/{MANIFEST_NAME}"
+        unreadable = f"{product_id}/{edition_id}: the Inventory records the edition, and its manifest cannot be read"
         try:
-            raw = (edition_dir / MANIFEST_NAME).read_bytes()
+            raw = self._fetch(path)
         except OSError as exc:
-            msg = (
-                f"{product_id}/{edition_id}: the Inventory records the edition, and its manifest cannot be read: {exc}"
-            )
+            msg = f"{unreadable}: {exc}"
             raise ManifestError(msg) from exc
+        if raw is None:
+            msg = f"{unreadable}: {path} is absent"
+            raise ManifestError(msg)
         digest = hashlib.sha256(raw).hexdigest()
         if digest != manifest_sha256:
             msg = (
@@ -173,7 +187,8 @@ class ManifestArtefacts:
                 f"{manifest_sha256}; run statcat verify-catalog"
             )
             raise ManifestError(msg)
-        found = manifest_records(read_manifest(edition_dir))
+        source = path if self._root is None else self._root / path
+        found = manifest_records(decode_manifest(raw, source))
         self._cache[key] = found
         return found
 
@@ -245,11 +260,38 @@ def _active(planned: Mapping[str, Leaf], kind: Kind) -> list[tuple[str, LeafEntr
     ]
 
 
-def _homes(structures: Iterable[tuple[str, LeafEntry]], artefacts: Artefacts) -> dict[str, list[_Held]]:
+def _records(product_id: str, entry: LeafEntry, artefacts: Artefacts, *, incoming: bool) -> Mapping[str, PartialRecord]:
+    """An entry's artefact records: the one place the rules get them (GH-125 part 4).
+
+    An incoming entry's come from *artefacts*, which reads its manifest and
+    checks its SHA-256 (specification §6.5 item 2), so no edition becomes
+    live or embargoed on a manifest the Inventory does not record. Any other
+    entry's come from ``entry.artefacts`` when the writer filled them, and
+    from *artefacts* otherwise.
+
+    Args:
+        product_id: The entry's product.
+        entry: The leaf entry.
+        artefacts: The reader for an incoming or unfilled entry.
+        incoming: Whether the entry becomes ``live`` or ``embargoed`` in
+            the version being written.
+
+    Returns:
+        The edition's artefacts, by URN.
+    """
+    if not incoming and entry.artefacts is not None:
+        return entry.artefacts
+    return artefacts(product_id, entry.edition_id, entry.manifest_sha256)
+
+
+def _homes(
+    structures: Iterable[tuple[str, LeafEntry]], artefacts: Artefacts, entering: Collection[tuple[str, str]] = ()
+) -> dict[str, list[_Held]]:
     """Each URN the structure entries hold as a full artefact, with the entries that hold it."""
     homes: dict[str, list[_Held]] = defaultdict(list)
     for product_id, entry in structures:
-        for urn, held in artefacts(product_id, entry.edition_id, entry.manifest_sha256).items():
+        records = _records(product_id, entry, artefacts, incoming=(product_id, entry.edition_id) in entering)
+        for urn, held in records.items():
             if held.partial_of is None:
                 homes[urn].append(_Held(product_id, entry, held.fingerprint))
     return homes
@@ -266,14 +308,18 @@ def _short(fingerprint: str) -> str:
 class _Rules:
     """The rules over one planned version; `refusals` builds one."""
 
-    def __init__(self, planned: Mapping[str, Leaf], artefacts: Artefacts) -> None:
+    def __init__(
+        self, planned: Mapping[str, Leaf], artefacts: Artefacts, entering: Collection[tuple[str, str]]
+    ) -> None:
         self._artefacts = artefacts
-        self._homes = _homes(_active(planned, "structure"), artefacts)
+        self._entering = entering
+        self._homes = _homes(_active(planned, "structure"), artefacts, entering)
         self._data = _active(planned, "data")
         self._live_copies: dict[str, list[_Held]] | None = None
 
     def _read(self, product_id: str, entry: LeafEntry) -> Mapping[str, PartialRecord]:
-        return self._artefacts(product_id, entry.edition_id, entry.manifest_sha256)
+        incoming = (product_id, entry.edition_id) in self._entering
+        return _records(product_id, entry, self._artefacts, incoming=incoming)
 
     def _no_home_copies(self) -> dict[str, list[_Held]]:
         """Each URN the live data entries hold full that no structure entry holds, read on first use."""
@@ -389,14 +435,16 @@ def refusals(full: FullInventory | None, leaves: Mapping[str, Leaf], artefacts: 
         the version breaks no rule, and always empty when it has no incoming
         entry, in which case no manifest is read.
 
-    *artefacts* raises sdmxlib's `ManifestError` for an edition it cannot
-    read, and it propagates.
+    Each incoming entry's artefacts are read through *artefacts*, and every
+    other entry's from its leaf entry when filled (`_records`). *artefacts*
+    raises sdmxlib's `ManifestError` for an edition it cannot read, and it
+    propagates.
     """
     entering = incoming(full, leaves)
     if not entering:
         return {}
     planned = _planned(full, leaves)
-    rules = _Rules(planned, artefacts)
+    rules = _Rules(planned, artefacts, {(product_id, entry.edition_id) for product_id, entry in entering})
     found: dict[str, Refusal] = {}
     for product_id, entry in entering:
         if product_id in found:
@@ -460,7 +508,7 @@ def stale_editions(full: FullInventory | None, artefacts: Artefacts) -> list[Sta
     homes = _homes(_active(planned, "structure"), artefacts)
     found: list[StaleEdition] = []
     for product_id, entry in _active(planned, "data"):
-        for urn, held in sorted(artefacts(product_id, entry.edition_id, entry.manifest_sha256).items()):
+        for urn, held in sorted(_records(product_id, entry, artefacts, incoming=False).items()):
             holders = homes.get(urn)
             fingerprint = held.partial_of if held.partial_of is not None else held.fingerprint
             if not holders or any(h.fingerprint == fingerprint for h in holders):
@@ -524,7 +572,7 @@ def homeless_partials(full: FullInventory | None, artefacts: Artefacts) -> list[
     return [
         HomelessPartial(product_id, entry.edition_id, entry.state, urn, held.partial_of)
         for product_id, entry in _active(planned, "data")
-        for urn, held in sorted(artefacts(product_id, entry.edition_id, entry.manifest_sha256).items())
+        for urn, held in sorted(_records(product_id, entry, artefacts, incoming=False).items())
         if held.partial_of is not None and urn not in homes
     ]
 
@@ -549,7 +597,7 @@ def cited_structures(full: FullInventory | None, artefacts: Artefacts) -> set[tu
     for product_id, entry in _active(planned, "data"):
         cuts |= {
             (urn, held.partial_of)
-            for urn, held in artefacts(product_id, entry.edition_id, entry.manifest_sha256).items()
+            for urn, held in _records(product_id, entry, artefacts, incoming=False).items()
             if held.partial_of is not None
         }
     if not cuts:
@@ -559,7 +607,7 @@ def cited_structures(full: FullInventory | None, artefacts: Artefacts) -> set[tu
         if leaf.kind != "structure":
             continue
         for entry in leaf.editions:
-            held = artefacts(product_id, entry.edition_id, entry.manifest_sha256)
+            held = _records(product_id, entry, artefacts, incoming=False)
             if any((urn, record.fingerprint) in cuts for urn, record in held.items() if record.partial_of is None):
                 cited.add((product_id, entry.edition_id))
     return cited

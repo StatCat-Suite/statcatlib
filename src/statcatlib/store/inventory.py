@@ -40,7 +40,7 @@ import socket
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from attrs import frozen
 from sdmxlib.edition import Producer
@@ -408,15 +408,6 @@ class LocalInventoryStorage:
         return _actor()
 
 
-def _no_manifest_reader(product_id: str, edition_id: str, _manifest_sha256: str) -> NoReturn:
-    """The cross-product rules' reader on a storage with no manifest reader, which Phase 5 builds (GH-52)."""
-    msg = (
-        f"{product_id}'s edition {edition_id} becomes live or embargoed, and the cross-product rules cannot read "
-        "manifests on this storage until Phase 5; use try_commit, or pass artefacts= to InventoryWriter"
-    )
-    raise NotImplementedError(msg)
-
-
 class InventoryWriter:
     """Commits Inventory versions to one catalog, through an `InventoryStorage`.
 
@@ -431,10 +422,10 @@ class InventoryWriter:
         Args:
             root: The catalog directory, or the storage that holds the catalog.
             artefacts: How the cross-product rules read an edition's
-                artefacts; a `statcatlib.store.cross_product.ManifestArtefacts`
-                over a catalog directory when ``None``. Any other storage has
-                no default reader, so a `commit` with an incoming entry raises
-                `NotImplementedError`.
+                artefacts; when ``None``, a
+                `statcatlib.store.cross_product.ManifestArtefacts` over the
+                catalog directory, or over the storage's ``read`` on any
+                other storage.
         """
         self._storage: InventoryStorage = LocalInventoryStorage(root) if isinstance(root, str | Path) else root
         self._artefacts: Artefacts
@@ -443,7 +434,7 @@ class InventoryWriter:
         elif isinstance(self._storage, LocalInventoryStorage):
             self._artefacts = cross_product.ManifestArtefacts(self._storage.root)
         else:
-            self._artefacts = _no_manifest_reader
+            self._artefacts = cross_product.ManifestArtefacts(self._storage.read)
 
     @property
     def storage(self) -> InventoryStorage:
@@ -699,13 +690,7 @@ class InventoryWriter:
         return root
 
     def _refuse(self, full: FullInventory | None, leaves: Mapping[str, Leaf]) -> None:
-        """Raise the first refused product's `CrossProductRuleError`, by product id, when the rules refuse *leaves*.
-
-        A storage with no manifest reader refuses an incoming entry here, before the rules read every leaf.
-        """
-        if self._artefacts is _no_manifest_reader:
-            for product_id, entry in cross_product.incoming(full, leaves):
-                _no_manifest_reader(product_id, entry.edition_id, entry.manifest_sha256)
+        """Raise the first refused product's `CrossProductRuleError`, by product id, when the rules refuse *leaves*."""
         found = self.refusals(full, leaves)
         if found:
             raise found[min(found)]
@@ -736,8 +721,7 @@ class InventoryWriter:
         rules cannot read raises `sdmxlib.edition.ManifestError`; neither
         writes anything. `try_commit` raises `InventoryWriteRefusedError` for a
         catalog or a base version this writer must not write on, and it
-        writes nothing either. On a storage with no manifest reader, an
-        incoming entry raises `NotImplementedError` before anything is written.
+        writes nothing either.
         """
         for _ in range(MAX_RACES):
             full = self.full()

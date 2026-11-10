@@ -114,7 +114,7 @@ def test_the_bench_records_warm_and_cold_seals_a_batch_and_a_release(
     assert by_kind["build"]["live"] == 1, "codr-1t-00001 seals under embargo"
     assert by_kind["build"]["embargoed"] == 1
     assert by_kind["warm"]["rules_calls"] >= 2, "the pre-check and the Inventory commit both run the rules"
-    assert by_kind["cold"]["reads"] >= 5, "a new process reads the 3 structure and the 2 live data manifests"
+    assert by_kind["cold"]["reads"] == 1, "a new process reads the incoming manifest alone: every entry is filled"
     assert by_kind["cold"]["read_bytes"] > 0
     assert by_kind["release-cold"]["reads"] > 0
     assert "| Data products |" in capsys.readouterr().out

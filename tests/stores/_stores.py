@@ -392,7 +392,7 @@ def record_uploaded(
     full = writer.full()
     head = None if full is None else full.root
     sha = sha256_hex((edition_dir / MANIFEST_NAME).read_bytes())
-    dataflows, pull_bytes, artefacts = recorded_routing(routing_fields(manifest), kind)
+    dataflows, pull_bytes, artefacts = recorded_routing(routing_fields(manifest))
     leaf = record(
         full.leaf(product) if full is not None and product in full.products() else None,
         product_id=product,

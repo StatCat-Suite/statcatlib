@@ -27,6 +27,7 @@ from obstore.exceptions import (
 )
 from obstore.store import AzureStore, MemoryStore, S3Store
 from pytest_httpx import HTTPXMock
+from sdmxlib.edition import MANIFEST_NAME, ManifestError
 from sdmxlib.inventory import (
     CATALOG_NAME,
     CURRENT_NAME,
@@ -717,22 +718,34 @@ class TestActor:
 
 
 class TestCommit:
-    def test_an_incoming_entry_with_no_artefacts_raises_naming_phase_5_and_reads_no_leaf(
+    """The writer's default reader on blob reads each incoming manifest through the storage (Phase 5 D6)."""
+
+    def test_an_incoming_entry_with_no_manifest_raises_manifest_error_and_writes_nothing(
         self, writer: InventoryWriter, ops: RecordingOps
     ) -> None:
         writer.try_commit(None, {"a": _leaf("a", 1), "b": _leaf("b", 2)}, kind="seal", reason="first")
         ops.reads.clear()
         ops.puts.clear()
 
-        with pytest.raises(NotImplementedError, match="Phase 5"):
+        with pytest.raises(ManifestError, match=r"products/c/.*/manifest\.json is absent"):
             writer.commit(lambda _: Change(leaves={"c": _leaf("c", 3)}), kind="seal", reason="incoming")
 
-        assert [p for p in ops.reads if p.startswith("inventory/leaves/")] == []
+        assert f"products/c/{_edition(3)}/{MANIFEST_NAME}" in ops.reads
         assert ops.puts == []
 
     def test_an_embargoed_entry_is_incoming_too(self, writer: InventoryWriter) -> None:
-        with pytest.raises(NotImplementedError, match="Phase 5"):
+        with pytest.raises(ManifestError, match="is absent"):
             writer.commit(lambda _: Change(leaves={"c": _leaf("c", 3, embargo=True)}), kind="seal", reason="incoming")
+
+    def test_a_manifest_the_entry_does_not_record_raises_manifest_error(
+        self, writer: InventoryWriter, ops: RecordingOps
+    ) -> None:
+        ops.put(f"products/c/{_edition(3)}/{MANIFEST_NAME}", b"{}")
+
+        with pytest.raises(ManifestError, match=r"Inventory records 0{64}"):
+            writer.commit(lambda _: Change(leaves={"c": _leaf("c", 3)}), kind="seal", reason="incoming")
+
+        assert not writer.has_version()
 
     def test_no_incoming_entry_commits(self, writer: InventoryWriter) -> None:
         writer.try_commit(None, {"a": _leaf("a", 1)}, kind="seal", reason="first")

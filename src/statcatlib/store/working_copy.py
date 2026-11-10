@@ -74,7 +74,7 @@ from sdmxlib.storage.schema import SCHEMA_VERSION, meta_value
 
 from statcatlib.bundle import STATCAT_SECTION, catalog_section, check_catalog, structure_content
 from statcatlib.store import schema as _catalog_schema
-from statcatlib.store.cross_product import ACTIVE, StoreArtefacts
+from statcatlib.store.cross_product import ACTIVE, StoreArtefacts, _records
 from statcatlib.store.inventory import (
     Change,
     CrossProductRuleError,
@@ -319,22 +319,23 @@ def _named(full: FullInventory | None, product_id: str, edition_id: str) -> bool
     return any(e.edition_id == edition_id for e in full.entries(product_id))
 
 
-def recorded_routing(fields: RoutingFields | None, kind: Kind) -> _Routing:
-    """What a leaf entry records of *fields*: both routing fields, and the artefact records of a structure edition.
+def recorded_routing(fields: RoutingFields | None) -> _Routing:
+    """What a leaf entry records of *fields*: both routing fields and the artefact records, for every kind.
 
-    Phase 5 extends the artefact records to data editions (GH-125 part 4).
+    Every entry carries its manifest's artefact records (GH-125 part 4), so
+    the cross-product rules read another product's filled entry without its
+    manifest (`statcatlib.store.cross_product`).
 
     Args:
         fields: The edition's `sdmxlib.inventory.routing_fields`, or ``None``
             to record none.
-        kind: The product's kind.
 
     Returns:
         ``record``'s ``dataflows``, ``pull_bytes`` and ``artefacts``.
     """
     if fields is None:
         return None, None, None
-    return fields.dataflows, fields.pull_bytes, fields.artefacts if kind == "structure" else None
+    return fields.dataflows, fields.pull_bytes, fields.artefacts
 
 
 def record_journalled(
@@ -373,7 +374,7 @@ def record_journalled(
     refused: dict[str, TransitionError] = {}
     gone = set(retired)
     for entry, sha, schema_version, kind in entries:
-        dataflows, pull_bytes, artefacts = recorded_routing((routing or {}).get(entry.edition_id), kind)
+        dataflows, pull_bytes, artefacts = recorded_routing((routing or {}).get(entry.edition_id))
         try:
             current = record(
                 current,
@@ -1660,9 +1661,7 @@ class WorkingCopy:
         own = {urn for (urn,) in cursor.execute("SELECT urn FROM sdmx.artefact").fetchall()}
         for other, leaf in others.items():
             for entry in leaf.editions:
-                if entry.state == "live" and own & set(
-                    self._writer.artefacts(other, entry.edition_id, entry.manifest_sha256)
-                ):
+                if entry.state == "live" and own & set(_records(other, entry, self._writer.artefacts, incoming=False)):
                     return True
         return False
 
@@ -1783,7 +1782,7 @@ class WorkingCopy:
         product_id, edition_id = self._product_id, self._edition_id
         leaf = full.leaf(product_id) if full is not None and product_id in full.products() else None
         retired = {t.edition_id for t in full.retired if t.product_id == product_id} if full else set()
-        dataflows, pull_bytes, artefacts = recorded_routing(sealed.routing, self._kind)
+        dataflows, pull_bytes, artefacts = recorded_routing(sealed.routing)
         try:
             return record(
                 leaf,

@@ -1,13 +1,16 @@
-"""The blob Inventory writer's behaviour on a real store's conditional headers (GH-98)."""
+"""The blob Inventory writer on a real store: its conditional headers (GH-98) and its manifest reader (GH-52)."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, override
 
 import msgspec
 import pytest
 from obstore.exceptions import AlreadyExistsError, PreconditionError
+from sdmxlib.edition import MANIFEST_NAME, ManifestError, read_manifest
 from sdmxlib.inventory import (
     CATALOG_NAME,
     CURRENT_NAME,
@@ -25,9 +28,14 @@ from sdmxlib.inventory import (
 from sdmxlib.inventory.conformance import SCHEMA_VERSION
 
 from statcatlib import InventoryWriteRefusedError
-from statcatlib.store.blob import MAX_CLOCK_SKEW, BlobInventoryStorage, BlobLocation
+from statcatlib.store.blob import MAX_CLOCK_SKEW, BlobInventoryStorage, BlobLocation, _ObjectOps
 from statcatlib.store.inventory import Change, InventoryWriter
+from statcatlib.upload import _upload
+from tests.conftest import sealed_data_edition
 from tests.stores import _stores
+
+if TYPE_CHECKING:
+    from obstore.store import ObjectStore
 
 pytestmark = pytest.mark.stores
 
@@ -77,6 +85,76 @@ class TestLostRace:
         assert not isinstance(changes, msgspec.UnsetType)
         assert [c.product_id for c in changes] == ["c"]
         assert set(root.products) == {"a", "b", "c"}
+
+
+class _Reads(_ObjectOps):
+    """Records the path of every read."""
+
+    def __init__(self, store: ObjectStore) -> None:
+        super().__init__(store)
+        self.reads: list[str] = []
+
+    @override
+    def read(self, path: str) -> tuple[bytes, str | None] | None:
+        self.reads.append(path)
+        return super().read(path)
+
+
+class TestManifestReader:
+    """A blob writer's default reader fetches each incoming manifest through the storage (Phase 5 D6)."""
+
+    @pytest.fixture
+    def reads(self, azurite: _stores.Running) -> tuple[InventoryWriter, BlobLocation, _Reads]:
+        plain = _stores.location(azurite, uuid.uuid4().hex)
+        ops = _Reads(plain.store)
+        location = BlobLocation(plain.uri, plain.store, ops=ops)
+        writer = InventoryWriter(_storage(location))
+        writer.write_catalog_json()
+        return writer, location, ops
+
+    @staticmethod
+    def _entering(edition_dir: Path) -> tuple[str, Leaf]:
+        manifest = read_manifest(edition_dir)
+        leaf = record(
+            None,
+            product_id=manifest.product_id,
+            kind="data",
+            lifecycle="revisable",
+            edition_id=manifest.edition_id,
+            previous=None,
+            manifest_sha256=sha256_hex((edition_dir / MANIFEST_NAME).read_bytes()),
+            schema_version=manifest.schema_version,
+            embargo=False,
+            now=datetime.now(UTC),
+        )
+        return manifest.product_id, leaf
+
+    def test_a_commit_with_an_incoming_entry_reads_its_manifest_and_commits(
+        self, reads: tuple[InventoryWriter, BlobLocation, _Reads], tmp_path: Path
+    ) -> None:
+        writer, location, ops = reads
+        edition_dir = sealed_data_edition(tmp_path / "catalog")
+        with _stores.KeyedRest(location) as rest:
+            _upload(edition_dir, location, rest=rest)
+        product, leaf = self._entering(edition_dir)
+        ops.reads.clear()
+
+        root = writer.commit(lambda _: Change(leaves={product: leaf}), kind="seal", reason="incoming")
+
+        assert root.seq == 1
+        assert f"products/{product}/{edition_dir.name}/{MANIFEST_NAME}" in ops.reads
+
+    def test_an_absent_manifest_raises_manifest_error_and_writes_nothing(
+        self, reads: tuple[InventoryWriter, BlobLocation, _Reads], tmp_path: Path
+    ) -> None:
+        writer, _, _ = reads
+        edition_dir = sealed_data_edition(tmp_path / "catalog")
+        product, leaf = self._entering(edition_dir)
+
+        with pytest.raises(ManifestError, match="is absent"):
+            writer.commit(lambda _: Change(leaves={product: leaf}), kind="seal", reason="incoming")
+
+        assert not writer.has_version()
 
 
 class TestOptedInCatalog:
