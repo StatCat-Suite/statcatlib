@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from sdmxlib.edition import MANIFEST_NAME, content_md5, read_manifest
 from sdmxlib.edition._write import digests_of
-from sdmxlib.inventory import Tombstone, TransitionError
+from sdmxlib.inventory import Tombstone, TransitionError, manifest_records
 
 from statcatlib.store.blob import BlobInventoryStorage, BlobLocation
 from statcatlib.store.inventory import InventoryWriter
@@ -286,6 +286,23 @@ class TestRecordUploaded:
         assert entry.state == "live"
         assert entry.manifest_sha256 == edition.manifest_sha256
         assert entry.pull_bytes is not None
+
+    def test_a_data_and_a_structure_edition_record_their_artefacts_and_lifecycle(
+        self, writer, recorded, edition_dir, tmp_path
+    ) -> None:
+        """GH-125 part 4 and Phase 5 D3: the fold's stand-in fills artefacts and takes the section's lifecycle."""
+        structure_dir = sealed_referring_edition(tmp_path / "catalog")
+        for one in (edition_dir, structure_dir):
+            edition = _stores.record_uploaded(writer, recorded, one)
+
+            full = writer.full()
+            assert full is not None
+            (entry,) = full.entries(edition.product_id)
+            manifest = read_manifest(one)
+            assert entry.artefacts == manifest_records(manifest)
+            assert entry.artefacts
+            assert full.leaf(edition.product_id).lifecycle == manifest.extensions["statcat"]["lifecycle"]
+        assert full.leaf("structure-concepts").kind == "structure"
 
     def test_a_catalog_with_embargo_on_records_it_embargoed(self, writer, recorded, edition_dir) -> None:
         writer.try_commit(None, {}, embargo=True, kind="seal", reason="embargo on")

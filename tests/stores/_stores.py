@@ -50,7 +50,7 @@ from sdmxlib.inventory import CATALOG_NAME, CURRENT_NAME, Root, record, routing_
 from statcatlib.store import blob as blob_module
 from statcatlib.store.blob import AzureBlobRest, BlobLocation, _ObjectOps, pull_edition
 from statcatlib.store.inventory import InventoryWriter
-from statcatlib.store.working_copy import Edition, edition_kind, recorded_routing
+from statcatlib.store.working_copy import Edition, edition_kind, fold_lifecycle, recorded_routing
 from statcatlib.upload import _upload
 
 if TYPE_CHECKING:
@@ -380,10 +380,13 @@ def record_uploaded(
     location: BlobLocation,
     edition_dir: Path,
     *,
-    lifecycle: Lifecycle = "revisable",
+    lifecycle: Lifecycle | None = None,
     release_at: datetime | None = None,
 ) -> Edition:
-    """Upload an edition and record it in the blob Inventory, with no cross-product rule, as the fold will (D8)."""
+    """Upload an edition and record it in the blob Inventory, with no cross-product rule, as the fold will (D8).
+
+    With no *lifecycle*, the record takes the one `fold_lifecycle` resolves, as the fold does (Phase 5 D3).
+    """
     with KeyedRest(location) as rest:
         _upload(edition_dir, location, release_at=release_at, rest=rest)
     manifest = read_manifest(edition_dir)
@@ -393,15 +396,16 @@ def record_uploaded(
     head = None if full is None else full.root
     sha = sha256_hex((edition_dir / MANIFEST_NAME).read_bytes())
     dataflows, pull_bytes, artefacts = recorded_routing(routing_fields(manifest))
+    held = full.leaf(product) if full is not None and product in full.products() else None
     leaf = record(
-        full.leaf(product) if full is not None and product in full.products() else None,
+        held,
         product_id=product,
         now=writer.storage.now(),
         kind=kind,
         previous=manifest.previous,
         schema_version=manifest.schema_version,
         edition_id=manifest.edition_id,
-        lifecycle=lifecycle,
+        lifecycle=fold_lifecycle(held, manifest) if lifecycle is None else lifecycle,
         embargo=full.embargo if full is not None else False,
         release_at=release_at,
         retired={t.edition_id for t in full.retired if t.product_id == product} if full is not None else (),

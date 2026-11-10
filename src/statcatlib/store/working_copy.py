@@ -110,6 +110,7 @@ __all__ = [
     "WorkingCopy",
     "WorkingCopyClosedError",
     "WorkingCopyExistsError",
+    "fold_lifecycle",
     "precheck_refusals",
     "settle_journal",
 ]
@@ -336,6 +337,63 @@ def recorded_routing(fields: RoutingFields | None) -> _Routing:
     if fields is None:
         return None, None, None
     return fields.dataflows, fields.pull_bytes, fields.artefacts
+
+
+def fold_lifecycle(leaf: Leaf | None, manifest: Manifest) -> Lifecycle:
+    """The lifecycle to record an uploaded edition with: specification §11.2 step 2 (S13, design D3).
+
+    The leaf's lifecycle wins for a product the Inventory records; the
+    ``lifecycle`` key of the edition's ``statcat`` section, which
+    `WorkingCopy.seal` writes from statcatlib 0.17, names it for a new
+    product. `sdmxlib.inventory.record` relabels the leaf with the lifecycle it
+    is given, so the fold runs this before it records.
+
+    | Head records the product | Section ``lifecycle`` | Result |
+    |---|---|---|
+    | yes | absent | the leaf's |
+    | yes | the leaf's | the leaf's |
+    | yes | another value | refused |
+    | no | ``final`` or ``revisable`` | the section's |
+    | no | absent or another value | refused, naming statcatlib 0.17 |
+
+    Args:
+        leaf: The product's leaf in the head, or ``None`` when the head does
+            not record the product.
+        manifest: The uploaded edition's manifest.
+
+    Returns:
+        The lifecycle to record.
+
+    Raises:
+        InventoryRuleError: With ``rule="lifecycle"``, for a refused row.
+    """
+    section = manifest.extensions.get(STATCAT_SECTION) or {}
+    given = section.get("lifecycle")
+    product_id, edition_id = manifest.product_id, manifest.edition_id
+    if leaf is not None:
+        if given is None or given == leaf.lifecycle:
+            return leaf.lifecycle
+        msg = (
+            f"{product_id}/{edition_id}: the edition's statcat section names lifecycle {given!r}, and the Inventory "
+            f"records {product_id} as a {leaf.lifecycle} product; a product keeps the lifecycle it was first "
+            "recorded with. Seal the edition again from a working copy of the recorded product"
+        )
+        raise InventoryRuleError(msg, rule="lifecycle", product=product_id, edition=edition_id)
+    match given:
+        case "final":
+            return "final"
+        case "revisable":
+            return "revisable"
+        case None:
+            named = "names no lifecycle"
+        case _:
+            named = f"names lifecycle {given!r}, which is neither final nor revisable"
+    msg = (
+        f"{product_id}/{edition_id}: the Inventory does not record {product_id}, and the edition's statcat section "
+        f"{named}, so its first record has no lifecycle. Seal it with statcatlib 0.17 or later, which writes "
+        "the lifecycle into the section"
+    )
+    raise InventoryRuleError(msg, rule="lifecycle", product=product_id, edition=edition_id)
 
 
 def record_journalled(
@@ -1728,7 +1786,7 @@ class WorkingCopy:
         """
         store = self._live()
         self._search(store)
-        section = catalog_section(store, kind=self._kind)
+        section = catalog_section(store, kind=self._kind, lifecycle=self._lifecycle)
         cursor = store._cursor()
         held = _held_partials(cursor)
         # A later fill can have replaced a cut partial by its full codelist,

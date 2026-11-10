@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     import duckdb
     from sdmxlib import EditionRegistry
-    from sdmxlib.edition import Profile
+    from sdmxlib.edition import Lifecycle, Profile
     from sdmxlib.inventory import Kind
 
     from statcatlib.store.lance import LanceIndex, LanguageLayout
@@ -71,6 +71,9 @@ STATCAT_SECTION_FORMAT = 3
 #: full artefacts and no dataflow, binding or partial (`structure_content`), so
 #: `check_catalog` refuses each of those, and a manifest binding, in one.
 PRODUCT_KINDS: tuple[str, ...] = ("data", "structure")
+
+#: The values the section's optional ``lifecycle`` takes (statcatlib 0.17, design D3).
+_LIFECYCLES: tuple[str, ...] = ("final", "revisable")
 
 _SEARCH_DIRNAME = "search"
 _INDEX_MANIFEST = "index.json"
@@ -111,18 +114,21 @@ def _search_section(store: _Store, search_dir: Path) -> dict[str, object] | None
     }
 
 
-def catalog_section(store: _Store, *, kind: Kind = "data") -> dict[str, object]:
+def catalog_section(store: _Store, *, kind: Kind = "data", lifecycle: Lifecycle) -> dict[str, object]:
     """Describe a working copy's edition, as its manifest's ``statcat`` section (format 3).
 
-    The section records the product's kind, the number of catalog datasets and, when a search index is built, its
-    index format version, embedding model, each language's row count and
-    stemmer, and the annotations it was built from. `WorkingCopy.seal`
+    The section records the product's kind and lifecycle, the number of catalog datasets and, when a search index
+    is built, its index format version, embedding model, each language's row count and stemmer, and the
+    annotations it was built from. `WorkingCopy.seal`
     computes it after rebuilding the index and before closing the store, and
     passes it to `sdmxlib.edition.seal` as ``extensions={"statcat": section}``.
 
     Args:
         store: The working copy's store, open.
         kind: The product's kind, ``data`` or ``structure``.
+        lifecycle: The product's lifecycle, ``final`` or ``revisable``: the
+            one the seal compacts by, which the release job's fold records
+            for a product the Inventory does not record yet.
 
     Returns:
         The section, ready for ``seal(extensions=...)``.
@@ -135,6 +141,7 @@ def catalog_section(store: _Store, *, kind: Kind = "data") -> dict[str, object]:
     return {
         "format": STATCAT_SECTION_FORMAT,
         "kind": kind,
+        "lifecycle": lifecycle,
         "statcatlib_version": metadata.version("statcatlib"),
         "datasets": row[0] if row else 0,
         "search": _search_section(store, search_dir) if search_dir is not None else None,
@@ -287,6 +294,8 @@ def check_catalog(root: Path, manifest: Manifest, reg: EditionRegistry, profile:
     - the section's ``kind`` is one of `PRODUCT_KINDS`, and a ``structure``
       edition binds no dataflow to observations and holds no dataflow,
       binding or partial (`structure_content`);
+    - the section's ``lifecycle``, when present, is ``final`` or
+      ``revisable``;
     - the catalog holds the datasets the section counts, and every dataset
       linked to a dataflow names one the registry holds;
     - ``search/`` is present exactly when the section declares an index;
@@ -360,6 +369,10 @@ def _section_findings(root: Path, manifest: Manifest, reg: EditionRegistry, *, i
     kind = section.get("kind")
     if kind not in PRODUCT_KINDS:
         detail = f"statcat section kind {kind!r}, not one of {', '.join(PRODUCT_KINDS)}"
+        return [Finding(STATCAT_SECTION, MANIFEST_NAME, detail)]
+    lifecycle = section.get("lifecycle")
+    if lifecycle is not None and lifecycle not in _LIFECYCLES:
+        detail = f"statcat section lifecycle {lifecycle!r}, not one of {', '.join(_LIFECYCLES)}"
         return [Finding(STATCAT_SECTION, MANIFEST_NAME, detail)]
     findings: list[Finding] = []
     if kind == "structure":

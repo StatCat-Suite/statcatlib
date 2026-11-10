@@ -179,16 +179,20 @@ are imported from `statcatlib.admin`.
 The module keeps its 0.11 name and describes editions. Imported from
 `statcatlib.bundle`; nothing here is re-exported from `statcatlib`:
 
-- `catalog_section(store: _Store, *, kind="data") -> dict`: builds the
-  `statcat` manifest section (format 3: `format`, `kind`,
+- `catalog_section(store: _Store, *, kind="data", lifecycle) -> dict`: builds the
+  `statcat` manifest section (format 3: `format`, `kind`, `lifecycle`,
   `statcatlib_version`, `datasets`, `search`) from a working copy's open
-  store. `WorkingCopy.seal` passes it to
+  store. `lifecycle` (`"final"` or `"revisable"`, from 0.17) is the one the
+  seal compacts by, which the release job's fold records for a product the
+  Inventory does not record (`store.working_copy.fold_lifecycle`). `WorkingCopy.seal` passes it to
   `sdmxlib.edition.seal(..., extensions={"statcat": ...})`. It raises
   `ValueError` when `search/` holds files and no `index.json`.
 - `check_catalog(root, manifest, reg, profile) -> list[Finding]`: the
   `statcat` check, with sdmxlib 0.80's `Check` signature, run as an extension
   of `sdmxlib.edition.check_edition`. It refuses a section format other than
-  3, a `kind` outside `PRODUCT_KINDS`, and a `structure` edition whose
+  3, a `kind` outside `PRODUCT_KINDS`, a `lifecycle` other than `final` or
+  `revisable` (an absent one passes: editions sealed before 0.17 have none),
+  and a `structure` edition whose
   manifest binds a dataflow or whose store holds a dataflow, binding or
   partial.
 - `structure_content(conn) -> list[Finding]`: one finding per `Dataflow`,

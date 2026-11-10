@@ -122,6 +122,13 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `artefacts`, for every kind (GH-125 part 4); `record_journalled(...)` is its pure
   part per product, taking each entry as `(JournalEntry, manifest_sha256,
   schema_version, kind)`.
+- `fold_lifecycle(leaf, manifest) -> Lifecycle`: the lifecycle the release
+  job's fold records an uploaded edition with (Phase 5 D3, spec §11.2 step 2):
+  the leaf's when the head records the product and the `statcat` section's
+  `lifecycle` is absent or equal; the section's for a product the head does
+  not record. A different value, or none for a new product, raises
+  `InventoryRuleError(rule="lifecycle")`, the second naming statcatlib 0.17.
+  `tests/stores/_stores.py`'s `record_uploaded` uses it until the fold exists.
 - `Planned(product_id, edition_id, leaf, read=None)` and
   `precheck_refusals(writer, full, planned, fixed=())`: the seal's
   cross-product pre-check over provisional leaves, each working copy's
@@ -373,7 +380,7 @@ Imports only sdmxlib, so `inventory.py` can import it.
   says a rule could refuse it; `_own_artefacts` fingerprints the store's
   artefacts as the seal does, each partial's `partial_of` from `_cuts`),
   whose `CrossProductRuleError` leaves the working copy open; rebuild the search index and `drop_carried`;
-  `catalog_section(store, kind=...)`; read `_meta.partial_of`, kept to the
+  `catalog_section(store, kind=..., lifecycle=...)`; read `_meta.partial_of`, kept to the
   URNs `sdmx.artefact` holds as partials; close the store and registry;
   `sdmxlib.edition.seal(partial_of=...)`, which writes the journal entry and
   then the manifest, and carries the previous manifest's `partial_of` for a

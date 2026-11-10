@@ -138,6 +138,37 @@ class TestCheckCatalog:
         (finding,) = _check(no_observations, manifest)
         assert "kind 'dataset'" in finding
 
+    def test_the_section_records_the_products_lifecycle(self, synthetic: Path, structure_edition: Path) -> None:
+        """Phase 5 D3: the fold records a new product with the section's lifecycle."""
+        assert read_manifest(synthetic).extensions[STATCAT_SECTION]["lifecycle"] == "revisable"
+        assert read_manifest(structure_edition).extensions[STATCAT_SECTION]["lifecycle"] == "revisable"
+
+    def test_a_final_products_section_records_final(self, tmp_path: Path) -> None:
+        root = tmp_path / "catalog"
+        with sc.Catalog.create(root) as cat:
+            wc = cat.product("p").working_copy(lifecycle="final")
+            wc.put(
+                sc.OpenDataset(
+                    identifier="d", title=sc.InternationalString(en="D"), description=sc.InternationalString()
+                )
+            )
+            edition = wc.seal()
+        assert read_manifest(_edition_dir(root, edition)).extensions[STATCAT_SECTION]["lifecycle"] == "final"
+
+    def test_another_lifecycle_is_refused(self, no_observations: Path) -> None:
+        manifest = _with_section(read_manifest(no_observations), lifecycle="live")
+        assert _check(no_observations, manifest) == [
+            f"[{STATCAT_SECTION}] manifest.json: statcat section lifecycle 'live', not one of final, revisable"
+        ]
+
+    def test_a_section_with_no_lifecycle_is_accepted(self, no_observations: Path) -> None:
+        """An edition sealed before statcatlib 0.17 has none; the section format stays 3."""
+        section = dict(read_manifest(no_observations).extensions[STATCAT_SECTION])
+        del section["lifecycle"]
+        manifest = read_manifest(no_observations)
+        manifest = msgspec.structs.replace(manifest, extensions={**manifest.extensions, STATCAT_SECTION: section})
+        assert _check(no_observations, manifest) == []
+
     def test_a_structure_kind_without_bindings_is_accepted(self, no_observations: Path) -> None:
         """Format 3 reserves ``structure`` for structure products (Phase 3)."""
         manifest = read_manifest(no_observations)
