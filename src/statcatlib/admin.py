@@ -16,13 +16,23 @@ explicitly with `CatalogAdmin.open` and is never returned by an attribute of
 
 Each of them requires a ``reason`` and writes one Inventory version through
 `InventoryWriter.commit`, which re-applies the rule to the new head after a
-lost race. `CatalogAdmin.editions` only reads. A rule is evaluated with this
+lost race. `CatalogAdmin.editions` only reads, and
+`CatalogAdmin.advance_current` moves only ``CURRENT``.
+
+`CatalogAdmin.open` takes a catalog directory or a `BlobLocation`. Each change
+reads the storage's clock once, through `InventoryStorage.now`, and gives that
+time to the rule and to the version (`Change.now`). On local disk that is this
 machine's clock (design decision P1), so a laptop with a skewed clock records
-skewed times.
+skewed times; on object storage it is the storage clock (Phase 4 D4). On a
+server, an operator runs it under the release job's identity, so the version's
+``event.actor`` is the job's and ``event.reason`` names the operator (spec
+§10.1).
 
 `CatalogAdmin.prune` is the narrow laptop prune of design decision P7 (Phase
-2a S4). It also deletes files: the directories of editions tombstoned longer
-than its window, and ``data/`` files no manifest on disk lists. It never
+2a S4), on local disk only; on object storage the release job retires and
+``statcat gc`` deletes. It also deletes files: the directories of editions
+tombstoned longer than its window, and ``data/`` files no manifest on disk
+lists. It never
 touches a product with a working copy or a seal journal entry, and deletes no
 Inventory root or leaf. It keeps a structure edition that a live or embargoed
 data edition's ``partial_of`` cites (specification §11.4), so a stale data
@@ -44,13 +54,20 @@ from typing import TYPE_CHECKING, Self
 
 from attrs import frozen
 from sdmxlib.edition import ManifestError, edition_files, list_editions, read_manifest
-from sdmxlib.inventory import CATALOG_NAME, TransitionError, cancel, head, release, retire, rollback
+from sdmxlib.inventory import CATALOG_NAME, TransitionError, cancel, head, release, rollback
 from sdmxlib.storage.schema import SCHEMA_VERSION
 
 from statcatlib.bundle import ROOT_SECTION_FORMAT, STATCAT_SECTION, description_to_json
 from statcatlib.catalog import _refuse_legacy_layout
-from statcatlib.store.cross_product import cited_structures
-from statcatlib.store.inventory import Change, InventoryRuleError, InventoryWriter, NonFastForwardError
+from statcatlib.store.blob import BlobInventoryStorage, BlobLocation
+from statcatlib.store.inventory import (
+    Change,
+    InventoryRuleError,
+    InventoryWriter,
+    LocalInventoryStorage,
+    NonFastForwardError,
+    retire_change,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
@@ -122,10 +139,6 @@ class PruneReport:
     seq: int | None
 
 
-class _NothingToRetireError(Exception):
-    """The head holds no edition to retire, so the ``retire`` commit writes no version."""
-
-
 def _busy(product_dir: Path, tombstoned: Collection[str]) -> str | None:
     """Why prune must leave the product alone, or ``None``.
 
@@ -154,37 +167,12 @@ def _busy(product_dir: Path, tombstoned: Collection[str]) -> str | None:
     return None
 
 
-def _retirable(
-    full: FullInventory | None, cutoff: datetime, skipped: Collection[str], kept: Collection[tuple[str, str]]
-) -> dict[str, list[str]]:
-    """The superseded and withdrawn editions that entered their state before *cutoff*, by product.
-
-    Args:
-        full: The head, or ``None``.
-        cutoff: The window's start; older entries retire.
-        skipped: The products prune leaves alone.
-        kept: ``(product, edition)`` pairs to keep: the structure editions
-            a live or embargoed data edition's ``partial_of`` cites.
-
-    Returns:
-        The edition ids to retire, by product.
-    """
-    if full is None:
-        return {}
-    found: dict[str, list[str]] = {}
-    for product_id in full.products():
-        if product_id in skipped:
-            continue
-        ids = [
-            e.edition_id
-            for e in full.entries(product_id)
-            if e.state in {"superseded", "withdrawn"}
-            and e.state_changed_at < cutoff
-            and (product_id, e.edition_id) not in kept
-        ]
-        if ids:
-            found[product_id] = ids
-    return found
+def _new_tombstones(full: FullInventory | None, change: Change | None) -> list[str]:
+    """The tombstones *change* adds to *full*'s, as ``<product>/<edition_id>``."""
+    if change is None or change.retired is None:
+        return []
+    held = set() if full is None else set(full.root.retired)
+    return [f"{t.product_id}/{t.edition_id}" for t in change.retired if t not in held]
 
 
 def _require_reason(reason: str) -> str:
@@ -220,22 +208,46 @@ class CatalogAdmin:
         self._writer = _writer
 
     @classmethod
-    def open(cls, path: str | Path) -> Self:
+    def open(
+        cls,
+        path: str | Path | BlobLocation,
+        *,
+        actor: str | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> Self:
         """Open the catalog at *path* for operational changes.
 
         It reads ``catalog.json`` and writes nothing until a method is called.
 
         Args:
-            path: The catalog directory.
+            path: The catalog directory, or a catalog in object storage.
+            actor: On object storage, recorded as ``event.actor`` when the
+                store's credential provider is no `TokenIdentity` or its token
+                has no ``oid`` (`BlobInventoryStorage`).
+            clock: On object storage, the time source in place of the storage
+                clock; tests pass one.
 
         Returns:
             The operational object.
 
         Raises:
             FileNotFoundError: *path* is not a catalog.
+            TypeError: *actor* or *clock* is given with a catalog directory,
+                whose actor comes from the process and whose clock is this
+                machine's.
 
         A legacy layout or other files at *path* raise `IncompatibleCatalogError`.
         """
+        if isinstance(path, BlobLocation):
+            writer = InventoryWriter(BlobInventoryStorage(path, actor=actor, clock=clock))
+            writer.catalog_document()
+            return cls(_writer=writer)
+        if actor is not None or clock is not None:
+            msg = (
+                "actor= and clock= apply to a catalog in object storage; a catalog directory records "
+                "<os user>@<hostname> and this machine's clock"
+            )
+            raise TypeError(msg)
         root = Path(path).absolute()
         _refuse_legacy_layout(root)
         if not (root / CATALOG_NAME).is_file():
@@ -246,7 +258,20 @@ class CatalogAdmin:
         return cls(_writer=writer)
 
     def __repr__(self) -> str:
-        return f"<CatalogAdmin {self._writer.root}>"
+        return f"<CatalogAdmin {self._writer.storage.location}>"
+
+    def advance_current(self) -> int | None:
+        """Move ``CURRENT`` forward to the newest Inventory version (`InventoryWriter.advance_current`).
+
+        It writes ``CURRENT`` only, never a root or a leaf, and never moves it
+        back. A reader probes forward from a lagging ``CURRENT`` (spec §6.6),
+        so this saves readers the probe; ``statcat advance-current`` runs it.
+
+        Returns:
+            The version ``CURRENT`` now names, or ``None`` when it named the
+            newest version already, or none has been written.
+        """
+        return self._writer.advance_current()
 
     # -- reading ---------------------------------------------------------
 
@@ -307,7 +332,8 @@ class CatalogAdmin:
         Args:
             product_id: The product.
             edition_id: The edition concerned, named in a refusal.
-            step: sdmxlib's rule, given the leaf and this machine's clock.
+            step: sdmxlib's rule, given the leaf and the storage's clock,
+                read once per head; the version records the same time.
             kind: The version's ``event.kind``.
             reason: The version's ``event.reason``.
 
@@ -321,11 +347,12 @@ class CatalogAdmin:
 
         def change(full: FullInventory | None) -> Change:
             leaf = _leaf(full, product_id)
+            now = self._writer.storage.now()
             try:
-                nxt = step(leaf, datetime.now(UTC))
+                nxt = step(leaf, now)
             except TransitionError as exc:
                 raise InventoryRuleError.wrapping(exc, product=product_id, edition=edition_id) from exc
-            return Change(leaves={product_id: nxt})
+            return Change(leaves={product_id: nxt}, now=now)
 
         return self._writer.commit(change, kind=kind, reason=reason).seq
 
@@ -384,7 +411,8 @@ class CatalogAdmin:
     def release(self, product_id: str, edition_id: str, *, reason: str) -> int:
         """Make an embargoed edition live now, superseding the live edition it was built on.
 
-        The release time is this machine's clock (design decision P1).
+        The release time is the storage's clock: this machine's on local disk
+        (design decision P1), the storage clock on object storage.
 
         Args:
             product_id: The product.
@@ -562,11 +590,19 @@ class CatalogAdmin:
 
         Raises:
             ValueError: *older_than* is not positive, or *reason* is blank.
+            TypeError: The catalog is in object storage, where the release
+                job retires and ``statcat gc`` deletes.
 
         A retirement sdmxlib's rule refuses raises `InventoryRuleError`, and
         `InventoryContentionError` follows `MAX_RACES` lost races; neither
         deletes anything.
         """
+        if not isinstance(self._writer.storage, LocalInventoryStorage):
+            msg = (
+                f"prune runs on a catalog directory; on {self._writer.storage.location} the release job "
+                "(statcat release) retires editions and statcat gc deletes their files"
+            )
+            raise TypeError(msg)
         _require_reason(reason)
         if older_than <= timedelta(0):
             msg = f"prune needs a positive window; got older_than={older_than!r}"
@@ -625,6 +661,9 @@ class CatalogAdmin:
     ) -> tuple[list[str], int | None, tuple[Tombstone, ...]]:
         """Prune's step 1: retire the old superseded and withdrawn editions in one ``retire`` version.
 
+        The change comes from `statcatlib.store.inventory.retire_change`,
+        which the release job also uses.
+
         Args:
             full: The head read when prune started, or ``None``.
             cutoff: The window's start; older entries retire.
@@ -638,48 +677,21 @@ class CatalogAdmin:
             later steps read.
         """
         stones: tuple[Tombstone, ...] = () if full is None else full.root.retired
+        artefacts = self._writer.artefacts
         if dry_run:
-            planned = _retirable(full, cutoff, skipped, self._cited(full))
-            return [f"{p}/{e}" for p, ids in planned.items() for e in ids], None, stones
+            planned = retire_change(full, cutoff, now=datetime.now(UTC), artefacts=artefacts, skipped=skipped)
+            return _new_tombstones(full, planned), None, stones
         retired: list[str] = []
 
-        def change(head_now: FullInventory | None) -> Change:
-            planned = _retirable(head_now, cutoff, skipped, self._cited(head_now))
-            if head_now is None or not planned:
-                raise _NothingToRetireError
-            now = datetime.now(UTC)
-            leaves: dict[str, Leaf] = {}
-            kept = list(head_now.root.retired)
-            for product_id, ids in planned.items():
-                try:
-                    leaves[product_id], new = retire(head_now.leaf(product_id), ids, now=now)
-                except TransitionError as exc:
-                    raise InventoryRuleError.wrapping(exc, product=product_id, edition=ids[0]) from exc
-                kept += new
-            retired[:] = [f"{p}/{e}" for p, ids in planned.items() for e in ids]
-            return Change(leaves=leaves, retired=tuple(kept))
+        def change(head_now: FullInventory | None) -> Change | None:
+            planned = retire_change(head_now, cutoff, now=datetime.now(UTC), artefacts=artefacts, skipped=skipped)
+            retired[:] = _new_tombstones(head_now, planned)
+            return planned
 
-        try:
-            written = self._writer.commit(change, kind="retire", reason=reason)
-        except _NothingToRetireError:
+        written = self._writer.commit(change, kind="retire", reason=reason)
+        if written is None:
             return [], None, stones
         return retired, written.seq, written.retired
-
-    def _cited(self, full: FullInventory | None) -> set[tuple[str, str]]:
-        """The structure editions prune keeps: those a live or embargoed data edition's ``partial_of`` cites.
-
-        When a manifest the answer needs cannot be read, every structure
-        edition is kept.
-        """
-        try:
-            return cited_structures(full, self._writer.artefacts)
-        except ManifestError as exc:
-            log.warning("prune keeps every structure edition: a manifest cannot be read (%s)", exc)
-            if full is None:
-                return set()
-            return {
-                (p, e.edition_id) for p in full.products() if full.leaf(p).kind == "structure" for e in full.entries(p)
-            }
 
     def _prune_data(
         self, product_dir: Path, cutoff: datetime, gone: Collection[str], *, dry_run: bool, failed: dict[str, str]

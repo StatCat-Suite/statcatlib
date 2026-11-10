@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: artefact records in every leaf entry, and the section's `lifecycle`
+## Next release: artefact records in every leaf entry, the section's `lifecycle`, and `CatalogAdmin` on object storage
 
 No catalog is rebuilt, and statcatlib still requires `sdmxlib>=0.87,<0.88`.
 
@@ -34,6 +34,35 @@ that becomes live or embargoed runs the cross-product rules in place of raising
 `NotImplementedError`. A missing manifest raises `sdmxlib.edition.ManifestError`.
 `cross_product.ManifestArtefacts` takes a catalog directory or an
 `sdmxlib.inventory.Fetch`.
+
+`CatalogAdmin.open(path, *, actor=None, clock=None)` takes a `BlobLocation`, so
+`release`, `cancel`, `rollback`, `set_embargo`, `describe`, `editions` and the new
+`advance_current` run on a catalog in object storage. A call that relied on
+`CatalogAdmin.open(BlobLocation(...))` raising `TypeError` now opens the catalog.
+`actor=` and `clock=` apply to a `BlobLocation` only, and raise `TypeError` with a
+catalog directory. `CatalogAdmin.prune` raises `TypeError` on a catalog in object
+storage, naming `statcat gc` and the release job; it runs on a catalog directory as
+before. [Catalog administration](api/admin.md#catalogs-in-object-storage) describes it.
+
+Each `CatalogAdmin` change reads the storage's clock once, through
+`InventoryStorage.now()`, and the rule and the root record that time. On local disk
+that is this machine's clock, as before; in object storage it is the storage clock.
+A test that moved the clock of `release`, `cancel` or `rollback` by patching
+`statcatlib.admin.datetime` patches the storage's `now` in its place; `prune`
+still reads `statcatlib.admin.datetime`.
+
+`InventoryWriter.commit(change, ...)` writes nothing and returns `None` when
+`change` returns `None`, and a `Change` gains `now`, the version's time, which
+`commit` passes to `try_commit(now=)`. A `change` typed to return a `Change` keeps
+`commit`'s `Root` return type. A `try_commit` replacement in a test takes the `now=`
+keyword. `statcatlib.store.inventory.retire_change(full, cutoff, *, now, artefacts,
+skipped=())` builds the `retire` version that `prune` writes, and
+`InventoryWriter.advance_current()` moves `CURRENT` forward to the newest root.
+
+The CLI gains `statcat advance-current URL` and `statcat admin` (`editions`,
+`release`, `cancel`, `rollback`, `embargo`), over a catalog directory or `az://`.
+`statcatlib.jobs` reads and checks the jobs configuration both server jobs will read
+([The jobs configuration](api/jobs.md)).
 
 ## 0.16.1: `statcat upload` refuses more `obstore` variables
 

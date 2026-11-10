@@ -1,13 +1,16 @@
 """statcatlib command-line interface.
 
 Top-level entry point installed as the ``statcat`` console script. It has
-five commands: `build_index`, which builds the search index of a product's
+six commands: `build_index`, which builds the search index of a product's
 working copy; `verify_catalog`, which checks a catalog's integrity; `doctor`,
 which reports on a catalog for support; `prune`, which retires old editions
-and deletes the files no edition needs; and `upload`, which copies a sealed
-edition to Azure Blob Storage. The CLI is intentionally thin — the work lives
+and deletes the files no edition needs; `upload`, which copies a sealed
+edition to Azure Blob Storage; and `advance_current`, which moves ``CURRENT``
+forward. The ``admin`` group (`admin_app`) makes the operational changes:
+``editions``, ``release``, ``cancel``, ``rollback`` and ``embargo``, over a
+catalog directory or ``az://``. The CLI is intentionally thin — the work lives
 in `statcatlib.WorkingCopy.build_index`, `statcatlib.diagnostics`,
-`statcatlib.CatalogAdmin.prune` and `statcatlib.upload_edition`.
+`statcatlib.CatalogAdmin` and `statcatlib.upload_edition`.
 
 `build_index` requires the ``[search]`` extra (typer + sentence-transformers +
 lancedb), and `upload` the ``[blob]`` extra (typer + obstore + azure-identity).
@@ -43,6 +46,7 @@ from rich.progress import (
 )
 
 from sdmxlib.edition import ManifestError
+from sdmxlib.inventory import InventoryError
 
 import statcatlib as sc
 from statcatlib import diagnostics
@@ -51,9 +55,11 @@ from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES, IncompatibleCatalo
 from statcatlib.upload import UploadCheckError, upload_edition
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sdmxlib.edition import Lifecycle
 
-__all__ = ["app", "main"]
+__all__ = ["admin_app", "app", "main"]
 
 
 _DEFAULT_MODEL = "intfloat/multilingual-e5-base"
@@ -87,6 +93,9 @@ _REFUSED_KEYS = frozenset(name.lower() for name in _REFUSED_VARIABLES)
 
 #: How long one request may take: a 5,000 MiB Put at about 1.4 MB/s.
 _UPLOAD_TIMEOUT = "1h"
+
+#: How long one request of `advance-current` or `admin` may take: each reads or writes one small document.
+_ADMIN_TIMEOUT = "5m"
 
 
 def _parse_codelist_policy(raw: str) -> sc.CodelistIndexPolicy:
@@ -632,10 +641,10 @@ def _release_time(raw: str | None) -> datetime | None:
     return parsed
 
 
-def _catalog_uri(raw: str) -> str:
+def _catalog_uri(raw: str, *, command: str = "upload") -> str:
     """``AZ_URL`` as ``az://<container>[/<prefix>]/``; anything else exits 2, and ``s3://`` names the reason."""
     if raw.startswith("s3://"):
-        _usage(f"{raw}: upload supports Azure only in Phase 4 (W3), since obstore cannot set or read CRC32C")
+        _usage(f"{raw}: {command} supports Azure only in Phase 4 (W3), since obstore cannot set or read CRC32C")
     scheme, sep, rest = raw.partition("://")
     segments = rest.removesuffix("/").split("/")
     usable = all(part and part not in {".", ".."} for part in segments) and not set(rest) & set("?#")
@@ -655,11 +664,14 @@ def _refused_variables() -> list[str]:
     )
 
 
-def _azure_account() -> str:
-    """The storage account from the environment; a refused variable, even empty, or no account, exits 2."""
+def _azure_account(command: str = "upload") -> str:
+    """The storage account from the environment; a refused variable, even empty, or no account, exits 2.
+
+    *command* names the command in the messages.
+    """
     if found := _refused_variables():
         _usage(
-            "upload writes with its own credential, signed and with no customer-provided key, "
+            f"{command} writes with its own credential, signed and with no customer-provided key, "
             f"to the account's URL; unset {', '.join(found)}"
         )
     account = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
@@ -668,11 +680,12 @@ def _azure_account() -> str:
     return account
 
 
-def _azure_location(uri: str, account: str) -> BlobLocation:
-    """The catalog at *uri*, reached with `DefaultAzureCredential`.
+def _azure_location(uri: str, account: str, *, command: str = "upload", timeout: str = _UPLOAD_TIMEOUT) -> BlobLocation:
+    """The catalog at *uri*, reached with `DefaultAzureCredential`, each request allowed *timeout*.
 
-    A missing ``blob`` extra exits 2, and so does an environment value `obstore` cannot parse, such as
-    ``AZURE_DISABLE_TAGGING=junk``: obstore 0.12.1 raises `GenericError` from the store build, before any request.
+    *command* names the command in the messages. A missing ``blob`` extra exits 2, and so does an environment
+    value `obstore` cannot parse, such as ``AZURE_DISABLE_TAGGING=junk``: obstore 0.12.1 raises `GenericError`
+    from the store build, before any request.
     """
     try:
         from azure.identity import DefaultAzureCredential  # noqa: PLC0415
@@ -680,18 +693,25 @@ def _azure_location(uri: str, account: str) -> BlobLocation:
         from obstore.exceptions import GenericError  # noqa: PLC0415
         from obstore.store import from_url  # noqa: PLC0415
     except ImportError:
-        _usage("upload needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')")
+        _usage(f"{command} needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')")
     credential = TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))
     try:
         store = from_url(
             uri.removesuffix("/"),
             account_name=account,
             credential_provider=credential,
-            client_options={"timeout": _UPLOAD_TIMEOUT},
+            client_options={"timeout": timeout},
         )
     except GenericError as exc:
         _usage(_store_build_message(exc))
     return BlobLocation(uri, store)
+
+
+def _auth_error() -> type[Exception]:
+    """azure-core's `ClientAuthenticationError`, which a `DefaultAzureCredential` with no credential raises."""
+    from azure.core.exceptions import ClientAuthenticationError  # noqa: PLC0415
+
+    return ClientAuthenticationError
 
 
 def _store_build_message(exc: Exception) -> str:
@@ -751,7 +771,7 @@ def upload(
     when = _release_time(release_at)
     uri = _catalog_uri(az_url)
     location = _azure_location(uri, _azure_account())
-    from azure.core.exceptions import ClientAuthenticationError  # noqa: PLC0415
+    auth_error = _auth_error()
 
     identity = _token_identity(location.store)
     try:
@@ -761,7 +781,7 @@ def upload(
         for finding in exc.findings:
             _say(f"FAIL {finding.subject}: {finding.detail}", style="red")
         raise typer.Exit(code=1) from None
-    except (ManifestError, BlobStoreError, ClientAuthenticationError) as exc:
+    except (ManifestError, BlobStoreError, auth_error) as exc:
         _say(f"ERROR {exc}", style="red")
         raise typer.Exit(code=1) from None
     except ImportError as exc:
@@ -769,6 +789,198 @@ def upload(
     _say(f"identity {oid or 'unknown: the token has no oid claim'}")
     state = "registered in pending/" if report.registered else "already registered in pending/"
     _say(f"{report.product_id} {report.edition_id}: {len(report.sent)} sent, {len(report.kept)} kept, {state}.")
+
+
+# -- advance-current and admin ------------------------------------------------
+
+admin_app = typer.Typer(
+    name="admin",
+    help=(
+        "Operational changes to a catalog's Inventory: release, cancel, roll back, embargo. "
+        "On a server, run them under the release job's identity and name yourself in --reason."
+    ),
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_show_locals=False,
+)
+app.add_typer(admin_app, name="admin")
+
+#: What an `advance-current` or `admin` command prints as ``ERROR <message>`` and exits 1 for.
+_ADMIN_ERRORS: tuple[type[Exception], ...] = (
+    FileNotFoundError,
+    IncompatibleCatalogError,
+    InventoryError,
+    sc.InventoryRuleError,
+    sc.InventoryConflictError,
+    sc.InventoryContentionError,
+    ManifestError,
+    BlobStoreError,
+    ValueError,
+)
+
+
+class _NoCredentialError(Exception):
+    """Never raised: a catalog directory takes no credential, so it has no credential error to catch."""
+
+
+_URL_HELP = "The catalog: a directory holding catalog.json, az://<container>, or az://<container>/<prefix>."
+
+
+class _Switch(enum.StrEnum):
+    """``statcat admin embargo``'s setting."""
+
+    ON = "on"
+    OFF = "off"
+
+
+def _admin_call[T](url: str, command: str, action: Callable[[sc.CatalogAdmin], T]) -> T:
+    """Open the catalog at *url* and run *action* on it; a refusal or a store fault prints ``ERROR`` and exits 1.
+
+    *url* with a scheme is `statcat upload`'s ``AZ_URL``, read with upload's environment rules and a five-minute
+    request timeout; anything else is a catalog directory. A usage error exits 2.
+    """
+    auth_error: type[Exception] = _NoCredentialError
+    if "://" in url:
+        uri = _catalog_uri(url, command=command)
+        location = _azure_location(uri, _azure_account(command), command=command, timeout=_ADMIN_TIMEOUT)
+        auth_error = _auth_error()
+        target: Path | BlobLocation = location
+    else:
+        target = Path(url)
+    try:
+        return action(sc.CatalogAdmin.open(target))
+    except _ADMIN_ERRORS as exc:
+        _say(f"ERROR {exc}", style="red")
+        raise typer.Exit(code=1) from None
+    except auth_error as exc:
+        _say(f"ERROR {exc}", style="red")
+        raise typer.Exit(code=1) from None
+
+
+def _reason(reason: str) -> str:
+    """*reason*, or exit 2 when it is blank: every change records one as ``event.reason``."""
+    if not reason.strip():
+        _usage("--reason is blank; name yourself and why, as the version's event.reason records it")
+    return reason
+
+
+def _wrote(seq: int, what: str) -> None:
+    _say(f"Inventory version {seq} written: {what}.", style="green")
+
+
+@app.command("advance-current")
+def advance_current(url: str = typer.Argument(..., metavar="URL", help=_URL_HELP)) -> None:
+    """Move ``CURRENT`` forward to the newest Inventory version, never back.
+
+    It runs `statcatlib.CatalogAdmin.advance_current`: it reads the newest root by
+    the read protocol and moves ``CURRENT`` to it when ``CURRENT`` names an older
+    version or another restore epoch. It writes ``CURRENT`` only. It exits 0 when
+    ``CURRENT`` moved or named the newest version already, 1 when the catalog
+    cannot be read or ``CURRENT`` cannot be written, printed as ``ERROR <message>``,
+    and 2 on a usage error, as ``statcat upload`` does for ``az://``.
+    """
+    seq = _admin_call(url, "advance-current", lambda admin: admin.advance_current())
+    if seq is None:
+        _say("CURRENT names the newest Inventory version already; nothing was written.", style="green")
+        return
+    _say(f"CURRENT moved to Inventory version {seq}.", style="green")
+
+
+@admin_app.command("editions")
+def admin_editions(
+    url: str = typer.Argument(..., metavar="URL", help=_URL_HELP),
+    product: str = typer.Argument(..., metavar="PRODUCT", help="The product."),
+) -> None:
+    """List a product's editions in every state, as the newest Inventory version records them.
+
+    Each line is ``<edition_id> <state> previous=<id or -> schema=<version>
+    since=<state_changed_at> release_at=<time or ->``. It writes nothing. It exits
+    1 when the catalog records no such product.
+    """
+    entries = _admin_call(url, "admin editions", lambda admin: admin.editions(product))
+    if not entries:
+        _say(f"ERROR the catalog records no product {product}", style="red")
+        raise typer.Exit(code=1)
+    for entry in entries:
+        release_at = "-" if entry.release_at is None else entry.release_at.isoformat()
+        _say(
+            f"{entry.edition_id} {entry.state} previous={entry.previous or '-'} schema={entry.schema_version} "
+            f"since={entry.state_changed_at.isoformat()} release_at={release_at}"
+        )
+
+
+@admin_app.command("release")
+def admin_release(
+    url: str = typer.Argument(..., metavar="URL", help=_URL_HELP),
+    product: str = typer.Argument(..., metavar="PRODUCT", help="The product."),
+    edition: str = typer.Argument(..., metavar="EDITION", help="The embargoed edition."),
+    reason: str = typer.Option(..., "--reason", help="Who and why; the version records it as event.reason."),
+) -> None:
+    """Make an embargoed edition live now (`statcatlib.CatalogAdmin.release`).
+
+    It exits 1 when the release is refused, printed as ``ERROR <message>``: the
+    edition is not embargoed, it is built on an edition that is no longer live, or
+    a cross-product rule refuses it.
+    """
+    why = _reason(reason)
+    seq = _admin_call(url, "admin release", lambda admin: admin.release(product, edition, reason=why))
+    _wrote(seq, f"released {product}/{edition}")
+
+
+@admin_app.command("cancel")
+def admin_cancel(
+    url: str = typer.Argument(..., metavar="URL", help=_URL_HELP),
+    product: str = typer.Argument(..., metavar="PRODUCT", help="The product."),
+    edition: str = typer.Argument(..., metavar="EDITION", help="The embargoed edition."),
+    reason: str = typer.Option(..., "--reason", help="Who and why; the version records it as event.reason."),
+) -> None:
+    """Withdraw an embargoed edition before its release (`statcatlib.CatalogAdmin.cancel`).
+
+    It exits 1 when the edition is not recorded or not embargoed.
+    """
+    why = _reason(reason)
+    seq = _admin_call(url, "admin cancel", lambda admin: admin.cancel(product, edition, reason=why))
+    _wrote(seq, f"withdrew {product}/{edition}")
+
+
+@admin_app.command("rollback")
+def admin_rollback(
+    url: str = typer.Argument(..., metavar="URL", help=_URL_HELP),
+    product: str = typer.Argument(..., metavar="PRODUCT", help="The product."),
+    to: str | None = typer.Option(
+        None, "--to", metavar="EDITION", help="The superseded edition to make live; the newest one by default."
+    ),
+    if_live: str | None = typer.Option(
+        None, "--if-live", metavar="EDITION", help="The edition expected live; the live one when the call starts."
+    ),
+    reason: str = typer.Option(..., "--reason", help="Who and why; the version records it as event.reason."),
+) -> None:
+    """Withdraw the live edition and make a superseded one live again (`statcatlib.CatalogAdmin.rollback`).
+
+    It exits 1 when the rollback is refused: the live edition is no longer
+    ``--if-live``, ``--to`` is not superseded, or a cross-product rule refuses it.
+    """
+    why = _reason(reason)
+    seq = _admin_call(url, "admin rollback", lambda admin: admin.rollback(product, to=to, if_live=if_live, reason=why))
+    _wrote(seq, f"rolled back {product}")
+
+
+@admin_app.command("embargo")
+def admin_embargo(
+    url: str = typer.Argument(..., metavar="URL", help=_URL_HELP),
+    setting: _Switch = typer.Argument(..., metavar="on|off", help="on holds every automatic release."),
+    reason: str = typer.Option(..., "--reason", help="Who and why; the version records it as event.reason."),
+) -> None:
+    """Turn the catalog's embargo on or off (`statcatlib.CatalogAdmin.set_embargo`).
+
+    With the embargo on, a seal records its edition ``embargoed`` and no
+    automatic release runs; an explicit ``statcat admin release`` still releases.
+    It exits 1 when the catalog already has that setting.
+    """
+    why = _reason(reason)
+    on = setting is _Switch.ON
+    seq = _admin_call(url, "admin embargo", lambda admin: admin.set_embargo(on=on, reason=why))
+    _wrote(seq, f"embargo {setting.value}")
 
 
 def main() -> None:

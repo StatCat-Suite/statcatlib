@@ -167,9 +167,11 @@ class TestOpenRefusals:
         with pytest.raises(TypeError, match=r"Catalog\.open"):
             sc.Catalog.create(untyped(location))
 
-    def test_an_admin_refuses_a_blob_location(self, location: BlobLocation) -> None:
-        with pytest.raises(TypeError):
-            sc.CatalogAdmin.open(untyped(location))
+    def test_an_admin_opens_a_blob_location_and_reads_its_catalog_json(self, location: BlobLocation) -> None:
+        with pytest.raises(FileNotFoundError, match=CATALOG_NAME):
+            sc.CatalogAdmin.open(location)
+        _writer(location).write_catalog_json()
+        assert repr(sc.CatalogAdmin.open(location)) == f"<CatalogAdmin {location.uri}>"
 
     def test_a_missing_catalog_json_raises(self, location: BlobLocation) -> None:
         with pytest.raises(FileNotFoundError, match=CATALOG_NAME):

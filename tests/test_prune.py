@@ -8,11 +8,13 @@ entry, deletes no Inventory root or leaf, and deletes nothing in a dry run.
 
 The tests move prune's clock forward by patching ``statcatlib.admin.datetime``,
 so an edition sealed a moment ago is days old to prune; a file stays newer
-than the window by having its mtime set past the patched clock.
+than the window by having its mtime set past the patched clock. A rollback
+reads the storage's clock, ``statcatlib.store.inventory.datetime`` on disk.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -22,13 +24,18 @@ import polars as pl
 import pytest
 import sdmxlib
 import sdmxlib.edition
+from obstore.store import MemoryStore
 from sdmxlib import InternationalString, Ref
-from sdmxlib.inventory import FullInventory, Root, local_fetch
+from sdmxlib.edition import ManifestError
+from sdmxlib.inventory import FullInventory, Leaf, PartialRecord, Root, local_fetch, record
+from sdmxlib.storage.schema import SCHEMA_VERSION
 from typer.testing import CliRunner
 
 import statcatlib as sc
 from statcatlib.admin import CatalogAdmin, PruneReport
 from statcatlib.cli import app
+from statcatlib.store.blob import BlobInventoryStorage, BlobLocation
+from statcatlib.store.inventory import InventoryWriter, retire_change
 from tests.conftest import concept_of
 
 pytestmark = pytest.mark.unit
@@ -306,6 +313,8 @@ def test_a_lost_race_replans_against_the_new_head(cat: Fixture, monkeypatch: pyt
 
     monkeypatch.setattr(writer, "try_commit", raced)
     _clock(monkeypatch, 10 * DAY)
+    # The rollback reads the storage's clock, which on disk is this machine's: move it with prune's.
+    monkeypatch.setattr("statcatlib.store.inventory.datetime", _Ahead(10 * DAY))
     report = admin.prune(older_than=DAY, reason=REASON, dry_run=False)
 
     assert report.retired == ()
@@ -437,3 +446,141 @@ def test_the_cli_refuses_a_directory_that_is_no_catalog(tmp_path: Path) -> None:
     code, out = _cli(tmp_path, "--older-than", "1", "--reason", REASON)
     assert code == 1
     assert "Not a statcatlib catalog" in out
+
+
+# -- object storage ----------------------------------------------------------
+
+
+def test_prune_on_a_blob_catalog_raises_type_error_naming_gc_and_the_release_job() -> None:
+    location = BlobLocation("az://catalogs/stc/", MemoryStore())
+    InventoryWriter(BlobInventoryStorage(location, actor="tests", clock=lambda: datetime.now(UTC))).write_catalog_json()
+    admin = CatalogAdmin.open(location, actor="tests", clock=lambda: datetime.now(UTC))
+
+    with pytest.raises(TypeError, match=r"statcat gc") as raised:
+        admin.prune(older_than=DAY, reason=REASON, dry_run=True)
+    assert "statcat release" in str(raised.value)
+
+
+# -- retire_change -----------------------------------------------------------
+
+_T0 = datetime(2026, 1, 1, tzinfo=UTC)
+_CL = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=T:CL_GEO(1.0)"
+
+
+def _edition(n: int) -> str:
+    return f"01a18e00-0000-7000-8000-{n:012d}"
+
+
+def _recorded(
+    leaf: Leaf | None, product: str, n: int, *, kind: str, artefacts: dict[str, PartialRecord] | None
+) -> Leaf:
+    """Record edition *n* of *product* live, superseding the live one, ``n`` days after `_T0`."""
+    live = None if leaf is None else next(e.edition_id for e in leaf.editions if e.state == "live")
+    return record(
+        leaf,
+        product_id=product,
+        kind="structure" if kind == "structure" else "data",
+        lifecycle="revisable",
+        edition_id=_edition(n),
+        previous=live,
+        manifest_sha256="0" * 64,
+        schema_version=SCHEMA_VERSION,
+        embargo=False,
+        now=_T0 + n * DAY,
+        artefacts=artefacts,
+    )
+
+
+def _citing_catalog(tmp_path: Path, *, cut_from: str | None, filled: bool = True) -> FullInventory:
+    """Structure product ``s`` (1 superseded by 2), data product ``d`` (3, live) and data product ``w`` (4 by 5).
+
+    Edition 1 holds `_CL` with fingerprint ``f1``, and edition 2 with ``f2``.
+    ``d``'s edition 3 holds a partial of `_CL` cut from *cut_from*, and its
+    leaf entry carries its records only when *filled*.
+    """
+    root = tmp_path / "citing"
+    root.mkdir()
+    writer = InventoryWriter(root)
+    writer.write_catalog_json()
+    s = _recorded(None, "s", 1, kind="structure", artefacts={_CL: PartialRecord(fingerprint="f1")})
+    s = _recorded(s, "s", 2, kind="structure", artefacts={_CL: PartialRecord(fingerprint="f2")})
+    cut = {_CL: PartialRecord(fingerprint="cut", partial_of=cut_from)} if cut_from is not None else {}
+    d = _recorded(None, "d", 3, kind="data", artefacts=cut if filled else None)
+    w = _recorded(None, "w", 4, kind="data", artefacts={})
+    w = _recorded(w, "w", 5, kind="data", artefacts={})
+    writer.try_commit(None, {"s": s, "d": d, "w": w}, now=_T0 + 10 * DAY, kind="seal", reason="setup")
+    full = writer.full()
+    assert full is not None
+    return full
+
+
+def _unreadable(product_id: str, edition_id: str, _sha: str) -> dict[str, PartialRecord]:
+    msg = f"{product_id}'s {edition_id} manifest cannot be read"
+    raise ManifestError(msg)
+
+
+def _no_read(product_id: str, edition_id: str, _sha: str) -> dict[str, PartialRecord]:
+    pytest.fail(f"retire_change read the manifest of {product_id}'s {edition_id}, whose entry is filled")
+
+
+_CUTOFF = _T0 + 30 * DAY
+_NOW_RETIRE = _T0 + 31 * DAY
+
+
+def test_retire_change_keeps_a_structure_edition_a_live_data_edition_cites(tmp_path: Path) -> None:
+    full = _citing_catalog(tmp_path, cut_from="f1")
+
+    change = retire_change(full, _CUTOFF, now=_NOW_RETIRE, artefacts=_no_read)
+
+    assert change is not None
+    assert sorted(change.leaves) == ["w"]
+    assert [(t.product_id, t.edition_id) for t in change.retired or ()] == [("w", _edition(4))]
+    assert change.now == _NOW_RETIRE
+
+
+def test_retire_change_retires_a_structure_edition_no_data_edition_cites(tmp_path: Path) -> None:
+    full = _citing_catalog(tmp_path, cut_from="f2")
+
+    change = retire_change(full, _CUTOFF, now=_NOW_RETIRE, artefacts=_no_read)
+
+    assert change is not None
+    assert sorted(change.leaves) == ["s", "w"]
+    assert {(t.product_id, t.edition_id, t.retired_at) for t in change.retired or ()} == {
+        ("s", _edition(1), _NOW_RETIRE),
+        ("w", _edition(4), _NOW_RETIRE),
+    }
+
+
+def test_retire_change_keeps_every_structure_edition_when_a_manifest_is_unreadable(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    full = _citing_catalog(tmp_path, cut_from="f2", filled=False)
+
+    with caplog.at_level(logging.WARNING, logger="statcatlib.store.inventory"):
+        change = retire_change(full, _CUTOFF, now=_NOW_RETIRE, artefacts=_unreadable)
+
+    assert change is not None
+    assert sorted(change.leaves) == ["w"]
+    assert "keeps every structure edition" in caplog.text
+
+
+def test_retire_change_skips_products_and_returns_none_when_nothing_retires(tmp_path: Path) -> None:
+    full = _citing_catalog(tmp_path, cut_from="f1")
+
+    assert retire_change(full, _CUTOFF, now=_NOW_RETIRE, artefacts=_no_read, skipped={"w"}) is None
+    assert retire_change(full, _T0, now=_NOW_RETIRE, artefacts=_no_read) is None
+    assert retire_change(None, _CUTOFF, now=_NOW_RETIRE, artefacts=_no_read) is None
+
+
+def test_retire_change_carries_the_heads_tombstones(tmp_path: Path) -> None:
+    full = _citing_catalog(tmp_path, cut_from="f2")
+    first = retire_change(full, _CUTOFF, now=_NOW_RETIRE, artefacts=_no_read, skipped={"s"})
+    assert first is not None
+    writer = InventoryWriter(tmp_path / "citing")
+    writer.commit(lambda _: first, kind="retire", reason="w")
+    after = writer.full()
+
+    second = retire_change(after, _CUTOFF, now=_NOW_RETIRE + DAY, artefacts=_no_read)
+
+    assert second is not None
+    assert [(t.product_id, t.edition_id) for t in second.retired or ()] == [("w", _edition(4)), ("s", _edition(1))]

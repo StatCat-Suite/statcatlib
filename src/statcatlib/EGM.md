@@ -17,7 +17,8 @@ products (`catalog.py`), the operational changes to its Inventory
 (`admin.py`), seal checks (`checks.py`), the `statcat` section of
 an sdmxlib edition manifest (`bundle.py`), the integrity and support
 checks behind `statcat verify-catalog` and `statcat doctor`
-(`diagnostics.py`), the copy of a sealed edition to object storage (`upload.py`), composable query filters
+(`diagnostics.py`), the copy of a sealed edition to object storage (`upload.py`), the
+jobs configuration the release and GC jobs read (`jobs.py`), composable query filters
 (`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`)
 and test catalogs (`testing.py`).
 
@@ -110,11 +111,15 @@ and test catalogs (`testing.py`).
 `CatalogAdmin` is exported from `statcatlib`; `EditionEntry` and `PruneReport`
 are imported from `statcatlib.admin`.
 
-- `CatalogAdmin.open(path)`: refuses a legacy layout
+- `CatalogAdmin.open(path, *, actor=None, clock=None)`: *path* is a catalog
+  directory or a `BlobLocation`. A directory: refuses a legacy layout
   (`catalog._refuse_legacy_layout`) and a path with no `catalog.json`
-  (`FileNotFoundError`), reads `catalog.json`, and holds an
-  `InventoryWriter`. It writes nothing until a change is made. Direct
-  construction raises `TypeError`.
+  (`FileNotFoundError`), and refuses `actor=` or `clock=` with `TypeError`. A
+  `BlobLocation`: builds `BlobInventoryStorage(location, actor=, clock=)`, and a
+  store with no `catalog.json` raises `FileNotFoundError`. Either way it reads
+  `catalog.json` and holds an `InventoryWriter`, and writes nothing until a
+  change is made. `repr` shows `storage.location`. Direct construction raises
+  `TypeError`.
 - Reads, each from a fresh `InventoryWriter.full()`: `embargo`,
   `products()` (every recorded product, any state) and
   `editions(product_id) -> list[EditionEntry]` (every entry the newest version
@@ -131,25 +136,28 @@ are imported from `statcatlib.admin`.
   `embargo-change`) and `describe(description, *, reason)` (sets
   `format_version` `"3"` and `description` in the root's `extensions.statcat`,
   keeping its other keys; kind `describe`).
+- `advance_current() -> int | None`: `InventoryWriter.advance_current`; it
+  writes `CURRENT` only.
 - Product changes go through `_commit_product(product_id, edition_id, step,
-  *, kind, reason)`, which applies one of sdmxlib's pure rules to the head's
-  leaf with `datetime.now(UTC)` (the local clock, design decision P1) and
-  wraps a `TransitionError` with `InventoryRuleError.wrapping`. A product the
+  *, kind, reason)`, which reads `storage.now()` once per head (the local
+  clock on disk, design decision P1; the storage clock on blob), applies one of
+  sdmxlib's pure rules to the head's leaf with it, returns `Change(now=)` with
+  the same time, and wraps a `TransitionError` with `InventoryRuleError.wrapping`. A product the
   head does not record raises `InventoryRuleError(rule="unknown")`. The
   writer's `commit` runs the cross-product rules on a release or a rollback
   and raises `CrossProductRuleError`; `admin.py` adds no rule of its own.
 - `prune(*, older_than, reason, dry_run=True) -> PruneReport` (design
-  decision P7): refuses a blank *reason* or a window that is not positive
-  (`ValueError`). It skips every product `_busy` names (an unsealed edition
+  decision P7): raises `TypeError` on a storage other than
+  `LocalInventoryStorage`, naming `statcat gc` and the release job; refuses a
+  blank *reason* or a window that is not positive (`ValueError`). Its cutoff
+  and tombstone time are `statcatlib.admin.datetime.now(UTC)`. It skips every product `_busy` names (an unsealed edition
   whose id is not tombstoned, a `journal/*.json` file, or an unreadable
-  manifest), then runs three steps. `_prune_retire` retires superseded and
-  withdrawn entries whose `state_changed_at` is before the cutoff, except
-  the structure editions `_cited` returns (those a live or embargoed data
-  edition's `partial_of` cites, `cross_product.cited_structures`; every
-  structure edition when a manifest cannot be read), with
-  sdmxlib's `retire`, in one `InventoryWriter.commit` of kind `retire`
-  (`Change(leaves=..., retired=head tombstones + new)`), re-planned against
-  each head and skipped when nothing qualifies. `_prune_dirs` deletes
+  manifest), then runs three steps. `_prune_retire` commits
+  `store.inventory.retire_change(head, cutoff, now=, artefacts=writer.artefacts,
+  skipped=)` in one `InventoryWriter.commit` of kind `retire`, re-planned
+  against each head; `None` writes nothing. A dry run plans the same change
+  against the head it read. `_new_tombstones` lists the tombstones the change
+  adds. `_prune_dirs` deletes
   `products/<p>/<edition_id>` for each tombstone whose `retired_at` is
   before the cutoff. `_prune_data` deletes each `data/` file no on-disk
   manifest lists (`sdmxlib.edition.edition_files`) whose mtime is before the
@@ -163,6 +171,39 @@ are imported from `statcatlib.admin`.
 - `EditionEntry`: a frozen attrs value with `edition_id`, `product_id`,
   `previous`, `state`, `manifest_sha256`, `schema_version`,
   `state_changed_at` and `release_at`.
+
+### `jobs.py`
+
+The jobs configuration (Phase 5 D7), imported from `statcatlib.jobs`; nothing is
+re-exported from `statcatlib`. Standard library and `attrs` only.
+
+- `load_jobs_config(path) -> JobsConfig`: reads the bytes, parses with
+  `tomllib`, decodes, and runs `RetentionPolicy.check()`. Every refusal raises
+  `JobsConfigError` (`ValueError`), its message starting with the path: an
+  unreadable file, not UTF-8, not TOML, an unknown key at any level (the top
+  level, `[retention]`, `[access]`, each allowlist entry, `[expiry]`), a value of
+  the wrong type (`bool` is no integer), a missing or other `format_version`
+  (`FORMAT_VERSION = 1`), a missing `[retention]` or required key, a bad duration
+  or instant, an `[expiry]` with `enabled = true` and no `not_before`,
+  `namespace`, `deployments` or `port`, a port outside 1 to 65535, or a failed
+  inequality.
+- `JobsConfig(retention, access, expiry, sha256, format_version=1)`: `access` is
+  `None` when the file has no `[access]`; `expiry` is `ExpiryPolicy()` (disabled)
+  when it has no `[expiry]`; `sha256` is the file's, which each run logs.
+- `RetentionPolicy(backup, gc_window, tombstone_window, inventory_window,
+  retire_after, pod_staleness, keep_roots=DEFAULT_KEEP_ROOTS (10),
+  upload_grace=DEFAULT_UPLOAD_GRACE (24 h))`, `durations()`, and `check()`,
+  which raises `JobsConfigError` naming both values for the first failure of:
+  every duration positive; `backup <= gc_window <= tombstone_window`;
+  `inventory_window >= gc_window + 1d`; `pod_staleness < inventory_window`;
+  `keep_roots >= 2`.
+- `AccessPolicy(storage_account, container, allowlist, sentinels=(), scopes=())`
+  with `Principal(object_id, name)`; `storage_account`, `container`,
+  `allowlist` and `sentinels` are required keys, `sentinels` may be empty.
+- `ExpiryPolicy(enabled=False, not_before=None, namespace=None, deployments=(),
+  port=None)`.
+- `parse_duration(text) -> timedelta` (`^[0-9]+[smhd]$`) and
+  `format_duration(value) -> str` (the largest whole unit, as messages write it).
 
 ### `checks.py`
 
@@ -391,7 +432,8 @@ read.
   store takes a `BlobLocation` the caller built. `catalog.py` and `store/blob.py` read
   no environment variable.
 - Only `CatalogAdmin` changes the Inventory, apart from a seal's record and
-  the journal repair. No attribute of `Catalog`, `Product` or `EditionView`
+  the journal repair. It runs over a catalog directory or a `BlobLocation`,
+  `prune` on a directory only. No attribute of `Catalog`, `Product` or `EditionView`
   returns a `CatalogAdmin` or an embargoed, superseded or withdrawn edition.
 - Every `CatalogAdmin` rule is re-evaluated against the head each commit
   lands on: a rollback whose `if_live` is no longer live, a release that is
@@ -434,13 +476,17 @@ read.
   installed, the manifest and Inventory version 1. `temporary_catalog`
   deletes its directory on exit.
 - Each `CatalogAdmin` change writes one Inventory version (a root, and for a
-  product change one leaf) and `CURRENT`. `prune(dry_run=False)` writes at
+  product change one leaf) and `CURRENT`; over a `BlobLocation` it sends one
+  anonymous `HEAD` for the storage clock unless given `clock=`.
+  `advance_current` writes `CURRENT` alone, or nothing. `prune(dry_run=False)` writes at
   most one, of kind `retire`, deletes edition directories and `data/` files,
   and logs each deleted path at INFO and each failed deletion at WARNING on
   the `statcatlib.admin` logger.
 - `diagnostics.verify_catalog` opens each edition in a DuckDB engine of
   `check_edition`'s own; neither it nor `diagnostics.doctor` writes a file.
-- These modules make no network calls.
+- These modules make no network calls, except `upload.py` and `admin.py`, which
+  reach a store only through the `BlobLocation` they are given. `jobs.py` reads
+  the one file it is given.
 
 ## Verification
 
