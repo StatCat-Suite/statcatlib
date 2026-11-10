@@ -122,6 +122,7 @@ nav:
     - Testing: reference/testing.md
   - Design:
     - Sitemap: design/SITEMAP.md
+    - "Phase 5: the release job and garbage collection": design/release-job.md
     - "Phase 4: the catalog on blob storage": design/catalog-on-blob-storage.md
     - "Phase 3: structure products and partial codelists": design/phase-3-structure-products.md
     - "Phase 2a: catalogs of products and editions": design/phase-2a-catalog-editions.md
