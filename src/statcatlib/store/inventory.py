@@ -40,10 +40,10 @@ import socket
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, overload, runtime_checkable
 
 from attrs import frozen
-from sdmxlib.edition import Producer
+from sdmxlib.edition import ManifestError, Producer
 from sdmxlib.inventory import (
     CATALOG_FORMAT,
     CATALOG_NAME,
@@ -68,6 +68,7 @@ from sdmxlib.inventory import (
     local_fetch,
     next_created_at,
     next_root,
+    retire,
     root_path,
     sha256_hex,
 )
@@ -76,7 +77,7 @@ from sdmxlib.storage import create_exclusive
 from statcatlib.store import cross_product
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
     from sdmxlib.inventory import LeafRef, Rule
     from sdmxlib.storage import JsonValue
@@ -98,6 +99,7 @@ __all__ = [
     "NonFastForwardError",
     "current_is_older",
     "producer",
+    "retire_change",
 ]
 
 log = logging.getLogger(__name__)
@@ -270,6 +272,10 @@ class Change:
         built_from: The older version a correction is built from
             (``previous_inventory``); ``None`` builds from the head. The
             history fields follow the head either way.
+        now: The version's time, which the change's rules were given;
+            ``None`` takes the storage's clock when the version is written.
+            A caller that applies a rule with a time passes the same time
+            here, so the rule and the root record one instant.
     """
 
     leaves: Mapping[str, Leaf]
@@ -277,6 +283,7 @@ class Change:
     embargo: bool | None = None
     extensions: Mapping[str, Mapping[str, JsonValue]] | None = None
     built_from: int | None = None
+    now: datetime | None = None
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -695,23 +702,36 @@ class InventoryWriter:
         if found:
             raise found[min(found)]
 
-    def commit(self, change: Callable[[FullInventory | None], Change], *, kind: EventKind, reason: str) -> Root:
+    @overload
+    def commit(self, change: Callable[[FullInventory | None], Change], *, kind: EventKind, reason: str) -> Root: ...
+
+    @overload
+    def commit(
+        self, change: Callable[[FullInventory | None], Change | None], *, kind: EventKind, reason: str
+    ) -> Root | None: ...
+
+    def commit(
+        self, change: Callable[[FullInventory | None], Change | None], *, kind: EventKind, reason: str
+    ) -> Root | None:
         """Commit one version, re-applying *change* to the new head after each lost race.
 
         *change* receives the head, or ``None`` before the first version, and
-        applies sdmxlib's pure rules to it, raising on a refusal. Then, when
-        the change makes an entry live or embargoed, the cross-product rules
-        run on the version (`refusals`). Every precondition is evaluated
-        again against each head it is given: the fast-forward check,
-        ``if_live``, the embargo setting and the cross-product rules.
+        applies sdmxlib's pure rules to it, raising on a refusal. It returns
+        ``None`` when the head needs no new version, and the commit then
+        writes nothing. Then, when the change makes an entry live or
+        embargoed, the cross-product rules run on the version (`refusals`).
+        Every precondition is evaluated again against each head it is given:
+        the fast-forward check, ``if_live``, the embargo setting and the
+        cross-product rules. The version records `Change.now` when the
+        change sets it, and the storage's clock otherwise.
 
         Args:
-            change: Computes the version's change from the head.
+            change: Computes the version's change from the head, or ``None``.
             kind: What the version records (``event.kind``).
             reason: Why (``event.reason``).
 
         Returns:
-            The root written.
+            The root written, or ``None`` when *change* returned ``None``.
 
         Raises:
             InventoryContentionError: `MAX_RACES` races were lost in a row.
@@ -726,6 +746,8 @@ class InventoryWriter:
         for _ in range(MAX_RACES):
             full = self.full()
             planned = change(full)
+            if planned is None:
+                return None
             self._refuse(full, planned.leaves)
             try:
                 root = self.try_commit(
@@ -735,6 +757,7 @@ class InventoryWriter:
                     embargo=planned.embargo,
                     extensions=planned.extensions,
                     built_from=planned.built_from,
+                    now=planned.now,
                     kind=kind,
                     reason=reason,
                 )
@@ -746,3 +769,139 @@ class InventoryWriter:
             return root
         msg = f"{self._storage.location}: {MAX_RACES} commits in a row lost to other writers; try again"
         raise InventoryContentionError(msg)
+
+    def advance_current(self) -> int | None:
+        """Move ``CURRENT`` forward to the newest root, as the read protocol finds it.
+
+        The head is read by the read protocol, which probes forward from
+        ``CURRENT`` (spec §6.6). ``CURRENT`` moves only when it names an
+        older version (`current_is_older`): a lower ``seq``, or another
+        ``restore_epoch``, so it crosses a restore, and it never moves back
+        past a version another writer moved it to meanwhile.
+
+        Returns:
+            The ``seq`` ``CURRENT`` names after the move, which is the head's,
+            or a later one another writer moved it to meanwhile; ``None`` when
+            it named the head already, or no version has been written.
+
+        Raises:
+            InventoryError: ``CURRENT`` still names an older version after the
+                move; the storage logged why.
+
+        A head whose root cannot be read again raises `InventoryConflictError`.
+        """
+        if not self.has_version():
+            return None
+        head = FullInventory(self._storage.read).refresh().root
+        if not current_is_older(self._held_current(), head):
+            return None
+        self._storage.advance_current(head, self._stored_root(head))
+        after = self._held_current()
+        if after is None or current_is_older(after, head):
+            msg = f"{self._storage.location}: {CURRENT_NAME} did not move to Inventory version {head.seq}"
+            raise InventoryError(msg)
+        return after.seq
+
+    def _held_current(self) -> Current | None:
+        """``CURRENT`` as stored, or ``None`` when it is absent or malformed."""
+        raw = self._storage.read(CURRENT_NAME)
+        if raw is None:
+            return None
+        try:
+            return decode_current(raw)
+        except InventoryError:
+            return None
+
+
+def _retirable(
+    full: FullInventory | None, cutoff: datetime, skipped: Collection[str], kept: Collection[tuple[str, str]]
+) -> dict[str, list[str]]:
+    """The superseded and withdrawn editions that entered their state before *cutoff*, by product.
+
+    Args:
+        full: The head, or ``None``.
+        cutoff: The window's start; older entries retire.
+        skipped: The products left alone.
+        kept: ``(product, edition)`` pairs to keep: the structure editions
+            a live or embargoed data edition's ``partial_of`` cites.
+
+    Returns:
+        The edition ids to retire, by product.
+    """
+    if full is None:
+        return {}
+    found: dict[str, list[str]] = {}
+    for product_id in full.products():
+        if product_id in skipped:
+            continue
+        ids = [
+            e.edition_id
+            for e in full.entries(product_id)
+            if e.state in {"superseded", "withdrawn"}
+            and e.state_changed_at < cutoff
+            and (product_id, e.edition_id) not in kept
+        ]
+        if ids:
+            found[product_id] = ids
+    return found
+
+
+def _cited(full: FullInventory | None, artefacts: Artefacts) -> set[tuple[str, str]]:
+    """The structure editions retirement keeps: those a live or embargoed data edition's ``partial_of`` cites.
+
+    When a manifest the answer needs cannot be read, every structure
+    edition is kept.
+    """
+    try:
+        return cross_product.cited_structures(full, artefacts)
+    except ManifestError as exc:
+        log.warning("retirement keeps every structure edition: a manifest cannot be read (%s)", exc)
+        if full is None:
+            return set()
+        return {(p, e.edition_id) for p in full.products() if full.leaf(p).kind == "structure" for e in full.entries(p)}
+
+
+def retire_change(
+    full: FullInventory | None,
+    cutoff: datetime,
+    *,
+    now: datetime,
+    artefacts: Artefacts,
+    skipped: Collection[str] = (),
+) -> Change | None:
+    """The ``retire`` version for *full*: the superseded and withdrawn entries older than *cutoff*, as tombstones.
+
+    It keeps every structure edition that a live or embargoed data edition's
+    ``partial_of`` cites (specification §11.4), and every structure edition
+    when a manifest that decision needs cannot be read. `CatalogAdmin.prune`
+    and the release job call it inside their `InventoryWriter.commit`
+    callable, so a lost race plans again against the new head.
+
+    Args:
+        full: The head, or ``None`` before the first version.
+        cutoff: The window's start: an entry whose ``state_changed_at`` is
+            before it retires.
+        now: The tombstones' ``retired_at``, and the version's time.
+        artefacts: How the cited structure editions' artefacts are read;
+            pass the writer's `InventoryWriter.artefacts`.
+        skipped: Products left alone.
+
+    Returns:
+        The change: each changed product's leaf, and the head's tombstones
+        followed by the new ones; ``None`` when nothing retires.
+
+    Raises:
+        InventoryRuleError: sdmxlib's ``retire`` refuses an entry.
+    """
+    planned = _retirable(full, cutoff, skipped, _cited(full, artefacts))
+    if full is None or not planned:
+        return None
+    leaves: dict[str, Leaf] = {}
+    tombstones = list(full.root.retired)
+    for product_id, ids in planned.items():
+        try:
+            leaves[product_id], new = retire(full.leaf(product_id), ids, now=now)
+        except TransitionError as exc:
+            raise InventoryRuleError.wrapping(exc, product=product_id, edition=ids[0]) from exc
+        tombstones += new
+    return Change(leaves=leaves, retired=tuple(tombstones), now=now)

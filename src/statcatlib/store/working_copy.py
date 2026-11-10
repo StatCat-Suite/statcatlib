@@ -1575,10 +1575,12 @@ class WorkingCopy:
             except EditionCheckError as exc:
                 self._unrecorded(exc)
                 raise
+
+        def record(full: FullInventory | None) -> Change:
+            return self._record_change(full, sealed)
+
         try:
-            self._writer.commit(
-                lambda full: self._record_change(full, sealed), kind="seal", reason=f"seal {self._edition_id}"
-            )
+            self._writer.commit(record, kind="seal", reason=f"seal {self._edition_id}")
         except _RecordedAlreadyError:
             pass
         except InventoryRuleError as exc:

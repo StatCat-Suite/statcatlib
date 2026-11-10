@@ -44,6 +44,7 @@ from sdmxlib.inventory import (
 from sdmxlib.inventory.conformance import SCHEMA_VERSION
 
 import statcatlib as sc
+from statcatlib.store import blob as blob_module
 from statcatlib.store.blob import (
     MAX_CLOCK_SKEW,
     BlobInventoryStorage,
@@ -63,8 +64,12 @@ from statcatlib.store.inventory import (
     LocalInventoryStorage,
     current_is_older,
 )
+from tests.stores._stores import ReadingOps
+from tests.stores._stores import RecordingOps as RefusingOps
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from obstore import ObjectMeta
 
 pytestmark = pytest.mark.unit
@@ -101,6 +106,7 @@ class RecordingOps(_ObjectOps):
         self.reads: list[str] = []
         self.puts: list[str] = []
         self.heads: list[str] = []
+        self.lists: list[str] = []
         self.before_put: Callable[[str], None] = lambda _path: None
 
     @override
@@ -118,6 +124,11 @@ class RecordingOps(_ObjectOps):
         self.puts.append(path)
         self.before_put(path)
         return super().put(path, data, **kwargs)
+
+    @override
+    def list(self, prefix: str) -> Iterator[ObjectMeta]:
+        self.lists.append(prefix)
+        return super().list(prefix)
 
 
 @pytest.fixture
@@ -504,6 +515,20 @@ class TestObjectOps:
         assert raised.value.outcome_unknown is True
         assert raised.value.__cause__ is fault
 
+    def test_a_list_fault_names_the_prefix_and_chains(self, ops: RecordingOps, monkeypatch: pytest.MonkeyPatch) -> None:
+        fault = GenericError("timeout")
+
+        def fails(*_args, **_kwargs):
+            raise fault
+
+        monkeypatch.setattr(obstore, "list", fails)
+
+        with pytest.raises(BlobStoreError, match="list pending/: GenericError") as raised:
+            list(_ObjectOps(ops._store).list("pending/"))
+
+        assert raised.value.path == "pending/"
+        assert raised.value.__cause__ is fault
+
     @pytest.mark.parametrize("fault", [AlreadyExistsError("x"), PreconditionError("x")], ids=lambda f: type(f).__name__)
     def test_a_lost_condition_reaches_the_caller(
         self, ops: RecordingOps, monkeypatch: pytest.MonkeyPatch, fault: BaseError
@@ -511,6 +536,64 @@ class TestObjectOps:
         _faulty_put(monkeypatch, fault)
         with pytest.raises(type(fault)):
             _ObjectOps(ops._store).put("a", b"")
+
+
+class TestList:
+    def test_it_reads_every_page_under_the_prefix_by_whole_segments(
+        self, ops: RecordingOps, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for n in range(5):
+            ops.put(f"pending/a/{n}.json", b"{}")
+        ops.put("pending/ab/0.json", b"{}")
+        ops.put("products/a/manifest.json", b"{}")
+        pages: list[int] = []
+        real = obstore.list
+
+        def paged(*args, **kwargs):
+            for page in real(*args, **kwargs):
+                pages.append(len(page))
+                yield page
+
+        monkeypatch.setattr(obstore, "list", paged)
+        monkeypatch.setattr(blob_module, "_LIST_PAGE", 2)
+
+        found = list(_ObjectOps(ops._store).list("pending/a"))
+
+        assert sorted(meta["path"] for meta in found) == [f"pending/a/{n}.json" for n in range(5)]
+        assert pages == [2, 2, 1]
+        assert {meta["size"] for meta in found} == {2}
+
+    def test_a_listing_is_read_lazily(self, ops: RecordingOps, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+        real = obstore.list
+
+        def counted(*args, **kwargs):
+            calls.append("list")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(obstore, "list", counted)
+        listing = _ObjectOps(ops._store).list("pending/")
+
+        assert calls == []
+        assert list(listing) == []
+        assert calls == ["list"]
+
+    def test_the_recording_ops_classes_record_it(self, ops: RecordingOps) -> None:
+        ops.put("pending/a/0.json", b"{}")
+        store = ops._store
+
+        assert [m["path"] for m in ops.list("pending/")] == ["pending/a/0.json"]
+        assert ops.lists == ["pending/"]
+
+        reading = ReadingOps(store)
+        assert [m["path"] for m in reading.list("pending/")] == ["pending/a/0.json"]
+        assert reading.under("pending/") == ["pending/"]
+
+        refusing = RefusingOps(store)
+        assert [m["path"] for m in refusing.list("pending/")] == ["pending/a/0.json"]
+        assert refusing.called("list") == ["pending/"]
+        with pytest.raises(pytest.fail.Exception, match="inventory/"):
+            refusing.list("inventory/")
 
 
 def _azure(**kwargs) -> AzureStore:

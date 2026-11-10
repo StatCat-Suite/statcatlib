@@ -73,7 +73,7 @@ from statcatlib.store.inventory import (
 from statcatlib.store.store import IncompatibleCatalogError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Sequence
+    from collections.abc import Callable, Generator, Iterator, Sequence
     from pathlib import Path
     from types import ModuleType
 
@@ -98,6 +98,9 @@ log = logging.getLogger(__name__)
 
 #: How far this machine's clock may run ahead of the storage clock (spec §6.4).
 MAX_CLOCK_SKEW = timedelta(seconds=30)
+
+#: How many objects one page of `_ObjectOps.list` asks the store for.
+_LIST_PAGE = 1000
 
 #: The Blob service version `AzureBlobRest` asks for, the one `object_store` sends.
 _AZURE_VERSION = "2023-11-03"
@@ -205,6 +208,18 @@ class _ObjectOps:
         obstore, _ = _load_obstore()
         with _store_faults("delete", path):
             obstore.delete(self._store, path)
+
+    def list(self, prefix: str) -> Iterator[ObjectMeta]:
+        """Every object under *prefix*, in pages of `_LIST_PAGE`, each object's path from the catalog root.
+
+        `obstore` lists by whole path segments, so ``pending/a`` lists
+        ``pending/a/x.json`` and leaves out ``pending/ab/x.json``. A store fault
+        on any page raises `BlobStoreError`, naming *prefix*.
+        """
+        obstore, _ = _load_obstore()
+        with _store_faults("list", prefix):
+            for page in obstore.list(self._store, prefix, chunk_size=_LIST_PAGE):
+                yield from page
 
 
 def _default_ops(location: BlobLocation) -> _ObjectOps:

@@ -18,6 +18,7 @@ import sdmxlib.storage
 from sdmxlib.edition import ManifestError
 from sdmxlib.inventory import (
     CURRENT_NAME,
+    Current,
     FullInventory,
     InventoryError,
     Leaf,
@@ -303,3 +304,91 @@ class TestCommit:
         monkeypatch.setattr(inventory_module.getpass, "getuser", lambda: "ana")
         monkeypatch.setattr(inventory_module.socket, "gethostname", lambda: "laptop")
         assert inventory_module._actor() == "ana@laptop"
+
+
+class TestNothingToWrite:
+    def test_a_none_change_writes_nothing_and_returns_none(self, writer: InventoryWriter) -> None:
+        writer.try_commit(None, {"a": _leaf(None, "a", 1)}, kind="seal", reason="first")
+        before = _files(writer.root)
+
+        assert writer.commit(lambda _: None, kind="retire", reason="nothing retires") is None
+        assert _files(writer.root) == before
+
+    def test_a_none_change_before_the_first_version_writes_nothing(self, writer: InventoryWriter) -> None:
+        assert writer.commit(lambda _: None, kind="release", reason="nothing is due") is None
+        assert not writer.has_version()
+
+    def test_a_change_that_has_nothing_left_after_a_lost_race_writes_nothing(
+        self, writer: InventoryWriter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = writer.try_commit
+        heads: list[int | None] = []
+
+        def change(full: FullInventory | None) -> Change | None:
+            heads.append(None if full is None else full.seq)
+            if full is None:
+                # Another writer records the same product first; the replanned change finds nothing to do.
+                real(None, {"a": _leaf(None, "a", 1)}, kind="seal", reason="other")
+                return Change(leaves={"a": _leaf(None, "a", 1)})
+            return None
+
+        assert writer.commit(change, kind="seal", reason="mine") is None
+        assert heads == [None, 1]
+        head = writer.head()
+        assert head is not None
+        assert head.event.reason == "other"
+
+
+class TestChangeNow:
+    def test_the_changes_time_is_the_roots(self, writer: InventoryWriter) -> None:
+        when = datetime(2026, 11, 10, 13, 30, 5, 120000, tzinfo=UTC)
+
+        root = writer.commit(lambda _: Change(leaves={"a": _leaf(None, "a", 1)}, now=when), kind="seal", reason="x")
+
+        assert root.created_at == when
+        assert decode_root((writer.root / root_path(1)).read_bytes()).created_at == when
+
+    def test_without_one_the_storage_clock_is_read(
+        self, writer: InventoryWriter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        when = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        monkeypatch.setattr(writer.storage, "now", lambda: when)
+
+        root = writer.commit(lambda _: Change(leaves={"a": _leaf(None, "a", 1)}), kind="seal", reason="x")
+
+        assert root.created_at == when
+
+
+def _lag_current(writer: InventoryWriter, seq: int) -> None:
+    """Point ``CURRENT`` back at version *seq*, as a writer that crashed after its root leaves it."""
+    data = (writer.root / root_path(seq)).read_bytes()
+    current = Current(seq=seq, root_sha256=sha256_hex(data), restore_epoch=0)
+    (writer.root / CURRENT_NAME).write_bytes(encode(current))
+
+
+class TestAdvanceCurrent:
+    def test_it_moves_a_lagging_current_to_the_head(self, writer: InventoryWriter) -> None:
+        one = writer.try_commit(None, {"a": _leaf(None, "a", 1)}, kind="seal", reason="1")
+        writer.try_commit(one, {"b": _leaf(None, "b", 2)}, kind="seal", reason="2")
+        _lag_current(writer, 1)
+
+        assert writer.advance_current() == 2
+        assert decode_current((writer.root / CURRENT_NAME).read_bytes()).seq == 2
+
+    def test_a_current_current_is_left_alone(self, writer: InventoryWriter) -> None:
+        writer.try_commit(None, {"a": _leaf(None, "a", 1)}, kind="seal", reason="1")
+        before = (writer.root / CURRENT_NAME).read_bytes()
+
+        assert writer.advance_current() is None
+        assert (writer.root / CURRENT_NAME).read_bytes() == before
+
+    def test_a_missing_current_is_written(self, writer: InventoryWriter) -> None:
+        writer.try_commit(None, {"a": _leaf(None, "a", 1)}, kind="seal", reason="1")
+        (writer.root / CURRENT_NAME).unlink()
+
+        assert writer.advance_current() == 1
+        assert decode_current((writer.root / CURRENT_NAME).read_bytes()).seq == 1
+
+    def test_a_catalog_with_no_version_has_nothing_to_advance(self, writer: InventoryWriter) -> None:
+        assert writer.advance_current() is None
+        assert not (writer.root / CURRENT_NAME).exists()
