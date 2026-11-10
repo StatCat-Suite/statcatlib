@@ -356,9 +356,10 @@ Inventory and seals editions:
   (Inventory 1.2, GH-125), and `try_commit` raises
   `InventoryWriteRefusedError` for a `catalog.json` at 2.x, decoded with
   `decoder="stage-1-writer"`, or a base more than 5 minutes ahead of the clock.
-  Each entry a seal or the journal repair records carries `dataflows` and
-  `pull_bytes`, and a structure entry `artefacts`
-  (`sdmxlib.inventory.routing_fields`, GH-98); `verify-catalog` checks them.
+  Each entry a seal or the journal repair records carries `dataflows`,
+  `pull_bytes` and `artefacts`, data and structure entries alike
+  (`sdmxlib.inventory.routing_fields`, GH-98, GH-125 part 4);
+  `verify-catalog` checks them.
 - **The storage seam.** `InventoryWriter(root)` takes a directory or an
   `InventoryStorage`. The rules stay in the writer, and the storage holds
   `read`, `create`, `write_leaf`, `advance_current`, `now` and `actor`.
@@ -371,9 +372,8 @@ Inventory and seals editions:
   `HEAD`, refusing a machine clock more than `MAX_CLOCK_SKEW` (30 s) ahead,
   and its actor from `TokenIdentity`'s `oid`, else a given value, else a
   refusal. A failed `CURRENT` move logs a WARNING, since the root is the commit
-  point. A blob writer has no manifest reader until Phase 5, so a blob `commit`
-  with an incoming entry raises `NotImplementedError`; `try_commit` writes
-  versions, and no `CatalogAdmin` runs on blob.
+  point. A blob writer's cross-product rules read each incoming manifest through
+  `ManifestArtefacts(storage.read)`, and no `CatalogAdmin` runs on blob.
 - **The upload.** `upload_edition(edition_dir, location, *, release_at=None)`
   (`upload.py`, `statcat upload`, `statcatlib[blob]`) is Azure-only, and refuses any
   other store with `TypeError`. It creates each data file, then each file of the
@@ -394,9 +394,10 @@ Inventory and seals editions:
   full artefact with no home differs from another data product's copy live
   after the version), item 8 `publish-order` (a data edition entering live
   matches only an embargoed home edition). The rules compare editions of
-  different products only, and read each edition's artefacts through the
-  writer's `ManifestArtefacts` (manifest SHA-256 checked, cached by edition
-  and SHA); a partial with no `partial_of` is skipped. Stale data editions
+  different products only. They read an incoming edition's artefacts through
+  the writer's `ManifestArtefacts` (manifest SHA-256 checked, cached by edition
+  and SHA), and every other entry's from its leaf entry when filled, else from
+  its manifest (`cross_product._records`); a partial with no `partial_of` is skipped. Stale data editions
   (live or embargoed, holding a copy no live or embargoed home edition
   holds) are allowed and derived, never recorded: `stale_editions` lists
   them for `verify-catalog` and `doctor`. `homeless_partials` lists, for
@@ -417,7 +418,7 @@ Inventory and seals editions:
   no rule could refuse it, `_may_be_refused`), whose `CrossProductRuleError`
   leaves the working copy open; rebuilds the search index from the edition's
   rows and drops the carried tables; computes the `statcat` section with
-  `catalog_section(store, kind=...)`; closes the store and registry; calls
+  `catalog_section(store, kind=..., lifecycle=...)`; closes the store and registry; calls
   `sdmxlib.edition.seal(partial_of=...)` with `_meta.partial_of` kept to
   the URNs the store holds as partials, which writes the journal entry and
   then the manifest; on a structure edition, or one whose manifest lists a
@@ -490,11 +491,14 @@ Inventory and seals editions:
   deletes no root, leaf or tombstone. It returns a `PruneReport`.
   `release` and `rollback` raise `CrossProductRuleError` from `commit`.
 - **Section format 3.** The manifest's `statcat` section
-  (`bundle.STATCAT_SECTION_FORMAT`) holds `format`, `kind`,
+  (`bundle.STATCAT_SECTION_FORMAT`) holds `format`, `kind`, `lifecycle`,
   `statcatlib_version`, `datasets` and `search`. `kind` is `"data"` or
   `"structure"`, and `check_catalog` refuses a structure edition that binds
   a dataflow to observations or holds a dataflow, binding or partial
-  (`structure_content`). `check_catalog` runs as the `statcat` extension of
+  (`structure_content`). `lifecycle` (`"final"` or `"revisable"`, written from
+  0.17, optional to a reader) is the product's; the release job's fold records
+  it for a product the Inventory does not record (`fold_lifecycle`), and
+  `check_catalog` refuses another value. `check_catalog` runs as the `statcat` extension of
   `sdmxlib.edition.check_edition`.
 
 `docs/catalog-format.md` specifies the layout and the section, and

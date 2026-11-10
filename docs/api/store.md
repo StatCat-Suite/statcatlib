@@ -126,7 +126,10 @@ product. A product has one working copy at a time, and one writer.
 is recorded with, or `"data"` for a new product. `lifecycle` is `"revisable"`
 or `"final"`. A product keeps the kind and the lifecycle it was first
 recorded with: another value raises `InventoryRuleError` with `rule="kind"`
-or `rule="lifecycle"` before anything is built. `embedding_model` and the
+or `rule="lifecycle"` before anything is built. The seal writes the lifecycle
+into the manifest's `statcat` section, where the release job reads it for a
+product the Inventory does not record yet ([catalog format
+§3.1](../catalog-format.md#31-versions)). `embedding_model` and the
 prefixes are the encoder settings the seal's index rebuild uses.
 
 ```python
@@ -360,10 +363,12 @@ Inventory read; `bench/inventory_read.py` does that over Azurite.
 
 `InventoryWriter` commits Inventory versions to a catalog in object storage
 through `BlobInventoryStorage` (`statcatlib[blob]`). Working copies and seals
-stay on local disk. Only tests and benches write versions there, with
-`try_commit`. `CatalogAdmin` runs on local catalogs only, and a `commit` with an
-entry that becomes live or embargoed raises `NotImplementedError`, naming Phase
-5, which builds the manifest reader the cross-product rules need.
+stay on local disk. Only tests and benches write versions there. `CatalogAdmin`
+runs on local catalogs only. A `commit` with an entry that becomes live or
+embargoed runs the cross-product rules, which read that edition's manifest
+through the storage (`ManifestArtefacts(storage.read)`) and every other
+product's records from its leaf entry; a missing or altered manifest raises
+`ManifestError`, and nothing is written.
 
 ```python
 from obstore.store import AzureStore
