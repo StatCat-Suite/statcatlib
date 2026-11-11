@@ -18,7 +18,7 @@ products (`catalog.py`), the operational changes to its Inventory
 an sdmxlib edition manifest (`bundle.py`), the integrity and support
 checks behind `statcat verify-catalog` and `statcat doctor`
 (`diagnostics.py`), the copy of a sealed edition to object storage (`upload.py`), the
-jobs configuration the release and GC jobs read (`jobs.py`), composable query filters
+jobs configuration the release and GC jobs read (`jobs.py`), the GC job (`gc.py`), composable query filters
 (`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`)
 and test catalogs (`testing.py`).
 
@@ -204,6 +204,65 @@ re-exported from `statcatlib`. Standard library and `attrs` only.
   port=None)`.
 - `parse_duration(text) -> timedelta` (`^[0-9]+[smhd]$`) and
   `format_duration(value) -> str` (the largest whole unit, as messages write it).
+- `decode_registration(path, raw) -> Registration`: reads
+  `pending/<product_id>/<edition_id>.json` as the release job's fold and the GC job
+  read it. `ValueError` for a path of another shape, a product id that cannot name a
+  directory (`_PRODUCT_ID`, `store/blob.py`'s `_SAFE_ID` pattern), an edition id that
+  is no canonical UUIDv7, a document that is not one object with the keys
+  `edition_id` and `release_at` in that order, an `edition_id` other than the file
+  name's, a `release_at` that is neither `null` nor a zoned time, or bytes that differ
+  from `_pending_document` of their own decode.
+- `Registration(product_id, edition_id, release_at)` (frozen): `path`, and
+  `edition_time`, the UUIDv7's time, which the tombstone window is measured from.
+- `_pending_document(edition_id, release_at) -> bytes`: the `pending/` document's
+  bytes, the contract `docs/catalog-format.md` §1.5 states; `upload.py` writes with
+  it. `_stamp(moment)` writes a time in UTC to the millisecond with `Z`.
+- `_emit(logger, level, event, message)`: logs *message* with the JSON object *event*
+  as the record's `_EVENT_ATTRIBUTE` (`"statcat_event"`), the D14 event a job command
+  prints as one line on standard output.
+
+### `gc.py`
+
+The GC job (Phase 5 D10), imported from `statcatlib.gc`; nothing is re-exported from
+`statcatlib`. `statcat gc` runs it.
+
+- `collect_garbage(location, policy, *, storage=None, dry_run=False, forecast=None,
+  discard=()) -> GcReport`: runs `policy.check()` (`JobsConfigError` before any
+  read), parses each *discard* as `<product>/<edition>` (`ValueError`), reads
+  `storage.now()` once (`storage` defaults to `BlobInventoryStorage(location)`), then
+  `_Run`'s steps: `inventory()` (the head through `FullInventory`, then older roots
+  by `seq` until `keep_roots` are read and one created before `now - gc_window`,
+  never at or below `HISTORY.expired_through`; leaves by hash on `GC_THREADS`),
+  the discard refusal (`ValueError` naming `statcat admin cancel` for an edition the
+  head records or a root read keeps), `registrations()` (LIST `pending/`; a
+  registration of an edition the head records is `folded` once last modified
+  before the cutoff and is never read; any other is decoded with
+  `jobs.decode_registration`, and an unreadable one fails its product closed; one
+  whose `edition_time` is older than `tombstone_window` is `expired-registration`
+  and protects nothing), `manifests()` (every kept and registered manifest on
+  `GC_THREADS`; a kept one must match its `manifest_sha256`, a registered one must
+  name its path; a failure, or a kept tombstone with no entry read, fails the
+  product closed), `products()` (LIST `products/`: `data/` files no manifest lists,
+  older than `upload_grace`, outside failed-closed products, are `unreferenced`)
+  and `directories()` (`retired` for an edition tombstoned before the cutoff and not
+  kept; `discarded`; `gc.unregistered` for a directory nothing keeps or registers,
+  older than `upload_grace`). It logs every `gc.planned` line, then each
+  `gc.forecast_deviation`, then deletes unless `dry_run`, in three pooled phases:
+  registrations and `data/` files; each directory's `manifest.json` once its
+  registration, if any, is deleted; the rest once its manifest is deleted or absent.
+  With *forecast* only paths in both plans are deleted.
+- `GcReport(planned, deleted, failed, failed_closed, unregistered, deviations,
+  dry_run)` and `Deletion(path, reason, edition=None)`, frozen. `Reason` is
+  `retired`, `unreferenced`, `folded`, `expired-registration` or `discarded`.
+- `GcStoppedError(RuntimeError)`: no `catalog.json`, an opted-in catalog with no
+  `HISTORY`, an unreadable head, any root the reader skipped, a missing or invalid
+  root above `expired_through`, a missing or unhashed leaf. Nothing is deleted.
+- `_delete(location, path)` refuses (`ValueError`) any path outside `products/` and
+  `pending/`, and returns a `BlobStoreError`'s text in place of raising it.
+- Events go through `jobs._emit` on the `statcatlib.gc` logger: deletion log lines
+  (`event`, `path`, `reason`, `edition`, and `error` on `gc.delete_failed`) and D14
+  alerts (`event`, `severity`, `at`, `catalog`, and `product`, `edition`, `reason`,
+  `detail` when they apply).
 
 ### `checks.py`
 
@@ -275,8 +334,8 @@ The module keeps its 0.11 name and describes editions. Imported from
 - `UploadCheckError(findings)` (`RuntimeError`): any finding, an oversize file, a
   path leaving its directory, a rotted local file, a differing manifest, or a
   differing `pending/` document.
-- `_pending_document(edition_id, release_at) -> bytes`: the `pending/` document's
-  bytes, the contract `docs/catalog-format.md` §1.5 states.
+- `_pending_document` comes from `jobs.py`, which the release job's fold and GC
+  decode against.
 - `_lookup(rest, manifest)`: adapts `rest.head` to sdmxlib's `Lookup`, asking once per
   file. `_store_path(manifest, entry)` normalises `../data/`, which `obstore` refuses.
 - `MAX_PUT_BYTES`: Put Blob's limit, 5,000 MiB.
@@ -455,6 +514,13 @@ read.
   none. A refusal in one product never stops another's. A crash during the
   batch leaves each sealed, unrecorded edition's journal entry, so its
   product's next `working_copy()` records it, in a version of its own.
+- `collect_garbage` deletes nothing when it cannot read the Inventory back through
+  the window (`GcStoppedError`), nothing under the `data/` of a product whose
+  manifest or registration it cannot read or verify, no file a kept or registered
+  manifest lists, no `data/` file younger than `upload_grace`, no edition directory
+  whose tombstone is within the window or that no Inventory version read records,
+  and nothing under `inventory/` or `history/`. A directory loses `manifest.json`
+  before any other file, and keeps every file when it keeps its manifest.
 - `CatalogAdmin.prune` never retires or deletes anything of a product with
   an unsealed edition or a seal journal entry, deletes only the directories
   of tombstoned editions, and deletes no Inventory root, leaf or tombstone.
@@ -484,10 +550,18 @@ read.
   the `statcatlib.admin` logger.
 - `diagnostics.verify_catalog` opens each edition in a DuckDB engine of
   `check_edition`'s own; neither it nor `diagnostics.doctor` writes a file.
-- These modules make no network calls, except `upload.py` and `admin.py`, which
-  reach a store only through the `BlobLocation` they are given. `jobs.py` reads
+- These modules make no network calls, except `upload.py`, `admin.py` and `gc.py`,
+  which reach a store only through the `BlobLocation` they are given. `jobs.py` reads
   the one file it is given.
+- `gc.collect_garbage` writes nothing. It deletes under `products/` and `pending/`
+  only, unless `dry_run`, and logs each event on the `statcatlib.gc` logger at INFO
+  (`gc.planned`, `gc.deleted`), WARNING (`gc.failed_closed`, `gc.unregistered`,
+  `gc.forecast_deviation`) or ERROR (`gc.delete_failed`). It sends one anonymous
+  `HEAD` for the storage clock unless its storage has a `clock=`.
 
 ## Verification
 
 - Run: `just ci` (unit tier alone: `uv run pytest -m unit`).
+- GC: `tests/test_gc.py` (every rule over a `MemoryStore`, with the helpers in
+  `tests/_gc.py`), `tests/test_cli_gc.py` and, against Azurite,
+  `tests/stores/test_gc.py`; `decode_registration` in `tests/test_jobs_config.py`.

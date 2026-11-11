@@ -10,18 +10,19 @@ catalog directory, and calls one library function. The work itself lives in
 delegates to the private `_Store.build_index` (`../store/store.py`), and in
 `statcatlib.diagnostics` (`../diagnostics.py`) for `verify-catalog` and
 `doctor`, in `statcatlib.CatalogAdmin.prune` (`../admin.py`) for `prune`, in
-`statcatlib.upload_edition` (`../upload.py`) for `upload`, and in
-`statcatlib.CatalogAdmin` for `advance-current` and the `admin` group.
+`statcatlib.upload_edition` (`../upload.py`) for `upload`, in
+`statcatlib.CatalogAdmin` for `advance-current` and the `admin` group, and in
+`statcatlib.gc.collect_garbage` (`../gc.py`) for `gc`.
 
 The CLI needs the `search` extra (`uv add 'statcatlib[search]'`, or
 `pip install 'statcatlib[search]'`), which supplies `typer`, `rich`,
 `lancedb` and `sentence-transformers`. Importing the module without `typer`
 and `rich` fails. `upload` needs the `blob` extra, which supplies `typer`, `rich`,
-`obstore` and `azure-identity`, and so do `advance-current` and `admin` over an
-`az://` catalog. `build-index` is the only command that needs `search`.
+`obstore` and `azure-identity`, and so do `gc`, and `advance-current` and `admin`
+over an `az://` catalog. `build-index` is the only command that needs `search`.
 
-The console script is `statcat`, with six commands, `build-index`,
-`verify-catalog`, `doctor`, `prune`, `upload` and `advance-current`, and the
+The console script is `statcat`, with seven commands, `build-index`,
+`verify-catalog`, `doctor`, `prune`, `upload`, `advance-current` and `gc`, and the
 `admin` group (`admin_app`, added with `app.add_typer`): `editions`, `release`,
 `cancel`, `rollback` and `embargo`.
 
@@ -50,6 +51,7 @@ Commands:
 | `statcat admin cancel URL PRODUCT EDITION --reason TEXT` | `admin_cancel` | `.cancel(product, edition, reason=)` | as `release` |
 | `statcat admin rollback URL PRODUCT [--to EDITION] [--if-live EDITION] --reason TEXT` | `admin_rollback` | `.rollback(product, to=, if_live=, reason=)` | as `release` |
 | `statcat admin embargo URL on\|off --reason TEXT` | `admin_embargo` | `.set_embargo(on=, reason=)` | as `release`, and the setting the catalog has already (`ValueError`) |
+| `statcat gc AZ_URL --config FILE [--dry-run] [--forecast FILE] [--discard PRODUCT/EDITION ...]` | `gc` | `load_jobs_config(config)`, then `collect_garbage(location, jobs.retention, storage=BlobInventoryStorage(location), dry_run=, forecast=_forecast(file), discard=)` | a `JobsConfigError` (before any request; stdout empty), a `GcStoppedError`, `InventoryError` (the storage clock included), `BlobStoreError` or `ClientAuthenticationError` (`step.failed` on stdout, `ERROR <message>` on stderr), or a failed deletion (`FAIL <path>: <error>`); exit 2 as `upload` for a usage error, `s3://` or a refused variable, and for an unreadable or non-JSON `--forecast`, a `--discard` that is no `<product>/<edition>` or names a recorded edition (`ValueError`), or a store other than `AzureStore` (`_require_azure`) |
 | `statcat upload EDITION_DIR AZ_URL [--release-at TIME]` | `upload` | `upload_edition(edition_dir, location, release_at=)` | a finding, each printed as `FAIL <file>: <detail>`, or a `ManifestError`, `BlobStoreError` or `ClientAuthenticationError`, printed as `ERROR <message>`; exit 2 on a usage error, a bad `AZ_URL`, `s3://`, no `AZURE_STORAGE_ACCOUNT_NAME`, a refused `obstore` variable set, even empty, in any spelling `obstore` reads (`_REFUSED_VARIABLES`, matched by `_refused_variables`: `AZURE_` then any case), a naive time, a missing `blob` extra, or an environment value `obstore` cannot parse, such as `AZURE_DISABLE_TAGGING=junk` (`GenericError` from the store build, before any request) |
 
 `build-index` options and their `WorkingCopy.build_index` keyword:
@@ -90,8 +92,8 @@ Private helpers that tests and later commands rely on:
   environment's names that `obstore` would parse as a refused key, as spelled.
   `_azure_location(uri, account, *, command="upload", timeout=_UPLOAD_TIMEOUT)` builds the
   store with `obstore.store.from_url`, `TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))`
-  and *timeout* (one hour for `upload`, `_ADMIN_TIMEOUT` five minutes for `advance-current` and
-  `admin`; Phase 5 D15's generalised helper, which `statcat release` and `statcat gc` will take),
+  and *timeout* (one hour for `upload`, `_ADMIN_TIMEOUT` five minutes for `advance-current`,
+  `admin` and `gc`; Phase 5 D15's generalised helper, which `statcat release` will take too),
   and turns obstore's `GenericError` from that build into `_usage`, with the text from
   `_store_build_message(exc)`: obstore's first line, and the `AZURE_DISABLE_TAGGING` spelling the
   environment sets, since obstore 0.12.1's message omits the variable. `_auth_error()` returns
@@ -102,6 +104,15 @@ Private helpers that tests and later commands rely on:
   directory) and runs *action*; `_ADMIN_ERRORS`, and the credential error on `az://`, print as
   `ERROR <message>` and exit 1. `_reason(reason)` exits 2 on a blank `--reason`. `_Switch` is
   `embargo`'s `on`/`off`.
+- `gc`'s helpers: `err_console` (a `Console(stderr=True)`) and `_tell(line, style=None)`
+  print the human lines on standard error. `_events(name)` attaches `_EventLines` to
+  the logger *name* (INFO, no propagation) while the block runs, which prints each
+  record's `jobs._EVENT_ATTRIBUTE` object as one compact JSON line on standard
+  output and ignores any other record. `_forecast(path)` reads the `gc.planned`
+  lines' paths, `_require_azure(location, command)` exits 2 for a store other than
+  `obstore.store.AzureStore` (through `store.blob._load_obstore`, no new import),
+  `_event(...)` builds `jobs.config` and `step.failed`, and `_gc_summary(report)`
+  prints `FAILED-CLOSED`, `UNREGISTERED`, `DEVIATION`, `FAIL` and the summary.
 - `_parse_codelist_policy(raw)` — accepts only mode `fts_only`
   (`_ACCEPTED_CODELIST_MODES`); raises `typer.BadParameter` otherwise.
 - `_parse_reference_metadata_blend(raw)` — `max_chars` must be a positive
@@ -152,6 +163,10 @@ Private helpers that tests and later commands rely on:
   `retire`) and deletes edition directories and `data/` files.
 - `admin editions` writes nothing. Each other `admin` command writes one
   Inventory version, and `advance-current` writes `CURRENT` alone, or nothing.
+- `gc` writes nothing to the catalog. It deletes under `products/` and `pending/`
+  unless `--dry-run`. Its standard output holds one JSON line per event and nothing
+  else (`jobs.config`, the deletion log, the alerts, `step.failed`); its human lines
+  and summary go to standard error.
 
 - `build-index` writes the working copy's `search/` directory: the
   edition's tables, `search/index.json`, and `search/embeddings.json`. It
@@ -167,7 +182,7 @@ Private helpers that tests and later commands rely on:
 - `_load_encoder` first loads the model with `local_files_only=True`. On
   `OSError` it loads again with network access, which can download the
   model from Hugging Face.
-- All commands print to stdout. A command failure exits 1 (the cases in the
+- All commands but `gc` print to stdout. A command failure exits 1 (the cases in the
   table above). Usage errors exit 2 through Click: a `CATALOG` path that is
   missing or not a directory, `--batch-size` or `--max-codes-per-codelist`
   below 1 (`min=1`), `prune` without `--older-than` or `--reason` or with
@@ -178,4 +193,4 @@ Private helpers that tests and later commands rely on:
 - Run: `just ci` (the project gate).
 - Unit tier only: `uv run pytest -m unit`.
 - CLI tests: `uv run pytest -m unit tests/test_cli_build_index.py`; `advance-current` and
-  `admin`: `tests/test_cli_admin.py`.
+  `admin`: `tests/test_cli_admin.py`; `gc`: `tests/test_cli_gc.py`.

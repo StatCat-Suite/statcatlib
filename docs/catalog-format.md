@@ -128,7 +128,9 @@ re-ingest steps.
 A catalog in object storage also holds `pending/<product_id>/<edition_id>.json`, one
 document per uploaded edition that waits for Phase 5's fold. [`statcat
 upload`](api/blob.md) creates it after every listed file is verified, and nothing else
-writes it. A local catalog has none.
+writes it. [`statcat gc`](api/gc.md) deletes it once the Inventory has recorded the
+edition for longer than the GC window, once its `edition_id` time is older than the
+tombstone window, or on an operator's `--discard`. A local catalog has none.
 
 The document is UTF-8 compact JSON with two keys in this order:
 

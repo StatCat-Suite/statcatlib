@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: artefact records in every leaf entry, the section's `lifecycle`, and `CatalogAdmin` on object storage, on sdmxlib 0.88
+## Next release: artefact records in every leaf entry, the section's `lifecycle`, `CatalogAdmin` on object storage, and `statcat gc`, on sdmxlib 0.88
 
 statcatlib requires `sdmxlib>=0.88,<0.89`. No catalog is rebuilt. sdmxlib 0.88's
 `read_manifest` and `decode_manifest` raise `sdmxlib.edition.ManifestError` for a
@@ -73,6 +73,14 @@ The CLI gains `statcat advance-current URL` and `statcat admin` (`editions`,
 `release`, `cancel`, `rollback`, `embargo`), over a catalog directory or `az://`.
 `statcatlib.jobs` reads and checks the jobs configuration both server jobs will read
 ([The jobs configuration](api/jobs.md)).
+
+`statcat gc AZ_URL --config FILE` is the GC job on a catalog in Azure Blob Storage, and
+`statcatlib.gc.collect_garbage` its library call. It deletes retired edition
+directories, unreferenced `data/` files and old `pending/` registrations, writes no
+Inventory version, and prints its deletion log as JSON lines on standard output
+([The GC job](api/gc.md)). Nothing on a local catalog changes: `statcat prune` still
+prunes a catalog directory. `statcatlib.jobs.decode_registration(path, raw)` reads a
+`pending/` registration as the release job's fold and GC read it.
 
 ## 0.16.1: `statcat upload` refuses more `obstore` variables
 
