@@ -25,9 +25,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import posixpath
-from datetime import UTC
 from typing import TYPE_CHECKING, Protocol
 
 from attrs import frozen
@@ -41,6 +39,7 @@ from sdmxlib.edition import (
 )
 
 from statcatlib.bundle import STATCAT_SECTION
+from statcatlib.jobs import _pending_document
 from statcatlib.store.blob import (
     AzureBlobRest,
     BlobStoreError,
@@ -244,14 +243,6 @@ def _verify(edition_dir: Path, manifest: Manifest, raw: bytes, ops: _ObjectOps, 
         findings.append(Finding("remote", path, "the uploaded manifest differs from the local one"))
     if findings:
         raise UploadCheckError(findings)
-
-
-def _pending_document(edition_id: str, release_at: datetime | None) -> bytes:
-    """The ``pending/`` entry: compact UTF-8 JSON, the time in UTC to the millisecond; equal input gives equal bytes."""
-    stamp = None
-    if release_at is not None:
-        stamp = release_at.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    return json.dumps({"edition_id": edition_id, "release_at": stamp}, separators=(",", ":")).encode()
 
 
 def _register(path: str, document: bytes, ops: _ObjectOps) -> bool:

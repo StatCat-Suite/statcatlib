@@ -1,16 +1,18 @@
 """statcatlib command-line interface.
 
 Top-level entry point installed as the ``statcat`` console script. It has
-six commands: `build_index`, which builds the search index of a product's
+seven commands: `build_index`, which builds the search index of a product's
 working copy; `verify_catalog`, which checks a catalog's integrity; `doctor`,
 which reports on a catalog for support; `prune`, which retires old editions
 and deletes the files no edition needs; `upload`, which copies a sealed
-edition to Azure Blob Storage; and `advance_current`, which moves ``CURRENT``
-forward. The ``admin`` group (`admin_app`) makes the operational changes:
-``editions``, ``release``, ``cancel``, ``rollback`` and ``embargo``, over a
-catalog directory or ``az://``. The CLI is intentionally thin — the work lives
+edition to Azure Blob Storage; `advance_current`, which moves ``CURRENT``
+forward; and `gc`, the GC job over a catalog in Azure Blob Storage. The
+``admin`` group (`admin_app`) makes the operational changes: ``editions``,
+``release``, ``cancel``, ``rollback`` and ``embargo``, over a catalog directory
+or ``az://``. The CLI is intentionally thin — the work lives
 in `statcatlib.WorkingCopy.build_index`, `statcatlib.diagnostics`,
-`statcatlib.CatalogAdmin` and `statcatlib.upload_edition`.
+`statcatlib.CatalogAdmin`, `statcatlib.upload_edition` and
+`statcatlib.gc.collect_garbage`.
 
 `build_index` requires the ``[search]`` extra (typer + sentence-transformers +
 lancedb), and `upload` the ``[blob]`` extra (typer + obstore + azure-identity).
@@ -20,7 +22,9 @@ Python 3.15 is the minimum version.
 
 from __future__ import annotations
 
+import contextlib
 import enum
+import json
 import logging
 import os
 import sys
@@ -28,7 +32,7 @@ import time
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, override
 
 import typer
 from rich.console import Console
@@ -50,12 +54,21 @@ from sdmxlib.inventory import InventoryError
 
 import statcatlib as sc
 from statcatlib import diagnostics
-from statcatlib.store.blob import BlobLocation, BlobStoreError, TokenIdentity, _token_identity
+from statcatlib.gc import GcReport, GcStoppedError, collect_garbage
+from statcatlib.jobs import _EVENT_ATTRIBUTE, JobsConfigError, _emit, _stamp, load_jobs_config
+from statcatlib.store.blob import (
+    BlobInventoryStorage,
+    BlobLocation,
+    BlobStoreError,
+    TokenIdentity,
+    _load_obstore,
+    _token_identity,
+)
 from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES, IncompatibleCatalogError
 from statcatlib.upload import UploadCheckError, upload_edition
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
 
     from sdmxlib.edition import Lifecycle
 
@@ -981,6 +994,183 @@ def admin_embargo(
     on = setting is _Switch.ON
     seq = _admin_call(url, "admin embargo", lambda admin: admin.set_embargo(on=on, reason=why))
     _wrote(seq, f"embargo {setting.value}")
+
+
+# -- gc -----------------------------------------------------------------------
+
+#: The human lines of a job command, on standard error; standard output holds its events only.
+err_console = Console(stderr=True)
+
+#: The logger `statcatlib.gc` logs its events on.
+_GC_LOGGER = "statcatlib.gc"
+
+
+def _tell(line: str, style: str | None = None) -> None:
+    """Print *line* on standard error, plain, as `_say` prints on standard output."""
+    err_console.print(escape(line), style=style, soft_wrap=True, highlight=False)
+
+
+class _EventLines(logging.Handler):
+    """Prints each job event (`statcatlib.jobs._emit`) as one compact JSON line on standard output."""
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        event = getattr(record, _EVENT_ATTRIBUTE, None)
+        if isinstance(event, dict):
+            sys.stdout.write(json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
+
+@contextlib.contextmanager
+def _events(name: str) -> Generator[logging.Logger]:
+    """While the block runs, print the events of the logger *name* on standard output, and nothing else of it."""
+    logger = logging.getLogger(name)
+    handler = _EventLines()
+    level, propagate = logger.level, logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        yield logger
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)
+        logger.propagate = propagate
+
+
+def _forecast(path: Path) -> frozenset[str]:
+    """The paths of the ``gc.planned`` lines in an earlier dry run's output; an unreadable file exits 2."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        _usage(f"--forecast {path}: cannot be read: {exc}")
+    planned: set[str] = set()
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            _usage(f"--forecast {path}: line {number} is no JSON line of statcat gc --dry-run")
+        if isinstance(event, dict) and event.get("event") == "gc.planned" and isinstance(event.get("path"), str):
+            planned.add(event["path"])
+    return frozenset(planned)
+
+
+def _require_azure(location: BlobLocation, command: str) -> None:
+    """Exit 2 unless *location*'s store is an `AzureStore`: the server jobs run on Azure only (Phase 4 W3)."""
+    obstore, _ = _load_obstore()
+    if not isinstance(location.store, obstore.store.AzureStore):
+        _usage(
+            f"{command} supports AzureStore only, as upload does (Phase 4 W3); "
+            f"this store is a {type(location.store).__name__}"
+        )
+
+
+def _event(name: str, severity: str, at: datetime | None, catalog: str, detail: dict[str, object]) -> dict[str, object]:
+    return {
+        "event": name,
+        "severity": severity,
+        "at": None if at is None else _stamp(at),
+        "catalog": catalog,
+        "detail": detail,
+    }
+
+
+def _gc_summary(report: GcReport) -> None:
+    """Print *report*'s findings and its summary on standard error."""
+    for product_id, why in report.failed_closed.items():
+        _tell(f"FAILED-CLOSED {product_id}: {why}", style="yellow")
+    for edition in report.unregistered:
+        _tell(f"UNREGISTERED {edition}: rerun its upload, or discard it with --discard", style="yellow")
+    for path, side in report.deviations.items():
+        _tell(f"DEVIATION {path}: in the {side} only, not deleted", style="yellow")
+    for path, error in report.failed.items():
+        _tell(f"FAIL {path}: {error}", style="red")
+    summary = (
+        f"GC planned {len(report.planned)} deletion(s) and deleted {len(report.deleted)}; {len(report.failed)} "
+        f"failed, {len(report.failed_closed)} product(s) failed closed, {len(report.unregistered)} unregistered "
+        f"edition(s), {len(report.deviations)} deviation(s) from the forecast."
+    )
+    if report.dry_run:
+        summary += " This dry run deleted nothing."
+    _tell(summary, style="red" if report.failed else "green")
+
+
+@app.command("gc")
+def gc(
+    az_url: str = typer.Argument(
+        ..., metavar="AZ_URL", help="The catalog root: az://<container>, or az://<container>/<prefix>."
+    ),
+    config: Path = typer.Option(..., "--config", metavar="FILE", help="The jobs configuration, a TOML file."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Plan and print the plan; delete nothing."),
+    forecast: Path | None = typer.Option(
+        None,
+        "--forecast",
+        metavar="FILE",
+        help="An earlier --dry-run's output: delete only the paths both plans hold.",
+    ),
+    discard: list[str] | None = typer.Option(
+        None,
+        "--discard",
+        metavar="PRODUCT/EDITION",
+        help="Delete an edition the Inventory does not record: its registration, manifest and directory. Repeatable.",
+    ),
+) -> None:
+    """Delete what no edition needs from a catalog in Azure Blob Storage: the GC job (Phase 5 D10).
+
+    It runs `statcatlib.gc.collect_garbage` with the jobs configuration's
+    ``[retention]``, under `DefaultAzureCredential` and the account in
+    ``AZURE_STORAGE_ACCOUNT_NAME``, with `statcat upload`'s environment rules. It
+    reads the Inventory back through the GC window and the newest ``keep_roots``
+    roots, the registrations and every kept and registered manifest, lists
+    ``products/`` and ``pending/``, and deletes retired edition directories,
+    unreferenced ``data/`` files older than ``upload_grace``, folded registrations
+    older than the window and registrations older than the tombstone window. It
+    writes nothing and touches nothing under ``inventory/`` or ``history/``.
+
+    Standard output holds one JSON line per event and nothing else: ``jobs.config``
+    with the file's SHA-256, then the deletion log (``gc.planned``, ``gc.deleted``,
+    ``gc.delete_failed``, each with ``path``, ``reason`` and ``edition``) and the
+    alerts (``gc.failed_closed``, ``gc.unregistered``, ``gc.forecast_deviation``,
+    ``step.failed``). Standard error holds the human lines and the summary. It
+    exits 0 when the plan ran, with failed-closed products and unregistered editions
+    reported; 1 when a deletion failed, the configuration is refused, or the run
+    stopped, printed as ``ERROR <message>``; and 2 on a usage error, as ``statcat
+    upload``'s, an unreadable ``--forecast``, a ``--discard`` that is no
+    ``<product>/<edition>`` or names an edition the Inventory records, or a store
+    other than `AzureStore`.
+    """
+    uri = _catalog_uri(az_url, command="gc")
+    planned = None if forecast is None else _forecast(forecast)
+    try:
+        jobs = load_jobs_config(config)
+    except JobsConfigError as exc:
+        _tell(f"ERROR {exc}", style="red")
+        raise typer.Exit(code=1) from None
+    location = _azure_location(uri, _azure_account("gc"), command="gc", timeout=_ADMIN_TIMEOUT)
+    _require_azure(location, "gc")
+    auth_error = _auth_error()
+    storage = BlobInventoryStorage(location)
+    at: datetime | None = None
+    with _events(_GC_LOGGER) as events:
+        try:
+            at = storage.now()
+            detail: dict[str, object] = {"path": str(config), "sha256": jobs.sha256}
+            _emit(events, logging.INFO, _event("jobs.config", "info", at, uri, detail), f"jobs.config {jobs.sha256}")
+            report = collect_garbage(
+                location, jobs.retention, storage=storage, dry_run=dry_run, forecast=planned, discard=discard or ()
+            )
+        except (GcStoppedError, InventoryError, BlobStoreError, auth_error) as exc:
+            failure = _event("step.failed", "error", at, uri, {"step": "gc", "error": str(exc)})
+            _emit(events, logging.ERROR, failure, f"step.failed {exc}")
+            _tell(f"ERROR {exc}", style="red")
+            raise typer.Exit(code=1) from None
+        except ValueError as exc:
+            _usage(str(exc))
+    _gc_summary(report)
+    if report.failed:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

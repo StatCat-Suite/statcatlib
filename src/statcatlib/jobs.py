@@ -36,14 +36,21 @@ any value of the wrong type. ``[access]`` is optional here, since GC reads none
 of it; the release job requires it. ``[expiry]`` defaults to
 ``enabled = false``. Every refusal raises `JobsConfigError`, naming the file and
 the key.
+
+`decode_registration` reads a ``pending/`` registration as the release job's fold
+and the GC job both read it. `_emit` logs a job event (D14) that ``statcat release``
+and ``statcat gc`` print as one JSON line.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import re
 import tomllib
-from datetime import date, datetime, timedelta
+import uuid
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,7 +68,9 @@ __all__ = [
     "JobsConfig",
     "JobsConfigError",
     "Principal",
+    "Registration",
     "RetentionPolicy",
+    "decode_registration",
     "format_duration",
     "load_jobs_config",
     "parse_duration",
@@ -101,6 +110,16 @@ DEFAULT_UPLOAD_GRACE = timedelta(hours=24)
 _EXPIRY_ENABLED_KEYS = ("not_before", "namespace", "deployments", "port")
 
 _MAX_PORT = 65535
+
+#: What a product id from a ``pending/`` path may be: one plain path segment, as
+#: `statcatlib.store.blob` requires of an id that names a directory.
+_PRODUCT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+#: The two keys of a ``pending/`` document, in their order (spec §11.2 step 1).
+_REGISTRATION_KEYS = ["edition_id", "release_at"]
+
+#: The `logging.LogRecord` attribute that holds a job event (D14), set by `_emit`.
+_EVENT_ATTRIBUTE = "statcat_event"
 
 
 class JobsConfigError(ValueError):
@@ -515,3 +534,139 @@ def _instant(key: str, value: object) -> datetime:
         msg = f"{key} {value!s} has no time zone: end it with Z or an offset"
         raise JobsConfigError(msg)
     return parsed
+
+
+def _stamp(moment: datetime) -> str:
+    """*moment* in UTC to the millisecond, ending in ``Z``: the form of a root's ``created_at``."""
+    return moment.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _pending_document(edition_id: str, release_at: datetime | None) -> bytes:
+    """The ``pending/`` entry: compact UTF-8 JSON, the time in UTC to the millisecond; equal input gives equal bytes."""
+    stamp = None if release_at is None else _stamp(release_at)
+    return json.dumps({"edition_id": edition_id, "release_at": stamp}, separators=(",", ":")).encode()
+
+
+def _uuid7_time(value: str) -> datetime | None:
+    """The time a canonical UUIDv7 *value* carries, or ``None`` when *value* is no canonical UUIDv7."""
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    if parsed.version != 7 or str(parsed) != value:
+        return None
+    return datetime.fromtimestamp(parsed.time / 1000, UTC)
+
+
+@frozen
+class Registration:
+    """A ``pending/<product_id>/<edition_id>.json`` registration, as `decode_registration` reads it.
+
+    Attributes:
+        product_id: The product, from the path.
+        edition_id: The edition, a UUIDv7 equal to the file name.
+        release_at: When the upload asked the edition to be released, in UTC,
+            or ``None`` for no scheduled release.
+    """
+
+    product_id: str
+    edition_id: str
+    release_at: datetime | None
+
+    @property
+    def path(self) -> str:
+        """The registration's path from the catalog root."""
+        return f"pending/{self.product_id}/{self.edition_id}.json"
+
+    @property
+    def edition_time(self) -> datetime:
+        """The time the edition id carries, which the tombstone window is measured from (spec §11.2 step 2).
+
+        Raises:
+            ValueError: `edition_id` is no canonical UUIDv7, which
+                `decode_registration` refuses.
+        """
+        found = _uuid7_time(self.edition_id)
+        if found is None:
+            msg = f"{self.edition_id!r} is no canonical UUIDv7"
+            raise ValueError(msg)
+        return found
+
+
+def decode_registration(path: str, raw: bytes) -> Registration:
+    """The registration *raw* holds at *path*, read as the release job's fold and the GC job read it.
+
+    The bytes must be the document ``statcat upload`` writes for its own
+    decode (spec §11.2 step 1): two keys, ``edition_id`` then ``release_at``,
+    compact, ``edition_id`` equal to the file name and a canonical UUIDv7, and
+    ``release_at`` ``null`` or UTC with ``Z`` and milliseconds.
+
+    Args:
+        path: ``pending/<product_id>/<edition_id>.json``, from the catalog root.
+        raw: The bytes stored there.
+
+    Returns:
+        The registration.
+
+    Raises:
+        ValueError: *path* is no registration's path, or *raw* is not the
+            document ``statcat upload`` writes; the message names the path and
+            the difference.
+    """
+    parts = path.split("/")
+    if len(parts) != 3 or parts[0] != "pending" or not parts[2].endswith(".json"):
+        msg = f"{path} is no registration: expected pending/<product_id>/<edition_id>.json"
+        raise ValueError(msg)
+    product_id, edition_id = parts[1], parts[2].removesuffix(".json")
+    if not _PRODUCT_ID.fullmatch(product_id):
+        msg = f"{path} names the product {product_id!r}, which cannot name a directory"
+        raise ValueError(msg)
+    if _uuid7_time(edition_id) is None:
+        msg = f"{path} names the edition {edition_id!r}, which is no canonical UUIDv7"
+        raise ValueError(msg)
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        msg = f"{path} is not UTF-8 JSON: {exc}"
+        raise ValueError(msg) from exc
+    if not isinstance(data, dict) or list(data) != _REGISTRATION_KEYS:
+        msg = f"{path} must hold one object with the keys edition_id and release_at, in that order"
+        raise ValueError(msg)
+    if data["edition_id"] != edition_id:
+        msg = f"{path} holds the edition_id {data['edition_id']!r}, and its file name names {edition_id!r}"
+        raise ValueError(msg)
+    release_at = _release_time(path, data["release_at"])
+    if _pending_document(edition_id, release_at) != raw:
+        msg = (
+            f"{path} differs from the document statcat upload writes: compact JSON, with release_at "
+            "null or in UTC with Z and milliseconds"
+        )
+        raise ValueError(msg)
+    return Registration(product_id=product_id, edition_id=edition_id, release_at=release_at)
+
+
+def _release_time(path: str, value: object) -> datetime | None:
+    """A registration's ``release_at``: ``None``, or an RFC 3339 time with a zone."""
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        msg = f"{path}: release_at {value!r} is neither null nor an RFC 3339 time"
+        raise ValueError(msg)
+    if parsed.tzinfo is None:
+        msg = f"{path}: release_at {value!r} has no time zone"
+        raise ValueError(msg)
+    return parsed
+
+
+def _emit(logger: logging.Logger, level: int, event: Mapping[str, object], message: str) -> None:
+    """Log *message* at *level*, carrying *event* as the record's `_EVENT_ATTRIBUTE` for the command to print.
+
+    *event* holds JSON values only. ``statcat release`` and ``statcat gc`` print
+    each such record as one JSON line on standard output (D14); any other handler
+    sees *message*.
+    """
+    logger.log(level, "%s", message, extra={_EVENT_ATTRIBUTE: dict(event)})

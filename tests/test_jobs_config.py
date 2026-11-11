@@ -15,7 +15,10 @@ from statcatlib.jobs import (
     ExpiryPolicy,
     JobsConfigError,
     Principal,
+    Registration,
     RetentionPolicy,
+    _pending_document,
+    decode_registration,
     format_duration,
     load_jobs_config,
     parse_duration,
@@ -310,3 +313,60 @@ class TestInequalities:
         text = f"format_version = 1\n{_RETENTION}".replace('pod_staleness = "5m"', 'pod_staleness = "0s"')
         with pytest.raises(JobsConfigError, match=r"pod_staleness \(0d\) must be positive"):
             load_jobs_config(_write(tmp_path, text))
+
+
+_EDITION = "01a18e00-0000-7000-8000-000000000001"
+_PATH = f"pending/p/{_EDITION}.json"
+
+
+class TestDecodeRegistration:
+    def test_the_document_upload_writes_decodes(self) -> None:
+        release = datetime(2026, 11, 5, 13, 30, tzinfo=UTC)
+
+        found = decode_registration(_PATH, _pending_document(_EDITION, release))
+
+        assert found == Registration(product_id="p", edition_id=_EDITION, release_at=release)
+        assert found.path == _PATH
+        assert found.edition_time == datetime.fromtimestamp(0x01A18E000000 / 1000, UTC)
+        assert decode_registration(_PATH, _pending_document(_EDITION, None)).release_at is None
+
+    @pytest.mark.parametrize(
+        ("raw", "match"),
+        [
+            (b"{", "not UTF-8 JSON"),
+            (b"[]", "keys edition_id and release_at"),
+            (b'{"release_at":null,"edition_id":"' + _EDITION.encode() + b'"}', "in that order"),
+            (b'{"edition_id":"01a18e00-0000-7000-8000-000000000002","release_at":null}', "file name names"),
+            (b'{"edition_id": "' + _EDITION.encode() + b'", "release_at": null}', "compact JSON"),
+            (
+                b'{"edition_id":"' + _EDITION.encode() + b'","release_at":"2026-11-05T13:30:00Z"}',
+                "milliseconds",
+            ),
+            (
+                b'{"edition_id":"' + _EDITION.encode() + b'","release_at":"2026-11-05T14:30:00.000+01:00"}',
+                "UTC with Z",
+            ),
+            (b'{"edition_id":"' + _EDITION.encode() + b'","release_at":"2026-11-05T13:30:00.000"}', "time zone"),
+            (b'{"edition_id":"' + _EDITION.encode() + b'","release_at":5}', "neither null nor"),
+        ],
+        ids=["json", "object", "order", "edition", "compact", "ms", "utc", "naive", "type"],
+    )
+    def test_any_other_document_is_refused(self, raw: bytes, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            decode_registration(_PATH, raw)
+
+    @pytest.mark.parametrize(
+        ("path", "match"),
+        [
+            ("pending/p/x.json", "no canonical UUIDv7"),
+            ("pending/p/01A18E00-0000-7000-8000-000000000001.json", "no canonical UUIDv7"),
+            ("pending/p/01a18e00-0000-4000-8000-000000000001.json", "no canonical UUIDv7"),
+            ("pending/.p/01a18e00-0000-7000-8000-000000000001.json", "cannot name a directory"),
+            ("pending/p/01a18e00-0000-7000-8000-000000000001", "expected pending/"),
+            ("products/p/01a18e00-0000-7000-8000-000000000001.json", "expected pending/"),
+        ],
+        ids=["not-uuid", "upper", "v4", "product", "suffix", "prefix"],
+    )
+    def test_a_path_that_names_no_registration_is_refused(self, path: str, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            decode_registration(path, _pending_document(_EDITION, None))

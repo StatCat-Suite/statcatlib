@@ -64,11 +64,12 @@ src/
     │   ├── __init__.py
     │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_dataflows(); ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
-    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload, advance-current, admin
+    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload, advance-current, gc, admin
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
     ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, advance_current, prune; local and blob
-    ├── jobs.py         # The jobs configuration: load_jobs_config, RetentionPolicy, AccessPolicy, ExpiryPolicy (Phase 5 D7)
+    ├── jobs.py         # The jobs configuration: load_jobs_config, RetentionPolicy, AccessPolicy, ExpiryPolicy (Phase 5 D7); decode_registration
+    ├── gc.py           # collect_garbage, GcReport, GcStoppedError: the GC job, `statcat gc` (Phase 5 D10)
     ├── checks.py       # Seal checks: SealCheck, conf_status
     ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks, stale data editions
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
@@ -389,6 +390,16 @@ Inventory and seals editions:
   `pending/<product_id>/<edition_id>.json`. A finding raises `UploadCheckError` and
   registers nothing. It reads and writes nothing under `catalog.json`, `inventory/` or
   `CURRENT`, and only `statcat upload` reads the environment.
+- **GC.** `collect_garbage(location, policy, *, storage=None, dry_run=False,
+  forecast=None, discard=())` (`gc.py`, `statcat gc`, `statcatlib[blob]`) reads the
+  Inventory back through `gc_window` and the newest `keep_roots` roots, the
+  `pending/` registrations and every kept and registered manifest, then deletes
+  retired edition directories (manifest first), unreferenced `data/` files older
+  than `upload_grace` and old registrations. It stops with `GcStoppedError`, deleting
+  nothing, when it cannot read that Inventory, fails a product closed when one of its
+  manifests cannot be verified, and never touches `inventory/` or `history/`. Each
+  event is a record on the `statcatlib.gc` logger; `statcat gc` prints them as JSON
+  lines on standard output.
 - **The cross-product rules.** `commit` runs `InventoryWriter.refusals`
   (`store/cross_product.py`) on every change that makes an entry live or
   embargoed, and raises the first `CrossProductRuleError` by product id:
