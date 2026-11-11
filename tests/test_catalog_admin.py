@@ -81,6 +81,7 @@ def _race_once(monkeypatch: pytest.MonkeyPatch, writer: InventoryWriter, competi
         embargo: bool | None = None,
         extensions: Mapping[str, Mapping[str, object]] | None = None,
         built_from: int | None = None,
+        now: datetime | None = None,
         kind: EventKind,
         reason: str,
     ) -> Root:
@@ -94,6 +95,7 @@ def _race_once(monkeypatch: pytest.MonkeyPatch, writer: InventoryWriter, competi
             embargo=embargo,
             extensions=extensions,
             built_from=built_from,
+            now=now,
             kind=kind,
             reason=reason,
         )

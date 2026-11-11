@@ -363,8 +363,8 @@ Inventory read; `bench/inventory_read.py` does that over Azurite.
 
 `InventoryWriter` commits Inventory versions to a catalog in object storage
 through `BlobInventoryStorage` (`statcatlib[blob]`). Working copies and seals
-stay on local disk. Only tests and benches write versions there. `CatalogAdmin`
-runs on local catalogs only. A `commit` with an entry that becomes live or
+stay on local disk. Tests, benches and `CatalogAdmin` write versions there
+([Catalogs in object storage](admin.md#catalogs-in-object-storage)). A `commit` with an entry that becomes live or
 embargoed runs the cross-product rules, which read that edition's manifest
 through the storage (`ManifestArtefacts(storage.read)`) and every other
 product's records from its leaf entry; a missing or altered manifest raises

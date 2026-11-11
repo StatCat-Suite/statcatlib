@@ -107,6 +107,7 @@ nav:
     - Query Filters: api/query.md
     - Source Connectors: api/sources.md
     - Catalog Administration: api/admin.md
+    - Jobs Configuration: api/jobs.md
   - Reference:
     - Catalog: reference/catalog.md
     - Object Storage: reference/blob.md
@@ -117,6 +118,7 @@ nav:
     - Bundles: reference/bundle.md
     - Checks: reference/checks.md
     - Catalog Administration: reference/admin.md
+    - Jobs Configuration: reference/jobs.md
     - Diagnostics: reference/diagnostics.md
     - URNs: reference/urn.md
     - Testing: reference/testing.md

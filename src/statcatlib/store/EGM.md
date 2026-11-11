@@ -175,12 +175,28 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   refusals alone), `try_commit(base, leaves, *, retired=None, embargo=None,
   extensions=None, built_from=None, now=None, kind, reason) -> Root` (no
   cross-product rule), `refusals(full, leaves, *,
-  artefacts=None) -> dict[str, CrossProductRuleError]`, and `commit(change,
-  *, kind, reason) -> Root`, which runs `refusals` on each planned change and
-  raises the first refusal by product id before writing.
+  artefacts=None) -> dict[str, CrossProductRuleError]`, `commit(change,
+  *, kind, reason) -> Root | None`, which runs `refusals` on each planned change and
+  raises the first refusal by product id before writing, and writes nothing and
+  returns `None` when *change* returns `None` (overloaded: a *change* typed to
+  return a `Change` gives `Root`), and `advance_current() -> int | None`, which
+  reads the head by the read protocol and moves `CURRENT` to it through
+  `storage.advance_current` when `current_is_older`, returning the `seq` `CURRENT`
+  names after the move (`None` when it named the head, or no version exists;
+  `InventoryError` when it still names an older one).
 - `Change(leaves, retired=None, embargo=None, extensions=None,
-  built_from=None)`: what
-  `commit`'s *change* callable returns for a head.
+  built_from=None, now=None)`: what `commit`'s *change* callable returns for a
+  head; `now` is the version's time, passed to `try_commit(now=)`, so a rule and
+  its root record one instant.
+- `retire_change(full, cutoff, *, now, artefacts, skipped=()) -> Change | None`:
+  the `retire` version: every `superseded` or `withdrawn` entry whose
+  `state_changed_at` is before *cutoff*, outside *skipped*, retired with
+  sdmxlib's `retire` at *now*, except the structure editions `_cited` keeps
+  (`cross_product.cited_structures` over *artefacts*; every structure edition,
+  with a WARNING, when a manifest cannot be read); tombstones are the head's
+  followed by the new ones, and `Change.now` is *now*. `None` when nothing
+  retires. A `TransitionError` becomes `InventoryRuleError`. `CatalogAdmin.prune`
+  and the release job (Phase 5 Part 3) call it inside their `commit` callable.
 - `MAX_RACES = 8`. `producer()` returns
   `Producer(name="statcatlib", version=<installed version>)`.
 - Errors: `InventoryConflictError` (another writer created the version
@@ -215,8 +231,12 @@ version, when `lazy import` (PEP 810) can replace them.
   `__call__()`, `token() -> str`, `object_id() -> str | None`.
 - `_ObjectOps(store)`: the one route to `obstore`: `read(path) -> tuple[bytes,
   str | None] | None`, `put(path, data, *, mode=None, use_multipart=False) ->
-  str | None`, `head(path)`, `delete(path)`. Tests subclass it and pass it as
-  `BlobLocation.ops`.
+  str | None`, `head(path)`, `delete(path)`, and `list(prefix) ->
+  Iterator[ObjectMeta]`, a generator over `obstore.list` in pages of
+  `_LIST_PAGE` (1,000), by whole path segments, each path from the catalog root;
+  a fault on any page raises `BlobStoreError` naming the prefix. Tests subclass it
+  and pass it as `BlobLocation.ops`; `tests/stores/_stores.py`'s `RecordingOps`
+  and `ReadingOps` record `list` too.
 - `_endpoint(store) -> str`: `config["endpoint"]`, else Azure's account URL or
   S3's regional URL; `ValueError` when the config names neither.
 - `_token_identity(store) -> TokenIdentity | None`: the store's credential provider
@@ -461,7 +481,9 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `commit` re-reads the head and calls *change* again after
   each `InventoryConflictError`, so every rule is evaluated against the
   version the commit lands on, and raises `InventoryContentionError` after
-  `MAX_RACES`. A root records `catalog.json`'s `restore_epoch`, and on local
+  `MAX_RACES`. A *change* that returns `None` for a head writes nothing, not even
+  `CURRENT`, so a re-run against an unchanged catalog writes nothing.
+  `advance_current` writes `CURRENT` alone and never moves it back. A root records `catalog.json`'s `restore_epoch`, and on local
   disk its event's actor is `<os user>@<hostname>`, taken from the process.
   `try_commit` resolves the actor before it writes the first leaf, and takes
   its time from `storage.now()` when not given `now=`.
@@ -537,10 +559,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
 - Run: `just ci`
 - Unit tier only: `uv run pytest -m unit`
 - The blob writer: `tests/test_blob_storage.py` (unit, over `MemoryStore`,
-  with `pytest-httpx` for the clock) and `just test-stores`:
+  with `pytest-httpx` for the clock; `_ObjectOps.list` in `TestList`) and `just test-stores`:
   `tests/stores/test_blob_conformance.py` (sdmxlib's conformance suite over
-  Azurite) and `tests/stores/test_blob_writer.py` (conditional headers, by a
-  recording proxy). The tier needs a container runtime and fails without one.
+  Azurite), `tests/stores/test_blob_writer.py` (conditional headers, by a
+  recording proxy) and `tests/stores/test_admin_blob.py` (`CatalogAdmin` and
+  `advance_current` over Azurite, a listing under the store's prefix). The tier needs a container runtime and fails without one.
 - The upload: `tests/test_upload.py` (unit, over `MemoryStore`),
   `tests/test_azure_blob_rest.py` (unit, the bearer path by `pytest-httpx`),
   `tests/test_cli_upload.py` (unit, the command) and
@@ -549,7 +572,9 @@ Imports only sdmxlib, so `inventory.py` can import it.
 - Remote catalogs: `tests/test_blob_open.py` (unit, refusals, `pull_edition` and hostile
   ids over `MemoryStore`) and `tests/stores/test_remote_catalog.py` (Azurite, the read
   path through `obstore` and DuckDB, the embargo, the rename race).
-- The Inventory writer: `tests/test_inventory_writer.py` (unit),
+- The Inventory writer: `tests/test_inventory_writer.py` (unit; a `None`
+  change, `Change.now`, `advance_current`), `retire_change` in
+  `tests/test_prune.py`,
   `tests/test_inventory_conformance.py` (integration, sdmxlib's conformance
   suite and `run_history`) and `tests/test_inventory_history.py` (integration:
   the chain over seals, a correction, a lost race, the fast base, an opted-in

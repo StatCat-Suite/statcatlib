@@ -2,9 +2,13 @@
 
 `CatalogAdmin` makes the operational changes to a catalog's Inventory: it
 rolls a product back, releases or cancels an embargoed edition, turns the
-embargo on and off, records the catalog's description, and prunes old
-editions. Two `statcat` commands check a catalog and report on it, and only
-read; `statcat prune` runs the prune.
+embargo on and off, records the catalog's description, moves `CURRENT`
+forward, and prunes old editions. It runs on a catalog directory and on a
+catalog in object storage, except `prune`, which runs on local disk only.
+`statcat admin` and `statcat advance-current` run the changes from the command
+line ([The `statcat admin` commands](#the-statcat-admin-commands)). Two
+`statcat` commands check a catalog and report on it, and only read;
+`statcat prune` runs the prune.
 
 ## The operational object
 
@@ -16,15 +20,19 @@ admin = CatalogAdmin.open("~/stats")
 
 `CatalogAdmin.open` reads `catalog.json` and writes nothing until a change
 is made. It refuses a legacy layout as `Catalog.open` does, and a path with
-no `catalog.json` with `FileNotFoundError`. Nothing on the public
+no `catalog.json` with `FileNotFoundError`. It also takes a `BlobLocation`
+([Catalogs in object storage](#catalogs-in-object-storage)). Nothing on the public
 `Catalog`, `Product` or `EditionView` returns a `CatalogAdmin`: a program
 that only reads cannot change the Inventory by accident
 ([reference](../reference/admin.md)).
 
 Every change takes a `reason`, which the Inventory version records as
-`event.reason` beside its actor, `<os user>@<hostname>`. A blank reason
-raises `ValueError`. Each change writes one Inventory version and returns its
-number. When another writer creates that version first, the change is
+`event.reason` beside its actor: `<os user>@<hostname>` on local disk, and the
+storage identity's object id in object storage. A blank reason raises
+`ValueError`. Each change reads the storage's clock once and gives that time to
+sdmxlib's rule and to the version it writes: this machine's clock on local
+disk, the storage clock in object storage. Each change writes one Inventory
+version and returns its number. When another writer creates that version first, the change is
 evaluated again against the new head, so a refusal reflects the version the
 change would have landed on.
 
@@ -35,7 +43,7 @@ change would have landed on.
 | `cancel(product, edition, *, reason)` | An embargoed edition `withdrawn` | `withdraw` |
 | `set_embargo(*, on, reason)` | The catalog's embargo setting | `embargo-change` |
 | `describe(description, *, reason)` | The catalog's description | `describe` |
-| `prune(*, older_than, reason, dry_run=True)` | Old `superseded` and `withdrawn` editions retired; see [Pruning old editions](#pruning-old-editions) | `retire` |
+| `prune(*, older_than, reason, dry_run=True)` | Old `superseded` and `withdrawn` editions retired, on local disk only; see [Pruning old editions](#pruning-old-editions) | `retire` |
 
 `admin.editions(product)` lists the product's editions in every state, each
 an `EditionEntry` with its `state`, `previous`, `state_changed_at` and
@@ -108,10 +116,11 @@ released; the message names both editions. `cancel` the stale one and seal a
 new edition on the live one. `cancel` withdraws an embargoed edition, which
 is never released afterwards.
 
-`release` and `cancel` use this machine's clock: the time they record as
-`state_changed_at` is the laptop's. statcatlib has no scheduled release before
-Phase 4, so a release happens when a person or a job on the laptop calls it,
-and a job timed by a skewed clock releases early or late.
+On local disk `release` and `cancel` use this machine's clock: the time they
+record as `state_changed_at` is the laptop's. A local catalog has no scheduled
+release, so a release happens when a person or a job on the laptop calls it,
+and a job timed by a skewed clock releases early or late. In object storage
+they record the storage clock.
 
 On local disk the embargo holds only for readers that go through
 `Catalog`: anyone who can read the catalog directory can read an embargoed
@@ -184,10 +193,100 @@ editions, and the description never stores them.
 `statcatlib.bundle.description_to_json` and `description_from_json` convert
 the fields; `description_from_json` ignores keys it does not know.
 
+## Catalogs in object storage
+
+```python
+from obstore.store import AzureStore
+from statcatlib import BlobLocation, CatalogAdmin, TokenIdentity
+
+identity = TokenIdentity(provider)  # the release job's identity
+store = AzureStore("catalogs", prefix="stc", account_name="acct", credential_provider=identity)
+admin = CatalogAdmin.open(BlobLocation("az://catalogs/stc/", store))
+admin.release("14100287", edition_id, reason="jdoe: released by hand after the job refused it")
+```
+
+`CatalogAdmin.open` over a `BlobLocation` writes through a
+`BlobInventoryStorage`, as the [Inventory on object
+storage](store.md#the-inventory-on-object-storage) describes: the version's
+time is the storage clock, read once per change from the `Date` of an
+anonymous `HEAD`, and its `event.actor` is the object id in the store's
+`TokenIdentity` token. `actor=` names the actor for a store whose credential
+is no `TokenIdentity`, and `clock=` replaces the storage clock; tests pass
+both. A catalog directory takes neither, and raises `TypeError` when given
+one.
+
+Every change but `prune` runs as it does on disk, with the same rules. A
+`release` or `rollback` reads the manifest of the edition it makes live from
+the store and compares its SHA-256 with the Inventory's, so an edition whose
+manifest changed after it was recorded is refused with
+`sdmxlib.edition.ManifestError`. `prune` raises `TypeError`: on a server the
+release job retires old editions, and `statcat gc` deletes their files.
+
+On a server, an operator makes these changes under the release job's identity,
+the only one with write on `inventory/`, so the version's `event.actor` is the
+job's object id. Name yourself in the reason, which the version records as
+`event.reason`.
+
+### Moving `CURRENT` forward
+
+```python
+admin.advance_current()  # the version CURRENT now names, or None
+```
+
+A writer that stops after its root and before `CURRENT` leaves `CURRENT` one
+version behind. Readers probe forward and still find the newest version, at
+the cost of extra reads. `advance_current` reads the newest root by the read
+protocol and moves `CURRENT` to it when `CURRENT` names a lower `seq`, or a
+version of an earlier restore epoch. It never moves `CURRENT` back: when
+another writer has moved it further meanwhile, it stays there. It writes no
+root and no leaf, and returns `None` when `CURRENT` named the newest version
+already.
+
+## The `statcat admin` commands
+
+The commands need the `blob` extra for an `az://` catalog
+(`uv add 'statcatlib[blob]'`, or `pip install 'statcatlib[blob]'`), or the
+`search` extra for a local one; both install the CLI.
+
+```bash
+statcat advance-current URL
+statcat admin editions URL PRODUCT
+statcat admin release URL PRODUCT EDITION --reason TEXT
+statcat admin cancel URL PRODUCT EDITION --reason TEXT
+statcat admin rollback URL PRODUCT [--to EDITION] [--if-live EDITION] --reason TEXT
+statcat admin embargo URL on|off --reason TEXT
+```
+
+`URL` is a catalog directory or `az://<container>[/<prefix>]`. An `az://`
+catalog is reached as `statcat upload` reaches one
+([Object storage](blob.md#the-command)): `DefaultAzureCredential`, the account
+in `AZURE_STORAGE_ACCOUNT_NAME`, and the same refused variables, with a
+five-minute request timeout. On a server, run the commands from a pod that
+holds the release job's identity and name yourself in `--reason`:
+
+```bash
+statcat admin editions az://catalogs/stc 14100287
+statcat admin cancel az://catalogs/stc 14100287 01a18e76-… --reason "jdoe: built on a withdrawn base"
+statcat admin embargo az://catalogs/stc on --reason "jdoe: hold every release until the fix"
+```
+
+`editions` prints one line per edition: its id, state, `previous`, store
+schema, the time it entered its state and its `release_at`. Each change prints
+the Inventory version it wrote. `embargo on` holds every automatic release; an
+explicit `statcat admin release` still releases.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | The change was written, `CURRENT` moved or was current, or the editions were listed |
+| 1 | The change was refused, the catalog cannot be read, or a store or credential failed; each prints as `ERROR <message>`. `editions` of a product the catalog does not record exits 1 too |
+| 2 | Usage: a missing or blank `--reason`, a bad `URL`, `s3://`, no `AZURE_STORAGE_ACCOUNT_NAME`, a refused variable, or a missing `blob` extra |
+
 ## Pruning old editions
 
 Every seal leaves the edition it supersedes on disk, so a laptop catalog
-grows with each republish. `prune` reclaims that space with one window:
+grows with each republish. `prune` reclaims that space with one window. It
+runs on a catalog directory; on a catalog in object storage it raises
+`TypeError`:
 
 ```python
 from datetime import timedelta

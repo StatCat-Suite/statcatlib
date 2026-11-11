@@ -5,8 +5,9 @@ free local port, for the session. Phase 4 needs one emulator: the leaf rule
 gives every store one code path, and an S3 catalog can hold no real edition in
 Phase 4.
 
-`RecordingOps` records every store call and refuses the Inventory's paths.
-`ReadingOps` records a reader's calls and fails any write. `KeyedRest` is
+`RecordingOps` records every store call, a listing included, and refuses the
+Inventory's paths. `ReadingOps` records a reader's calls, its listings
+included, and fails any write. `KeyedRest` is
 `AzureBlobRest` with Azurite's account key, the one path no deployment uses.
 `record_uploaded` places an uploaded edition in a blob Inventory, since Phase 4
 has no fold.
@@ -54,6 +55,8 @@ from statcatlib.store.working_copy import Edition, edition_kind, fold_lifecycle,
 from statcatlib.upload import _upload
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from obstore import ObjectMeta
     from obstore.store import ObjectStore
 
@@ -304,6 +307,11 @@ class RecordingOps(_ObjectOps):
         self.writes.append(path)
         return written
 
+    @override
+    def list(self, prefix: str) -> Iterator[ObjectMeta]:
+        self._note("list", prefix)
+        return super().list(prefix)
+
 
 def recording_location(running: Running, prefix: str, *, endpoint: str | None = None) -> BlobLocation:
     """`location`, with a `RecordingOps` as its route to the store."""
@@ -331,6 +339,11 @@ class ReadingOps(_ObjectOps):
     def head(self, path: str) -> ObjectMeta | None:
         self.reads.append(path)
         return super().head(path)
+
+    @override
+    def list(self, prefix: str) -> Iterator[ObjectMeta]:
+        self.reads.append(prefix)
+        return super().list(prefix)
 
     @override
     def put(self, path: str, data: bytes, **kwargs) -> str | None:

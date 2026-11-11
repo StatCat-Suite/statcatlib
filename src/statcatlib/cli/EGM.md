@@ -9,18 +9,21 @@ catalog directory, and calls one library function. The work itself lives in
 `statcatlib.WorkingCopy.build_index` (`../store/working_copy.py`), which
 delegates to the private `_Store.build_index` (`../store/store.py`), and in
 `statcatlib.diagnostics` (`../diagnostics.py`) for `verify-catalog` and
-`doctor`, in `statcatlib.CatalogAdmin.prune` (`../admin.py`) for `prune`, and in
-`statcatlib.upload_edition` (`../upload.py`) for `upload`.
+`doctor`, in `statcatlib.CatalogAdmin.prune` (`../admin.py`) for `prune`, in
+`statcatlib.upload_edition` (`../upload.py`) for `upload`, and in
+`statcatlib.CatalogAdmin` for `advance-current` and the `admin` group.
 
 The CLI needs the `search` extra (`uv add 'statcatlib[search]'`, or
 `pip install 'statcatlib[search]'`), which supplies `typer`, `rich`,
 `lancedb` and `sentence-transformers`. Importing the module without `typer`
 and `rich` fails. `upload` needs the `blob` extra, which supplies `typer`, `rich`,
-`obstore` and `azure-identity`, and `build-index` is the only command that needs
-`search`.
+`obstore` and `azure-identity`, and so do `advance-current` and `admin` over an
+`az://` catalog. `build-index` is the only command that needs `search`.
 
-The console script is `statcat`, with five commands: `build-index`,
-`verify-catalog`, `doctor`, `prune` and `upload`.
+The console script is `statcat`, with six commands, `build-index`,
+`verify-catalog`, `doctor`, `prune`, `upload` and `advance-current`, and the
+`admin` group (`admin_app`, added with `app.add_typer`): `editions`, `release`,
+`cancel`, `rollback` and `embargo`.
 
 ## Interface
 
@@ -29,6 +32,8 @@ Exported names (`__all__`):
 - `app` — the root `typer.Typer` (`name="statcat"`, `no_args_is_help=True`,
   `add_completion=False`, `pretty_exceptions_show_locals=False`, so a printed frame
   never shows a token). Tests drive it with `typer.testing.CliRunner`.
+- `admin_app` — the `admin` group's `typer.Typer`, added to `app` with
+  `add_typer(admin_app, name="admin")`.
 - `main()` — console-script entry point; calls `app()`.
 
 Commands:
@@ -39,6 +44,12 @@ Commands:
 | `statcat verify-catalog PATH` | `verify_catalog` | `diagnostics.verify_catalog(path)` | any finding, each printed as `FAIL <file>: <detail>`; exit 2 on `CatalogUnreadableError`. Each stale data edition prints as `STALE <StaleEdition>` and leaves the exit code alone |
 | `statcat doctor PATH` | `doctor` | `diagnostics.doctor(path)` | the report holds a warning (topic `stale data editions`: a stale embargoed data edition is one; a stale live edition is `info` and leaves the exit code alone; topic `partials with no structure home`: each item is one) |
 | `statcat prune PATH --older-than DAYS --reason TEXT [--apply]` | `prune` | `sc.CatalogAdmin.open(path).prune(older_than=timedelta(days=DAYS), reason=TEXT, dry_run=not apply)` | `catalog.json` is missing, the catalog cannot be opened, the retire commit is refused, or a deletion failed (each printed as `FAIL <path>: <error>`) |
+| `statcat advance-current URL` | `advance_current` | `CatalogAdmin.open(target).advance_current()` | the catalog cannot be read or `CURRENT` cannot be written (`ERROR <message>`); exit 2 as `upload` for an `az://` usage error |
+| `statcat admin editions URL PRODUCT` | `admin_editions` | `CatalogAdmin.open(target).editions(product)`, one line per entry | the catalog cannot be read, or records no such product |
+| `statcat admin release URL PRODUCT EDITION --reason TEXT` | `admin_release` | `.release(product, edition, reason=)` | a refusal (`InventoryRuleError`, `NonFastForwardError`, `CrossProductRuleError`, `ManifestError`) or a store, clock or credential failure, each as `ERROR <message>`; exit 2 on a missing or blank `--reason` |
+| `statcat admin cancel URL PRODUCT EDITION --reason TEXT` | `admin_cancel` | `.cancel(product, edition, reason=)` | as `release` |
+| `statcat admin rollback URL PRODUCT [--to EDITION] [--if-live EDITION] --reason TEXT` | `admin_rollback` | `.rollback(product, to=, if_live=, reason=)` | as `release` |
+| `statcat admin embargo URL on\|off --reason TEXT` | `admin_embargo` | `.set_embargo(on=, reason=)` | as `release`, and the setting the catalog has already (`ValueError`) |
 | `statcat upload EDITION_DIR AZ_URL [--release-at TIME]` | `upload` | `upload_edition(edition_dir, location, release_at=)` | a finding, each printed as `FAIL <file>: <detail>`, or a `ManifestError`, `BlobStoreError` or `ClientAuthenticationError`, printed as `ERROR <message>`; exit 2 on a usage error, a bad `AZ_URL`, `s3://`, no `AZURE_STORAGE_ACCOUNT_NAME`, a refused `obstore` variable set, even empty, in any spelling `obstore` reads (`_REFUSED_VARIABLES`, matched by `_refused_variables`: `AZURE_` then any case), a naive time, a missing `blob` extra, or an environment value `obstore` cannot parse, such as `AZURE_DISABLE_TAGGING=junk` (`GenericError` from the store build, before any request) |
 
 `build-index` options and their `WorkingCopy.build_index` keyword:
@@ -73,15 +84,24 @@ Private helpers that tests and later commands rely on:
   `soft_wrap=True`, so a path in a finding is never split or styled.
 - `console` — the shared `rich.console.Console`; `log` — the
   `statcatlib.cli` logger (currently unused).
-- `_usage(message)` — prints it and exits 2. `_release_time(raw)`, `_catalog_uri(raw)`
-  and `_azure_account()` parse `upload`'s inputs, each through `_usage`.
-  `_refused_variables()` lists the environment's names that `obstore` would parse as a
-  refused key, as spelled. `_azure_location(uri, account)` builds the store with `obstore.store.from_url`,
-  `TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))` and the one-hour
-  timeout, and turns obstore's `GenericError` from that build into `_usage`, with the text from
+- `_usage(message)` — prints it and exits 2. `_release_time(raw)`, `_catalog_uri(raw, *,
+  command="upload")` and `_azure_account(command="upload")` parse the inputs, each through
+  `_usage`, *command* naming the command in the message. `_refused_variables()` lists the
+  environment's names that `obstore` would parse as a refused key, as spelled.
+  `_azure_location(uri, account, *, command="upload", timeout=_UPLOAD_TIMEOUT)` builds the
+  store with `obstore.store.from_url`, `TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))`
+  and *timeout* (one hour for `upload`, `_ADMIN_TIMEOUT` five minutes for `advance-current` and
+  `admin`; Phase 5 D15's generalised helper, which `statcat release` and `statcat gc` will take),
+  and turns obstore's `GenericError` from that build into `_usage`, with the text from
   `_store_build_message(exc)`: obstore's first line, and the `AZURE_DISABLE_TAGGING` spelling the
-  environment sets, since obstore 0.12.1's message omits the variable. `upload` is the only code in
+  environment sets, since obstore 0.12.1's message omits the variable. `_auth_error()` returns
+  azure-core's `ClientAuthenticationError`, imported on the `blob` extra. The CLI is the only code in
   statcatlib that reads the environment for a store.
+- `_admin_call(url, command, action)` — opens `CatalogAdmin` over *url* (a scheme makes it
+  `az://`, through `_catalog_uri`, `_azure_account` and `_azure_location`; anything else is a
+  directory) and runs *action*; `_ADMIN_ERRORS`, and the credential error on `az://`, print as
+  `ERROR <message>` and exit 1. `_reason(reason)` exits 2 on a blank `--reason`. `_Switch` is
+  `embargo`'s `on`/`off`.
 - `_parse_codelist_policy(raw)` — accepts only mode `fts_only`
   (`_ACCEPTED_CODELIST_MODES`); raises `typer.BadParameter` otherwise.
 - `_parse_reference_metadata_blend(raw)` — `max_chars` must be a positive
@@ -130,6 +150,8 @@ Private helpers that tests and later commands rely on:
 - `verify-catalog` and `doctor` write nothing. `prune` without `--apply`
   writes nothing; with `--apply` it writes one Inventory version (kind
   `retire`) and deletes edition directories and `data/` files.
+- `admin editions` writes nothing. Each other `admin` command writes one
+  Inventory version, and `advance-current` writes `CURRENT` alone, or nothing.
 
 - `build-index` writes the working copy's `search/` directory: the
   edition's tables, `search/index.json`, and `search/embeddings.json`. It
@@ -155,4 +177,5 @@ Private helpers that tests and later commands rely on:
 
 - Run: `just ci` (the project gate).
 - Unit tier only: `uv run pytest -m unit`.
-- CLI tests: `uv run pytest -m unit tests/test_cli_build_index.py`.
+- CLI tests: `uv run pytest -m unit tests/test_cli_build_index.py`; `advance-current` and
+  `admin`: `tests/test_cli_admin.py`.

@@ -64,10 +64,11 @@ src/
     │   ├── __init__.py
     │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_dataflows(); ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
-    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload
+    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload, advance-current, admin
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
-    ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, prune
+    ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, advance_current, prune; local and blob
+    ├── jobs.py         # The jobs configuration: load_jobs_config, RetentionPolicy, AccessPolicy, ExpiryPolicy (Phase 5 D7)
     ├── checks.py       # Seal checks: SealCheck, conf_status
     ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks, stale data editions
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)
@@ -349,8 +350,11 @@ Inventory and seals editions:
   name, unlink, fsync the directory. It replaces `CURRENT` only with a higher
   `seq`. `commit(change, *, kind, reason)` re-reads the head and re-applies
   `change` after each lost race, and raises `InventoryContentionError` after
-  `MAX_RACES` (8). sdmxlib's refusals become `InventoryRuleError`, and a
-  `fast-forward` refusal becomes `NonFastForwardError`. `Catalog.create`
+  `MAX_RACES` (8); a `change` that returns `None` writes nothing and `commit`
+  returns `None`, and `Change.now` sets the version's time, which the change's
+  rules were given. sdmxlib's refusals become `InventoryRuleError`, and a
+  `fast-forward` refusal becomes `NonFastForwardError`. `advance_current()`
+  moves `CURRENT` forward to the head the read protocol finds, never back. `Catalog.create`
   refuses a filesystem without hard links. Every root carries
   `previous_root_sha256` and `changes` from root `seq - 1` and its leaves
   (Inventory 1.2, GH-125), and `try_commit` raises
@@ -373,7 +377,8 @@ Inventory and seals editions:
   and its actor from `TokenIdentity`'s `oid`, else a given value, else a
   refusal. A failed `CURRENT` move logs a WARNING, since the root is the commit
   point. A blob writer's cross-product rules read each incoming manifest through
-  `ManifestArtefacts(storage.read)`, and no `CatalogAdmin` runs on blob.
+  `ManifestArtefacts(storage.read)`. `_ObjectOps.list(prefix)` lists a prefix in
+  pages, for the jobs.
 - **The upload.** `upload_edition(edition_dir, location, *, release_at=None)`
   (`upload.py`, `statcat upload`, `statcatlib[blob]`) is Azure-only, and refuses any
   other store with `TypeError`. It creates each data file, then each file of the
@@ -472,20 +477,27 @@ Inventory and seals editions:
   `_Store` over one is not writable, every write method (`add_lineage`
   included) raises `RuntimeError` through `_require_writable`, and the FTS
   index is reused as found, never rebuilt by a query (GH-3).
-- **CatalogAdmin.** `CatalogAdmin.open(path)` (`admin.py`) makes the
-  operational changes: `rollback`, `release`, `cancel`, `set_embargo(*, on,
-  reason)` and `describe`. Each requires `reason`, applies one of
-  `sdmxlib.inventory`'s rules inside `InventoryWriter.commit`, so a lost race
-  re-evaluates it against the new head, and returns the version's `seq`.
-  Rules run on the local clock (design decision P1). `editions(product)`
+- **CatalogAdmin.** `CatalogAdmin.open(path | BlobLocation, *, actor=None,
+  clock=None)` (`admin.py`) makes the operational changes: `rollback`,
+  `release`, `cancel`, `set_embargo(*, on, reason)` and `describe`. Each
+  requires `reason`, applies one of `sdmxlib.inventory`'s rules inside
+  `InventoryWriter.commit`, so a lost race re-evaluates it against the new
+  head, and returns the version's `seq`. Each change reads `storage.now()`
+  once and gives it to the rule and the version: the local clock on disk
+  (design decision P1), the storage clock on blob (S29: on a server it runs
+  under the release identity, and the operator is named in `reason`).
+  `advance_current()` moves `CURRENT` forward. `statcat admin` and `statcat
+  advance-current` run them over a directory or `az://`. `editions(product)`
   lists every state. No attribute of `Catalog`, `Product` or `EditionView`
   returns one. `describe` writes `{format_version: "3", description}` into
   the root's `extensions.statcat` (`bundle.description_to_json`), every later
   version carries it, and `Catalog.description` reads it.
   `prune(*, older_than, reason, dry_run=True)` is the narrow laptop prune
-  (P7): it retires old superseded and withdrawn editions in one `retire`
-  version, deletes the directories of editions tombstoned longer than the
-  window and the `data/` files no on-disk manifest lists, skips a product
+  (P7), and raises `TypeError` on blob: it retires old superseded and
+  withdrawn editions in one `retire` version, built by
+  `store.inventory.retire_change` (which the release job will share),
+  deletes the directories of editions tombstoned longer than the window and
+  the `data/` files no on-disk manifest lists, skips a product
   with a working copy or a journal entry, keeps a structure edition a live
   or embargoed data edition's `partial_of` cites (`cited_structures`), and
   deletes no root, leaf or tombstone. It returns a `PruneReport`.
