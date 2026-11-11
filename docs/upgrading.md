@@ -5,9 +5,19 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: artefact records in every leaf entry, the section's `lifecycle`, and `CatalogAdmin` on object storage
+## Next release: artefact records in every leaf entry, the section's `lifecycle`, and `CatalogAdmin` on object storage, on sdmxlib 0.88
 
-No catalog is rebuilt, and statcatlib still requires `sdmxlib>=0.87,<0.88`.
+statcatlib requires `sdmxlib>=0.88,<0.89`. No catalog is rebuilt. sdmxlib 0.88's
+`read_manifest` and `decode_manifest` raise `sdmxlib.edition.ManifestError` for a
+manifest that could name a file outside its edition (StatCat-Suite/sdmxlib#380): a
+`files` path that is absolute or has an empty, `.` or `..` segment, a backslash or a
+NUL, or an `edition` entry that lists `manifest.json`. A seal writes plain relative
+paths, so every sealed edition still decodes. statcatlib's upload and pull refused
+these paths already; sdmxlib now refuses them first, and nothing is read from or
+written to the store, as before. `upload_edition` raises `ManifestError` in place of
+`UploadCheckError`, so `statcat upload` still exits 1 and prints `ERROR <message>` in
+place of `FAIL <file>: <detail>`. Pulling an edition from object storage still raises
+`IncompatibleCatalogError`, with sdmxlib's message.
 
 Every leaf entry a seal, a batched seal or the journal repair records now carries
 `artefacts`, its manifest's artefact records, for data editions as well as structure
