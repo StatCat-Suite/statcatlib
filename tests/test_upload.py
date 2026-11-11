@@ -218,7 +218,7 @@ class TestRefusals:
 
         _edit_manifest(edition_dir, aim)
 
-        with pytest.raises(UploadCheckError, match="outside its directory"):
+        with pytest.raises(ManifestError, match="could name a file outside the edition"):
             _upload(edition_dir, location, rest=rest)
 
         assert ops.calls == []
