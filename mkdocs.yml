@@ -108,6 +108,7 @@ nav:
     - Source Connectors: api/sources.md
     - Catalog Administration: api/admin.md
     - Jobs Configuration: api/jobs.md
+    - GC Job: api/gc.md
   - Reference:
     - Catalog: reference/catalog.md
     - Object Storage: reference/blob.md
@@ -119,6 +120,7 @@ nav:
     - Checks: reference/checks.md
     - Catalog Administration: reference/admin.md
     - Jobs Configuration: reference/jobs.md
+    - GC Job: reference/gc.md
     - Diagnostics: reference/diagnostics.md
     - URNs: reference/urn.md
     - Testing: reference/testing.md

@@ -7,8 +7,8 @@ TOML file, the jobs configuration. A deployment keeps the file in one ConfigMap,
 reviews it in a PR, and mounts it into both jobs. Each run checks the file and
 logs its SHA-256, so two jobs running different copies show in the logs.
 
-statcatlib reads and checks the file now. The release job and the GC job that
-act on it come in later releases (Phase 5 Parts 3 and 4).
+statcatlib reads and checks the file, and [the GC job](gc.md) reads its
+`[retention]`. The release job comes in a later release (Phase 5 Part 3).
 
 ```python
 from statcatlib.jobs import load_jobs_config
@@ -130,3 +130,21 @@ compares each principal with the allowlist.
 | `port` | The port each pod reports its `sdmxlib_version` on | yes |
 
 With `enabled = false` the other keys may be left out.
+
+## The `pending/` registrations
+
+Both jobs read a registration, `pending/<product_id>/<edition_id>.json`, with
+`decode_registration(path, raw)`. It returns a `Registration(product_id,
+edition_id, release_at)`, whose `edition_time` is the time the edition id, a
+UUIDv7, carries. It raises `ValueError` for any document other than the one
+`statcat upload` writes: two keys, `edition_id` then `release_at`, compact,
+`edition_id` equal to the file name and a canonical UUIDv7, and `release_at`
+`null` or in UTC with `Z` and milliseconds ([The catalog
+format](../catalog-format.md#15-the-pending-registrations)).
+
+```python
+from statcatlib.jobs import decode_registration
+
+registration = decode_registration(path, raw)
+registration.edition_time  # the tombstone window is measured from it
+```

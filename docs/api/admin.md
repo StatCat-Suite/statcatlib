@@ -220,7 +220,7 @@ Every change but `prune` runs as it does on disk, with the same rules. A
 the store and compares its SHA-256 with the Inventory's, so an edition whose
 manifest changed after it was recorded is refused with
 `sdmxlib.edition.ManifestError`. `prune` raises `TypeError`: on a server the
-release job retires old editions, and `statcat gc` deletes their files.
+release job retires old editions, and [`statcat gc`](gc.md) deletes their files.
 
 On a server, an operator makes these changes under the release job's identity,
 the only one with write on `inventory/`, so the version's `event.actor` is the

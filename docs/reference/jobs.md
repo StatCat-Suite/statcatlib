@@ -17,6 +17,10 @@ describes the file, each key and the checks.
 
 ::: statcatlib.jobs.JobsConfigError
 
+::: statcatlib.jobs.decode_registration
+
+::: statcatlib.jobs.Registration
+
 ::: statcatlib.jobs.parse_duration
 
 ::: statcatlib.jobs.format_duration
