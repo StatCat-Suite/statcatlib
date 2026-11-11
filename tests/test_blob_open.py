@@ -280,7 +280,7 @@ class TestPullEdition:
         raw = _place(location, sealed, _edited(sealed, poison))
         ops.reads.clear()
 
-        with pytest.raises(IncompatibleCatalogError, match="unsafe path"):
+        with pytest.raises(IncompatibleCatalogError, match="could name a file outside the edition"):
             _pull(location, sealed, raw, dest)
 
         assert ops.reads == []
@@ -294,7 +294,7 @@ class TestPullEdition:
 
         raw = _place(location, sealed, _edited(sealed, poison))
 
-        with pytest.raises(IncompatibleCatalogError, match="unsafe path"):
+        with pytest.raises(IncompatibleCatalogError, match="could name a file outside the edition"):
             _pull(location, sealed, raw, dest)
 
     @pytest.mark.parametrize("data_path", ["/abs/data/", "az://elsewhere/data/", "../../other/data/", "../../../x/"])
