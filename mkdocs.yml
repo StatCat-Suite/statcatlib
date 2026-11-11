@@ -109,6 +109,7 @@ nav:
     - Catalog Administration: api/admin.md
     - Jobs Configuration: api/jobs.md
     - GC Job: api/gc.md
+    - Embargo Reader: api/embargo.md
   - Reference:
     - Catalog: reference/catalog.md
     - Object Storage: reference/blob.md
@@ -121,6 +122,7 @@ nav:
     - Catalog Administration: reference/admin.md
     - Jobs Configuration: reference/jobs.md
     - GC Job: reference/gc.md
+    - Embargo Reader: reference/embargo.md
     - Diagnostics: reference/diagnostics.md
     - URNs: reference/urn.md
     - Testing: reference/testing.md
