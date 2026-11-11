@@ -70,6 +70,7 @@ src/
     ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, advance_current, prune; local and blob
     ├── jobs.py         # The jobs configuration: load_jobs_config, RetentionPolicy, AccessPolicy, ExpiryPolicy (Phase 5 D7); decode_registration
     ├── gc.py           # collect_garbage, GcReport, GcStoppedError: the GC job, `statcat gc` (Phase 5 D10)
+    ├── embargo.py      # EmbargoReader: embargoed and live editions in every state, for the preview and pre-materialisation (Phase 5 D12)
     ├── checks.py       # Seal checks: SealCheck, conf_status
     ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks, stale data editions
     ├── query.py        # Composable filter objects (q.has_code, q.within, ...)

@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
     from sdmxlib.edition import Lifecycle
-    from sdmxlib.inventory import FullInventory, Kind, Leaf
+    from sdmxlib.inventory import FullInventory, Kind, Leaf, State
 
     from statcatlib.model.catalog import CatalogDescription
     from statcatlib.store.inventory import CrossProductRuleError, InventoryStorage
@@ -200,6 +200,195 @@ def _check_product_id(product_id: str) -> str:
         )
         raise ValueError(msg)
     return product_id
+
+
+def _open_read_only(path: str | Path | BlobLocation, *, opener: str) -> _Opening:
+    """The read-only `_Opening` of the catalog at *path*: `Catalog.open`'s checks, which `EmbargoReader.open` shares.
+
+    Args:
+        path: The catalog directory, or a `BlobLocation`.
+        opener: The call, for messages, such as ``"Catalog.open"``.
+
+    Returns:
+        The opening, with no writer. Over a `BlobLocation` its ``root`` is
+        ``<cache_dir>/<catalog_id>``, and ``catalog_id`` is read once.
+
+    Raises:
+        FileNotFoundError: *path* is not a catalog.
+        ValueError: *path* is a URI string, or a `BlobLocation` with no
+            ``cache_dir``.
+        IncompatibleCatalogError: A legacy layout or other files at *path*, or
+            a ``catalog_id`` in object storage that cannot name a directory.
+    """
+    if isinstance(path, BlobLocation):
+        if path.cache_dir is None:
+            msg = f"{opener}({path.uri!r}) needs a BlobLocation with cache_dir, where it keeps pulled editions"
+            raise ValueError(msg)
+        catalog_id = InventoryWriter(BlobInventoryStorage(path)).catalog_document().catalog_id
+        if not _SAFE_ID.fullmatch(catalog_id):
+            msg = f"{path.uri} has catalog_id {catalog_id!r}, which cannot name a directory under cache_dir"
+            raise IncompatibleCatalogError(msg)
+        root = Path(path.cache_dir).absolute() / catalog_id
+        return _Opening(root=root, writer=None, location=path, catalog_id=catalog_id)
+    if isinstance(path, str) and _URI.match(path):
+        msg = (
+            f"{opener}({path!r}) takes a directory; a catalog in object storage needs a BlobLocation, "
+            "holding a store you built, so a library call never takes a credential from the environment"
+        )
+        raise ValueError(msg)
+    root = Path(path).absolute()
+    _refuse_legacy_layout(root)
+    if not (root / CATALOG_NAME).is_file():
+        msg = f"{root} is not a catalog (no {CATALOG_NAME}); create one with Catalog.create({str(path)!r})"
+        raise FileNotFoundError(msg)
+    InventoryWriter(root).catalog_document()
+    return _Opening(root=root, writer=None)
+
+
+def _checked_copy(
+    location: BlobLocation,
+    root: Path,
+    product_id: str,
+    edition_id: str,
+    *,
+    manifest_sha256: str,
+    engine: Callable[[], sdmxlib.EditionEngine],
+    stamps: Path,
+    state: State,
+) -> tuple[Path, str]:
+    """The edition's cached directory and its store URI, pulled when absent and checked on open.
+
+    Args:
+        location: The catalog.
+        root: ``<cache_dir>/<catalog_id>``.
+        product_id: The product.
+        edition_id: The edition.
+        manifest_sha256: The SHA-256 its Inventory entry records.
+        engine: Returns the engine the check reads the edition's data files
+            with; called only once the secrets check passes.
+        stamps: The directory of receive stamps `check_on_open` keeps.
+        state: The entry's state, for messages.
+
+    Returns:
+        The directory, and the URI of the edition in the store.
+
+    Raises:
+        IncompatibleCatalogError: Anything `_cached_edition` refuses, or a
+            finding from `sdmxlib.edition.check_on_open`.
+        ValueError: The edition has data files, and the location holds no
+            ``secrets`` for DuckDB to read them with.
+    """
+    edition_dir, manifest = _cached_edition(location, root, product_id, edition_id, manifest_sha256)
+    if not location.secrets and any(entry.root == "data" for entry in manifest.files):
+        msg = (
+            f"{product_id}'s edition {edition_id} has data files, and the BlobLocation of "
+            f"{location.uri} holds no secrets; give it the StoreSecret DuckDB reads them with"
+        )
+        raise ValueError(msg)
+    remote = f"{location.uri.rstrip('/')}/products/{product_id}/{edition_id}/"
+    report = check_on_open(
+        edition_dir,
+        stamps=stamps,
+        remote=remote,
+        engine=engine(),
+        references=bool(manifest.bindings),
+        extensions={STATCAT_SECTION: _statcat_check()},
+    )
+    if not report.ok:
+        found = "; ".join(str(finding) for finding in report.findings)
+        msg = f"{product_id}'s {state} edition {edition_id} failed its {report.at} check: {found}"
+        raise IncompatibleCatalogError(msg)
+    return edition_dir, remote
+
+
+def _open_view(
+    engine: Callable[[], sdmxlib.EditionEngine],
+    root: Path,
+    location: BlobLocation | None,
+    product_id: str,
+    edition_id: str,
+    *,
+    manifest_sha256: str,
+    stamps: Path,
+    state: State,
+    embedding_model: EmbeddingModel | None,
+    query_prefix: str,
+) -> tuple[EditionView, sdmxlib.EditionRegistry, _Store]:
+    """A view of one recorded edition: `Product.view`'s steps, which `EmbargoReader.view` shares.
+
+    On local disk it attaches ``<root>/products/<product>/<edition>``. Over a
+    `BlobLocation` it reads the manifest first, pulls the catalog files to
+    ``<root>/products/<product>/<edition>`` when absent, and runs
+    `check_on_open` with *stamps* (`_checked_copy`). Either way
+    ``LocalRegistry.edition`` then checks the manifest's SHA-256 against
+    *manifest_sha256*.
+
+    Args:
+        engine: Returns the engine the edition attaches to, built on first
+            use, so an edition refused before it is opened builds none.
+        root: The catalog directory, or ``<cache_dir>/<catalog_id>`` over
+            object storage.
+        location: The catalog in object storage, or ``None`` on local disk.
+        product_id: The product.
+        edition_id: The edition.
+        manifest_sha256: The SHA-256 its Inventory entry records.
+        stamps: The directory of receive stamps, over object storage.
+        state: The entry's state, for messages.
+        embedding_model: The encoder the index was built with.
+        query_prefix: Prepended to every query before embedding.
+
+    Returns:
+        The view, and the registry and store under it, which the caller closes.
+
+    Raises:
+        IncompatibleCatalogError: The manifest is missing, unreadable or not
+            the one recorded (sdmxlib's `ManifestError`, chained), or anything
+            `_checked_copy` refuses.
+    """
+    if location is None:
+        edition_dir, remote = root / "products" / product_id / edition_id, None
+    else:
+        edition_dir, remote = _checked_copy(
+            location,
+            root,
+            product_id,
+            edition_id,
+            manifest_sha256=manifest_sha256,
+            engine=engine,
+            stamps=stamps,
+            state=state,
+        )
+    try:
+        registry = sdmxlib.LocalRegistry.edition(
+            edition_dir, remote=remote, engine=engine(), manifest_sha256=manifest_sha256
+        )
+    except ManifestError as exc:
+        remedy = (
+            f"run `statcat verify-catalog` on {root}"
+            if location is None
+            else f"delete the directory {edition_dir} to pull the edition again"
+        )
+        msg = (
+            f"{product_id}'s {state} edition {edition_id} does not hold the manifest.json the Inventory "
+            f"recorded ({exc}); {remedy}"
+        )
+        raise IncompatibleCatalogError(msg) from exc
+    opened = False
+    try:
+        store = _Store._over(
+            registry.connection.cursor,
+            catalog_name=registry.catalog_name,
+            search_dir=edition_dir / "search",
+            writable=False,
+            registry=registry,
+            embedding_model=embedding_model,
+            query_prefix=query_prefix,
+        )
+        opened = True
+    finally:
+        if not opened:
+            registry.close()
+    return EditionView._over(store), registry, store
 
 
 @frozen
@@ -635,42 +824,13 @@ class Catalog:
             The catalog. Its products' `Product.working_copy` raises; open it
             with `create` to write.
 
-        Raises:
-            FileNotFoundError: *path* is not a catalog.
-            ValueError: *path* is a URI string, or a `BlobLocation` with no
-                ``cache_dir``.
-
-        A legacy layout or other files at *path* raise `IncompatibleCatalogError`,
-        as does a ``catalog_id`` in object storage that cannot name a directory.
+        A *path* that is not a catalog raises `FileNotFoundError`, and a URI
+        string or a `BlobLocation` with no ``cache_dir`` raises `ValueError`
+        (`_open_read_only`). A legacy layout or other files at *path* raise
+        `IncompatibleCatalogError`, as does a ``catalog_id`` in object storage
+        that cannot name a directory.
         """
-        if isinstance(path, BlobLocation):
-            return cls._open_blob(path)
-        if isinstance(path, str) and _URI.match(path):
-            msg = (
-                f"Catalog.open({path!r}) takes a directory; a catalog in object storage needs a BlobLocation, "
-                "holding a store you built, so a library call never takes a credential from the environment"
-            )
-            raise ValueError(msg)
-        root = Path(path).absolute()
-        _refuse_legacy_layout(root)
-        if not (root / CATALOG_NAME).is_file():
-            msg = f"{root} is not a catalog (no {CATALOG_NAME}); create one with Catalog.create({str(path)!r})"
-            raise FileNotFoundError(msg)
-        InventoryWriter(root).catalog_document()
-        return cls._new(_Opening(root=root, writer=None))
-
-    @classmethod
-    def _open_blob(cls, location: BlobLocation) -> Self:
-        """`open` over object storage: the cache root comes from ``catalog_id``, which is read once."""
-        if location.cache_dir is None:
-            msg = f"Catalog.open({location.uri!r}) needs a BlobLocation with cache_dir, where it keeps pulled editions"
-            raise ValueError(msg)
-        catalog_id = InventoryWriter(BlobInventoryStorage(location)).catalog_document().catalog_id
-        if not _SAFE_ID.fullmatch(catalog_id):
-            msg = f"{location.uri} has catalog_id {catalog_id!r}, which cannot name a directory under cache_dir"
-            raise IncompatibleCatalogError(msg)
-        root = Path(location.cache_dir).absolute() / catalog_id
-        return cls._new(_Opening(root=root, writer=None, location=location, catalog_id=catalog_id))
+        return cls._new(_open_read_only(path, opener="Catalog.open"))
 
     # -- state -----------------------------------------------------------
 
@@ -934,47 +1094,6 @@ class Product:
             raise NoLiveEditionError(msg)
         return found
 
-    def _checked_copy(self, location: BlobLocation, live: LiveEdition) -> tuple[Path, str]:
-        """The live edition's cached directory and its store URI, pulled when absent and checked on open.
-
-        Args:
-            location: The catalog.
-            live: The live edition.
-
-        Returns:
-            The directory, and the URI of the edition in the store.
-
-        Raises:
-            IncompatibleCatalogError: Anything `_cached_edition` refuses, or a
-                finding from `sdmxlib.edition.check_on_open`.
-            ValueError: The edition has data files, and the location holds no
-                ``secrets`` for DuckDB to read them with.
-        """
-        cat = self._catalog
-        edition_dir, manifest = _cached_edition(
-            location, cat._root, self._product_id, live.edition_id, live.manifest_sha256
-        )
-        if not location.secrets and any(entry.root == "data" for entry in manifest.files):
-            msg = (
-                f"{self._product_id}'s edition {live.edition_id} has data files, and the BlobLocation of "
-                f"{location.uri} holds no secrets; give it the StoreSecret DuckDB reads them with"
-            )
-            raise ValueError(msg)
-        remote = f"{location.uri.rstrip('/')}/products/{self._product_id}/{live.edition_id}/"
-        report = check_on_open(
-            edition_dir,
-            stamps=cat._root / "verified",
-            remote=remote,
-            engine=cat._engine_for_views(),
-            references=bool(manifest.bindings),
-            extensions={STATCAT_SECTION: _statcat_check()},
-        )
-        if not report.ok:
-            found = "; ".join(str(finding) for finding in report.findings)
-            msg = f"{self._product_id}'s live edition {live.edition_id} failed its {report.at} check: {found}"
-            raise IncompatibleCatalogError(msg)
-        return edition_dir, remote
-
     def view(self, *, embedding_model: EmbeddingModel | None = None, query_prefix: str = "") -> EditionView:
         """A read-only view of the product's live edition, as of the catalog's last `Catalog.refresh`.
 
@@ -999,61 +1118,36 @@ class Product:
         Returns:
             The view.
 
-        Raises:
-            IncompatibleCatalogError: The edition's ``manifest.json`` is
-                missing, unreadable, or not the one the Inventory recorded
-                (sdmxlib's `ManifestError`, chained). Its ``statcat`` schema at
-                another version, or a search index this build does not read,
-                raise it too, and a product with no live edition raises
-                `NoLiveEditionError`. On a catalog in object storage, so do a
-                cached manifest that differs, a file that differs from the
-                manifest, an unsafe id or path, and a check finding. There, the
-                message for a cached manifest that is unreadable or differs
-                names the cached directory to delete, so the edition is pulled
-                again.
+        A ``manifest.json`` that is missing, unreadable, or not the one the
+        Inventory recorded raises `IncompatibleCatalogError` (sdmxlib's
+        `ManifestError`, chained). Its ``statcat`` schema at another version, or
+        a search index this build does not read, raise it too, and a product with
+        no live edition raises `NoLiveEditionError`. On a catalog in object
+        storage, so do a cached manifest that differs, a file that differs from
+        the manifest, an unsafe id or path, and a check finding. There, the
+        message for a cached manifest that is unreadable or differs names the
+        cached directory to delete, so the edition is pulled again.
 
         An edition with data files raises `ValueError` when its `BlobLocation`
         holds no ``secrets`` for DuckDB to read them with.
         """
         live = self._head()
         cat = self._catalog
-        if cat._location is None:
-            edition_dir, remote = self._dir / live.edition_id, None
-        else:
-            edition_dir, remote = self._checked_copy(cat._location, live)
-        try:
-            registry = sdmxlib.LocalRegistry.edition(
-                edition_dir, remote=remote, engine=cat._engine_for_views(), manifest_sha256=live.manifest_sha256
-            )
-        except ManifestError as exc:
-            remedy = (
-                f"run `statcat verify-catalog` on {cat._name}"
-                if cat._location is None
-                else f"delete the directory {edition_dir} to pull the edition again"
-            )
-            msg = (
-                f"{self._product_id}'s live edition {live.edition_id} does not hold the manifest.json the Inventory "
-                f"recorded ({exc}); {remedy}"
-            )
-            raise IncompatibleCatalogError(msg) from exc
-        opened = False
-        try:
-            store = _Store._over(
-                registry.connection.cursor,
-                catalog_name=registry.catalog_name,
-                search_dir=edition_dir / "search",
-                writable=False,
-                registry=registry,
-                embedding_model=embedding_model,
-                query_prefix=query_prefix,
-            )
-            opened = True
-        finally:
-            if not opened:
-                registry.close()
+        view, registry, store = _open_view(
+            cat._engine_for_views,
+            cat._root,
+            cat._location,
+            self._product_id,
+            live.edition_id,
+            manifest_sha256=live.manifest_sha256,
+            stamps=cat._root / "verified",
+            state="live",
+            embedding_model=embedding_model,
+            query_prefix=query_prefix,
+        )
         cat._registries.append(registry)
         cat._stores.append(store)
-        return EditionView._over(store)
+        return view
 
     def editions(self) -> list[Edition]:
         """The product's live editions, each with the ``previous`` its manifest records.

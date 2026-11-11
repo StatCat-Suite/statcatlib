@@ -20,7 +20,7 @@ design decisions in full. This file indexes the code contracts.
 
 - `src`: [`./src/EGM.md`](./src/EGM.md) — src layout holding the one package.
   - `src/statcatlib`: [`./src/statcatlib/EGM.md`](./src/statcatlib/EGM.md) —
-    public API re-exports, `catalog.py`, `admin.py`, `checks.py`, `bundle.py`,
+    public API re-exports, `catalog.py`, `admin.py`, `embargo.py`, `checks.py`, `bundle.py`,
     `query.py`, `expr.py`, `urn.py`, `testing.py`.
   - `src/statcatlib/model`: [`./src/statcatlib/model/EGM.md`](./src/statcatlib/model/EGM.md)
     — attrs domain model with no I/O.

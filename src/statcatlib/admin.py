@@ -72,7 +72,7 @@ from statcatlib.store.inventory import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
 
-    from sdmxlib.inventory import EventKind, FullInventory, Leaf, State, Tombstone
+    from sdmxlib.inventory import EventKind, FullInventory, Leaf, LeafEntry, State, Tombstone
 
     from statcatlib.model.catalog import CatalogDescription
 
@@ -173,6 +173,20 @@ def _new_tombstones(full: FullInventory | None, change: Change | None) -> list[s
         return []
     held = set() if full is None else set(full.root.retired)
     return [f"{t.product_id}/{t.edition_id}" for t in change.retired if t not in held]
+
+
+def _edition_entry(product_id: str, entry: LeafEntry) -> EditionEntry:
+    """The `EditionEntry` of *product_id*'s Inventory *entry*; `EmbargoReader.editions` shares it."""
+    return EditionEntry(
+        edition_id=entry.edition_id,
+        product_id=product_id,
+        previous=entry.previous,
+        state=entry.state,
+        manifest_sha256=entry.manifest_sha256,
+        schema_version=entry.schema_version,
+        state_changed_at=entry.state_changed_at,
+        release_at=entry.release_at,
+    )
 
 
 def _require_reason(reason: str) -> str:
@@ -302,19 +316,7 @@ class CatalogAdmin:
         full = self._writer.full()
         if full is None or product_id not in full.products():
             return []
-        return [
-            EditionEntry(
-                edition_id=e.edition_id,
-                product_id=product_id,
-                previous=e.previous,
-                state=e.state,
-                manifest_sha256=e.manifest_sha256,
-                schema_version=e.schema_version,
-                state_changed_at=e.state_changed_at,
-                release_at=e.release_at,
-            )
-            for e in full.entries(product_id)
-        ]
+        return [_edition_entry(product_id, e) for e in full.entries(product_id)]
 
     # -- product changes -------------------------------------------------
 
