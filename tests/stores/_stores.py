@@ -137,8 +137,8 @@ def start() -> Running:
 
 
 def stop(running: Running) -> None:
-    """Remove the emulator's container."""
-    _docker("rm", "-f", running.container, check=False)
+    """Remove the emulator's container and the anonymous volume its image declares."""
+    _docker("rm", "-f", "-v", running.container, check=False)
 
 
 def _shared_key(method: str, url: str, query: Mapping[str, str] | None = None) -> dict[str, str]:
