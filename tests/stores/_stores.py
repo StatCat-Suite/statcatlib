@@ -8,7 +8,8 @@ Phase 4.
 `RecordingOps` records every store call, a listing included, and refuses the
 Inventory's paths. `ReadingOps` records a reader's calls, its listings
 included, and fails any write. `KeyedRest` is
-`AzureBlobRest` with Azurite's account key, the one path no deployment uses.
+`AzureBlobRest` with Azurite's account key, the one path no deployment uses,
+and signs each ``HEAD`` with SharedKey.
 `record_uploaded` places an uploaded edition in a blob Inventory, since Phase 4
 has no fold.
 
@@ -30,7 +31,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,7 +41,6 @@ from urllib.parse import urlsplit
 
 import attrs
 import httpx
-import obstore
 import pytest
 import sdmxlib as sl
 from attrs import field, frozen
@@ -49,13 +49,13 @@ from sdmxlib.edition import MANIFEST_NAME, Lifecycle, read_manifest
 from sdmxlib.inventory import CATALOG_NAME, CURRENT_NAME, Root, record, routing_fields, sha256_hex
 
 from statcatlib.store import blob as blob_module
-from statcatlib.store.blob import AzureBlobRest, BlobLocation, _ObjectOps, pull_edition
+from statcatlib.store.blob import _AZURE_VERSION, AzureBlobRest, BlobLocation, _ObjectOps, pull_edition
 from statcatlib.store.inventory import InventoryWriter
 from statcatlib.store.working_copy import Edition, edition_kind, fold_lifecycle, recorded_routing
 from statcatlib.upload import _upload
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
     from obstore import ObjectMeta
     from obstore.store import ObjectStore
@@ -141,18 +141,37 @@ def stop(running: Running) -> None:
     _docker("rm", "-f", running.container, check=False)
 
 
-def _create_container(running: Running) -> None:
-    """Create `CONTAINER` with Azure's SharedKey signature, written out, since `obstore` cannot create one."""
-    headers = {"x-ms-date": format_datetime(datetime.now(UTC), usegmt=True), "x-ms-version": "2021-08-06"}
+def _shared_key(method: str, url: str, query: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The headers that sign a bodiless *method* request to *url* with Azure's SharedKey scheme, written out.
+
+    The signature covers ``x-ms-date``, which Azure accepts within 15 minutes of
+    its own clock. A signed URL carries a start time to the second instead, and
+    Azurite answers 403 to one signed in the milliseconds its clock runs behind
+    the host's (GH-136).
+
+    Args:
+        method: The HTTP method.
+        url: The request's URL with no query string, its path quoted as sent.
+        query: The request's query parameters.
+
+    Returns:
+        ``x-ms-date``, ``x-ms-version`` and ``Authorization``.
+    """
+    headers = {"x-ms-date": format_datetime(datetime.now(UTC), usegmt=True), "x-ms-version": _AZURE_VERSION}
     canonical = "".join(f"{k}:{v}\n" for k, v in sorted(headers.items()))
-    resource = f"/{ACCOUNT}/{ACCOUNT}/{CONTAINER}\nrestype:container"
-    to_sign = "PUT\n" + "\n" * 11 + canonical + resource
+    # The resource is the account, then the URL's path. Azurite's URL path
+    # starts with the account as well, so the emulator's resource names it twice.
+    resource = f"/{ACCOUNT}{urlsplit(url).path}" + "".join(f"\n{k}:{v}" for k, v in sorted((query or {}).items()))
+    to_sign = f"{method}\n" + "\n" * 11 + canonical + resource
     signature = base64.b64encode(hmac.new(base64.b64decode(KEY), to_sign.encode(), hashlib.sha256).digest()).decode()
-    response = httpx.put(
-        f"{running.endpoint}/{CONTAINER}",
-        params={"restype": "container"},
-        headers={**headers, "Authorization": f"SharedKey {ACCOUNT}:{signature}"},
-    )
+    return {**headers, "Authorization": f"SharedKey {ACCOUNT}:{signature}"}
+
+
+def _create_container(running: Running) -> None:
+    """Create `CONTAINER` under a SharedKey signature, since `obstore` cannot create one."""
+    url = f"{running.endpoint}/{CONTAINER}"
+    query = {"restype": "container"}
+    response = httpx.put(url, params=query, headers=_shared_key("PUT", url, query))
     response.raise_for_status()
 
 
@@ -381,11 +400,17 @@ def pull_at_the_rename(
 
 
 class KeyedRest(AzureBlobRest):
-    """`AzureBlobRest` over Azurite's account key: a ``HEAD`` to a signed GET URL (F8)."""
+    """`AzureBlobRest` over Azurite's account key: the ``HEAD`` that `AzureBlobRest` sends, under a SharedKey signature.
+
+    `obstore` does not read ``Content-MD5`` (F8), so the test path sends
+    ``Get Blob Properties`` as the deployed path does, to the same URL, and
+    `AzureBlobRest.head` reads the answer.
+    """
 
     @override
     def _send(self, path: str) -> httpx.Response:
-        return self._client.head(obstore.sign(self._store, "GET", path, timedelta(hours=1)))
+        url = self._url(path)
+        return self._client.head(url, headers=_shared_key("HEAD", url))
 
 
 def record_uploaded(

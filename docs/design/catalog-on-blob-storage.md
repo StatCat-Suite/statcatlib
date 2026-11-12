@@ -762,8 +762,11 @@ Properties` with `x-ms-version: 2023-11-03` and `Authorization: Bearer` from the
 `TokenIdentity`. It needs `blobs/read` and nothing else. Only a 404 returns `None`; a 401,
 403 or 5xx raises `BlobStoreError`, so a missing role never reads as a missing file. With no
 `TokenIdentity`, `upload_edition` raises `ValueError` before it writes anything. The
-account-key path that Azurite needs is a test subclass that signs a GET URL with
-`obstore.sign` and sends `HEAD` to it (F8), since no deployment uses a key (§10.1).
+account-key path that Azurite needs is a test subclass that sends the same `HEAD` under a
+SharedKey signature, since no deployment uses a key (§10.1). The subclass first sent `HEAD` to
+a GET URL signed with `obstore.sign` (F8). That URL's start time is the host's clock to the
+second, and Azurite answered 403 to a URL signed in the milliseconds its clock ran behind the
+host's (GH-136).
 
 | Option | Gain | Cost |
 |---|---|---|
