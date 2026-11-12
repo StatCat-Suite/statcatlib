@@ -187,6 +187,32 @@ class TestStoreExports:
 
         assert reimported.BlobLocation is not None
 
+    def test_embargo_reader(self) -> None:
+        import statcatlib as sc
+        from statcatlib.embargo import EmbargoReader
+
+        assert "EmbargoReader" in sc.__all__
+        assert sc.EmbargoReader is EmbargoReader
+
+    def test_the_embargo_reader_imports_and_reads_a_local_catalog_without_the_blob_extra(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Spec §6.4's reader lives in core: `statcatlib.embargo` imports nothing from the ``blob`` extra."""
+        _seal_under_embargo(tmp_path / "cat")
+        for name in [n for n in sys.modules if n == "statcatlib" or n.startswith("statcatlib.")]:
+            monkeypatch.delitem(sys.modules, name)
+        monkeypatch.setitem(sys.modules, "obstore", None)
+        monkeypatch.setitem(sys.modules, "obstore.exceptions", None)
+
+        embargo = importlib.import_module("statcatlib.embargo")
+        reader = embargo.EmbargoReader.open(tmp_path / "cat")
+        try:
+            (entry,) = reader.editions()
+            view = reader.view("p", entry.edition_id)
+            assert view.get(importlib.import_module("statcatlib").OpenDataset, "d") is not None
+        finally:
+            reader.close()
+
     def test_a_blob_call_without_the_extra_names_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from statcatlib.store.blob import _ObjectOps
 
@@ -401,8 +427,8 @@ class TestConstruct:
 
 
 # ---------------------------------------------------------------------------
-# RFC D4, D13, D16: the public objects reach neither the operational object
-# nor an embargoed edition
+# RFC D4, D13, D16 and spec §6.4: the public objects reach no operational
+# object, embargo reader or embargoed edition
 # ---------------------------------------------------------------------------
 
 
@@ -417,6 +443,21 @@ def _seal_twice(root: Path) -> None:
                 )
             )
             wc.seal()
+
+
+def _seal_under_embargo(root: Path) -> None:
+    """Seal product ``p`` live, turn the embargo on, and seal its second edition, which is recorded embargoed."""
+    _seal_twice(root)
+    admin = sc.CatalogAdmin.open(root)
+    admin.set_embargo(on=True, reason="embargo the next release")
+    with sc.Catalog.create(root, exist_ok=True) as cat:
+        wc = cat.product("p").working_copy()
+        wc.put(
+            sc.OpenDataset(
+                identifier="d", title=sc.InternationalString(en="Third"), description=sc.InternationalString(en="Third")
+            )
+        )
+        wc.seal()
 
 
 def _public_values(obj: object) -> list[tuple[str, object]]:
@@ -434,6 +475,8 @@ def _public_values(obj: object) -> list[tuple[str, object]]:
 
 class TestNoOperationalReach:
     """RFC D4, D13, D16: no attribute of Catalog, Product or EditionView reaches a CatalogAdmin or a non-live edition.
+
+    Spec §6.4 adds the `EmbargoReader` (Phase 5 D12): none of them returns one either.
 
     `tests/test_catalog_admin.py` runs the same check over a catalog that holds
     embargoed editions. Each public attribute's value, and
@@ -453,6 +496,26 @@ class TestNoOperationalReach:
                     if callable(value) and hasattr(value, "__annotations__"):
                         returns = annotationlib.get_annotations(value, format=annotationlib.Format.STRING)
                         assert "Admin" not in returns.get("return", ""), where
+
+    def test_no_attribute_returns_an_embargo_reader(self, tmp_path: Path) -> None:
+        """Spec §6.4: only `EmbargoReader.open` reaches one; checked over a catalog with an embargoed edition."""
+        _seal_under_embargo(tmp_path / "cat")
+        with sc.Catalog.open(tmp_path / "cat") as cat:
+            product = cat.product("p")
+            view = product.view()
+            for owner in (cat, product, view):
+                for name, value in _public_values(owner):
+                    where = f"{type(owner).__name__}.{name}"
+                    assert not isinstance(value, sc.EmbargoReader), where
+                    assert "Embargo" not in type(value).__name__, where
+                    if callable(value) and hasattr(value, "__annotations__"):
+                        returns = annotationlib.get_annotations(value, format=annotationlib.Format.STRING)
+                        assert "EmbargoReader" not in returns.get("return", ""), where
+
+    @pytest.mark.parametrize("args", [(), ("cat",)], ids=["no-arguments", "a-path"])
+    def test_an_embargo_reader_is_built_only_by_open(self, args: tuple[str, ...]) -> None:
+        with pytest.raises(TypeError, match=r"EmbargoReader\.open"):
+            sc.EmbargoReader(*args)
 
     def test_the_public_catalog_lists_the_live_edition_only(self, tmp_path: Path) -> None:
         _seal_twice(tmp_path / "cat")

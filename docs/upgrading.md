@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: artefact records in every leaf entry, the section's `lifecycle`, `CatalogAdmin` on object storage, and `statcat gc`, on sdmxlib 0.88
+## Next release: artefact records in every leaf entry, the section's `lifecycle`, `CatalogAdmin` on object storage, `statcat gc` and `EmbargoReader`, on sdmxlib 0.88
 
 statcatlib requires `sdmxlib>=0.88,<0.89`. No catalog is rebuilt. sdmxlib 0.88's
 `read_manifest` and `decode_manifest` raise `sdmxlib.edition.ManifestError` for a
@@ -81,6 +81,16 @@ Inventory version, and prints its deletion log as JSON lines on standard output
 ([The GC job](api/gc.md)). Nothing on a local catalog changes: `statcat prune` still
 prunes a catalog directory. `statcatlib.jobs.decode_registration(path, raw)` reads a
 `pending/` registration as the release job's fold and GC read it.
+
+`statcatlib.EmbargoReader.open(path)` opens a catalog directory or a `BlobLocation` to
+read its editions in every state, for statcat-serve's preview and pre-materialisation.
+`editions(*, states=("embargoed",))` lists entries as `EditionEntry` values, and
+`view(product_id, edition_id)` opens an embargoed or live edition as an `EditionView`,
+with `Product.view`'s checks; a superseded or withdrawn edition raises `ValueError`. Over
+object storage it keeps receive stamps in `<cache_dir>/<catalog_id>/embargo-verified/`,
+and its `cache_dir` holds embargoed bytes, so give it one of its own ([Embargo
+reader](api/embargo.md)). No attribute of `Catalog`, `Product` or `EditionView` returns
+one, and nothing a public reader calls changes.
 
 ## 0.16.1: `statcat upload` refuses more `obstore` variables
 

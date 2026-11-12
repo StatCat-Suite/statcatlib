@@ -3,8 +3,8 @@
 ## Overview
 
 `statcatlib` is the package root. `__init__.py` re-exports the public API of
-`model`, `sources` and `store`; `CatalogAdmin` from `admin.py`; `Catalog`, `Product`, `Edition`,
-`SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
+`model`, `sources` and `store`; `CatalogAdmin` from `admin.py`; `EmbargoReader` from `embargo.py`;
+`Catalog`, `Product`, `Edition`, `SealOutcomes` and `NoLiveEditionError` from `catalog.py`; the errors `InventoryConflictError`,
 `InventoryContentionError`, `InventoryRuleError`, `InventoryWriteRefusedError`,
 `NonFastForwardError` and `CrossProductRuleError` from `store/inventory.py`; `BlobLocation` and `TokenIdentity`
 from `store/blob.py`; `upload_edition`, `UploadReport` and `UploadCheckError` from `upload.py`; `WorkingCopyExistsError`,
@@ -14,7 +14,7 @@ sentinel module; and part of `expr` (listed below). It exposes `checks`,
 `query` and `urn` as submodules (`sc.checks`, `sc.query`, `sc.urn`). The
 top-level modules hold the parts that sit across subpackages: the catalog of
 products (`catalog.py`), the operational changes to its Inventory
-(`admin.py`), seal checks (`checks.py`), the `statcat` section of
+(`admin.py`), the reader of embargoed editions (`embargo.py`), seal checks (`checks.py`), the `statcat` section of
 an sdmxlib edition manifest (`bundle.py`), the integrity and support
 checks behind `statcat verify-catalog` and `statcat doctor`
 (`diagnostics.py`), the copy of a sealed edition to object storage (`upload.py`), the
@@ -89,7 +89,8 @@ and test catalogs (`testing.py`).
     `cat.product(id).view().<name>` for every name in
     `store.store.VIEW_ATTRIBUTES`.
 - `Product`: `product_id`; `view(*, embedding_model=None, query_prefix="")
-  -> EditionView`; `editions() -> list[Edition]` (the live head, with the
+  -> EditionView`, which calls `_open_view` with the live head and the stamps
+  directory `<root>/verified`; `editions() -> list[Edition]` (the live head, with the
   `previous` its manifest records; empty without one); `working_copy(*,
   kind=None, lifecycle="revisable", resume=False, embedding_model=None,
   document_prefix="", query_prefix="") -> WorkingCopy` (`kind` is `"data"`
@@ -98,6 +99,24 @@ and test catalogs (`testing.py`).
   `Catalog.product` is the only constructor.
 - `NoLiveEditionError` (`LookupError`): `view()` on a product with no live
   edition.
+- `_open_read_only(path, *, opener) -> _Opening`: `Catalog.open`'s checks and
+  its `_Opening`, shared with `EmbargoReader.open`; *opener* names the call in
+  messages.
+- `_open_view(engine, root, location, product_id, edition_id, *,
+  manifest_sha256, stamps, state, embedding_model, query_prefix) ->
+  tuple[EditionView, EditionRegistry, _Store]`: the one place an `EditionView`
+  of a recorded edition is built, shared by `Product.view` and
+  `EmbargoReader.view` (Phase 5 D12). *engine* is a callable that builds the
+  caller's engine on first use, so an edition refused before it opens builds none.
+  On local disk it attaches
+  `<root>/products/<product>/<edition>`; over a `BlobLocation`, `_checked_copy`
+  runs `_cached_edition` (the manifest first, then `pull_edition`), refuses an
+  edition with data files when the location holds no `secrets` (`ValueError`),
+  and runs `check_on_open(stamps=, references=bool(manifest.bindings),
+  extensions={"statcat": ...})`. Then `LocalRegistry.edition(...,
+  manifest_sha256=)`, its `ManifestError` re-raised as `IncompatibleCatalogError`,
+  and a read-only `_Store`. The caller keeps the registry and the store to close.
+  *state* names the entry's state in messages.
 - `SealOutcomes`: a frozen attrs value with `sealed` (product id to
   `Edition`, all recorded in one version) and `refused` (product id to the
   error: `SealCheckError`, `NonFastForwardError` or another
@@ -171,6 +190,30 @@ are imported from `statcatlib.admin`.
 - `EditionEntry`: a frozen attrs value with `edition_id`, `product_id`,
   `previous`, `state`, `manifest_sha256`, `schema_version`,
   `state_changed_at` and `release_at`.
+
+### `embargo.py`
+
+`EmbargoReader` (Phase 5 D12) is exported from `statcatlib`. statcat-serve's preview
+and pre-materialisation read through it (sdmxlib plan Q8, Q9).
+
+- `EmbargoReader.open(location: str | Path | BlobLocation) -> Self`: runs
+  `catalog._open_read_only(opener="EmbargoReader.open")`, so it refuses what
+  `Catalog.open` refuses, then `refresh()`. Direct construction raises `TypeError`
+  naming `open`.
+- `refresh() -> Self`: holds a `FullInventory` of its own over
+  `InventoryWriter(...).storage.read`, made once a version exists, and refreshes it.
+- `editions(*, states=("embargoed",)) -> list[EditionEntry]`: the entries in
+  *states* of the held version, by product id and then leaf order, through
+  `admin._edition_entry`; empty before the first version. A string, or a state
+  outside sdmxlib's `State`, raises `ValueError`.
+- `view(product_id, edition_id, *, embedding_model=None, query_prefix="") ->
+  EditionView`: an unrecorded product raises `InventoryRuleError(rule="unknown")`
+  (`admin._leaf`), as does an unrecorded edition; a `superseded` or `withdrawn`
+  entry raises `ValueError`, before anything under the edition is read. Otherwise
+  `catalog._open_view` on the reader's own `sdmxlib.EditionEngine`, with stamps in
+  `<root>/embargo-verified`.
+- `close()`: closes every view's store and registry, then the engine; idempotent.
+  A closed reader's methods and views raise `RuntimeError`.
 
 ### `jobs.py`
 
@@ -493,11 +536,19 @@ read.
 - Only `CatalogAdmin` changes the Inventory, apart from a seal's record and
   the journal repair. It runs over a catalog directory or a `BlobLocation`,
   `prune` on a directory only. No attribute of `Catalog`, `Product` or `EditionView`
-  returns a `CatalogAdmin` or an embargoed, superseded or withdrawn edition.
+  returns a `CatalogAdmin`, an `EmbargoReader` (spec §6.4) or an embargoed,
+  superseded or withdrawn edition. `Catalog`'s reads (`products`, `Product.view`,
+  `Product.editions`) go through a `LiveInventory`.
 - Every `CatalogAdmin` rule is re-evaluated against the head each commit
   lands on: a rollback whose `if_live` is no longer live, a release that is
   no longer a fast-forward, and a seal record computed before the embargo was
   turned on are each refused or recomputed.
+- `EmbargoReader` writes nothing to the catalog. Over a `BlobLocation` it writes to its
+  `cache_dir` alone: the files of the embargoed and live editions it views, and their
+  receive stamps under `<cache_dir>/<catalog_id>/embargo-verified`. That `cache_dir`
+  holds embargoed bytes, so a deployment gives the reader its own. A superseded or
+  withdrawn edition, or one the Inventory does not record, is refused before any read
+  under it.
 - `Product.view` passes the Inventory's `manifest_sha256` to
   `sdmxlib.LocalRegistry.edition`, which hashes the bytes of
   `manifest.json` it parses. A missing, malformed or different manifest
@@ -535,7 +586,9 @@ read.
   at INFO, and writes and removes a `.statcat-link-probe.*` file and its hard
   link.
 - `Product.view` attaches the edition to the catalog's engine
-  (`LocalRegistry.edition(path, engine=, manifest_sha256=)`). `Product.working_copy` writes as
+  (`LocalRegistry.edition(path, engine=, manifest_sha256=)`), and
+  `EmbargoReader.view` to the reader's; over a `BlobLocation` each writes the pulled
+  edition and its stamp under its own `cache_dir`. `Product.working_copy` writes as
   `store/EGM.md` describes.
 - `synthetic_catalog` writes a whole catalog: `catalog.json`, sdmxlib's
   synthetic edition, the catalog rows, the search index when lancedb is
@@ -550,8 +603,9 @@ read.
   the `statcatlib.admin` logger.
 - `diagnostics.verify_catalog` opens each edition in a DuckDB engine of
   `check_edition`'s own; neither it nor `diagnostics.doctor` writes a file.
-- These modules make no network calls, except `upload.py`, `admin.py` and `gc.py`,
-  which reach a store only through the `BlobLocation` they are given. `jobs.py` reads
+- These modules make no network calls, except `upload.py`, `admin.py`, `gc.py`,
+  `catalog.py` and `embargo.py`, which reach a store only through the `BlobLocation`
+  they are given. `jobs.py` reads
   the one file it is given.
 - `gc.collect_garbage` writes nothing. It deletes under `products/` and `pending/`
   only, unless `dry_run`, and logs each event on the `statcatlib.gc` logger at INFO
@@ -562,6 +616,9 @@ read.
 ## Verification
 
 - Run: `just ci` (unit tier alone: `uv run pytest -m unit`).
+- `EmbargoReader`: `tests/test_embargo_reader.py` (a local catalog), the
+  `TestNoOperationalReach` and blob-extra tests in `tests/test_public_api.py`, and,
+  against Azurite, `tests/stores/test_embargo_reader.py`.
 - GC: `tests/test_gc.py` (every rule over a `MemoryStore`, with the helpers in
   `tests/_gc.py`), `tests/test_cli_gc.py` and, against Azurite,
   `tests/stores/test_gc.py`; `decode_registration` in `tests/test_jobs_config.py`.

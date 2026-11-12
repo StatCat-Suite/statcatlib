@@ -43,6 +43,7 @@ from statcatlib.sources import (
 from statcatlib import checks, query, urn
 from statcatlib.admin import CatalogAdmin
 from statcatlib.catalog import Catalog, Edition, NoLiveEditionError, Product, SealOutcomes
+from statcatlib.embargo import EmbargoReader
 from statcatlib.expr import (
     AliasedExpr,
     CountExpr,
@@ -151,6 +152,7 @@ __all__ = [
     "Edition",
     "EditionCheckError",
     "EditionView",
+    "EmbargoReader",
     "EmbeddingMetadata",
     "ExistsExpr",
     "Expr",

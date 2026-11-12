@@ -209,6 +209,8 @@ inside a process.
   one, and an embargoed product raises `NoLiveEditionError`.
 - Leaf bytes name embargoed editions, so they stay in memory and never reach `cache_dir`.
   Only live editions' files do.
+- An [`EmbargoReader`](embargo.md) opens embargoed editions, so its `cache_dir` holds
+  their files. Give it a `cache_dir` of its own, never a public reader's.
 - A cached edition stays after a rollback or a withdrawal until an operator deletes its
   directory. Delete it to remove the edition from that disk. Nothing purges pod disks
   until `expunge` exists.
