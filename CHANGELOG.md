@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.0] - 2026-11-12
+
+### Documentation
+
+- **design**: Record the A1 check and the filled leaf read in the release job design
+- Describe the release job, its refusal record and its runbook (GH-52)
+- **design**: State the release job as built (GH-52)
+
+### Features
+
+- **access**: Add the release job's access precondition (GH-52)
+- **release**: Add the release job: fold, release and retire (GH-52)
+- **cli**: Add statcat release (GH-52)
+
+### Testing
+
+- **stores**: Run the release job against Azurite (GH-52)
+
 ## [0.17.0] - 2026-11-12
 
 ### Breaking Changes
