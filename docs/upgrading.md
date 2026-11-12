@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: `statcat release`, the release job
+## 0.18.0: `statcat release`, the release job
 
 No call changes, and no catalog is rebuilt. This release adds the release job for a
 catalog in Azure Blob Storage: `statcat release AZ_URL --config FILE [--dry-run]`,
