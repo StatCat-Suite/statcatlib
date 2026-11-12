@@ -108,6 +108,7 @@ nav:
     - Source Connectors: api/sources.md
     - Catalog Administration: api/admin.md
     - Jobs Configuration: api/jobs.md
+    - Release Job: api/release.md
     - GC Job: api/gc.md
     - Embargo Reader: api/embargo.md
   - Reference:
@@ -121,6 +122,7 @@ nav:
     - Checks: reference/checks.md
     - Catalog Administration: reference/admin.md
     - Jobs Configuration: reference/jobs.md
+    - Release Job: reference/release.md
     - GC Job: reference/gc.md
     - Embargo Reader: reference/embargo.md
     - Diagnostics: reference/diagnostics.md

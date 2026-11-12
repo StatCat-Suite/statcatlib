@@ -128,7 +128,8 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   `lifecycle` is absent or equal; the section's for a product the head does
   not record. A different value, or none for a new product, raises
   `InventoryRuleError(rule="lifecycle")`, the second naming statcatlib 0.17.
-  `tests/stores/_stores.py`'s `record_uploaded` uses it until the fold exists.
+  `statcatlib.release.ReleaseJob`'s fold calls it, and so does
+  `tests/stores/_stores.py`'s `record_uploaded`.
 - `Planned(product_id, edition_id, leaf, read=None)` and
   `precheck_refusals(writer, full, planned, fixed=())`: the seal's
   cross-product pre-check over provisional leaves, each working copy's
@@ -196,7 +197,8 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   with a WARNING, when a manifest cannot be read); tombstones are the head's
   followed by the new ones, and `Change.now` is *now*. `None` when nothing
   retires. A `TransitionError` becomes `InventoryRuleError`. `CatalogAdmin.prune`
-  and the release job (Phase 5 Part 3) call it inside their `commit` callable.
+  and the release job (`statcatlib.release.ReleaseJob`) call it inside their `commit`
+  callable.
 - `MAX_RACES = 8`. `producer()` returns
   `Producer(name="statcatlib", version=<installed version>)`.
 - Errors: `InventoryConflictError` (another writer created the version

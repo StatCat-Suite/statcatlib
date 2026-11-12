@@ -5,9 +5,9 @@ catalog in Azure Blob Storage, and registers it in `pending/`. `Catalog.open`
 reads a catalog there, returning live editions only. Install both with
 `uv add 'statcatlib[blob]'`, or `pip install 'statcatlib[blob]'`.
 
-An uploaded edition waits in `pending/`. Phase 5's fold records it in the
-Inventory, so no reader sees it until then, and until that fold a catalog holding
-real editions comes only from the test helper `record_uploaded`. Upload supports
+An uploaded edition waits in `pending/`. [The release job](release.md) folds it
+into the Inventory as an `embargoed` entry and releases it at its `release_at`, so
+no reader sees it until then. Upload supports
 Azure only in Phase 4, and refuses an `S3Store`, because `obstore` cannot set or read
 CRC32C.
 
@@ -181,7 +181,8 @@ pulls the edition again and hashes every file it pulls against the manifest, the
 
 An edition with no bindings defers the reference check on a reader, as on upload, since a
 structure product's references may resolve in another structure product. The bytes hash to
-a manifest the Inventory recorded, and Phase 5's fold owns that check.
+a manifest the Inventory recorded, and [the release job's
+fold](release.md#the-fold) runs that check before it records the edition.
 
 ### Ids and paths
 
@@ -217,11 +218,11 @@ inside a process.
 
 ## Real-account checklist
 
-**None of these has run.** Azurite and `pytest-httpx` test the code, and neither proves
-how real Azure behaves. No test reads a real account through DuckDB either. The owner
-runs this list once, with a real storage account, before Phase 5 relies on the blob
-writer, the upload and the remote read, and records the results in GH-134. Item 9 runs in
-the same pass and feeds Phase 6, serving.
+Azurite and `pytest-httpx` test the code, and neither proves how real Azure behaves, so
+the owner runs this list against a real storage account. It ran on 2026-11-10 against
+statcatlib 0.16.2: nine items passed, and the private-endpoint half of item 2 did not run.
+Item 9 ran again on 2026-11-12 with artefact records in the leaves, and GH-134 holds the
+results.
 
 1. A commit under a workload identity: `event.actor` holds the `oid`.
 2. The anonymous `Date` `HEAD`, also behind the deployment's private endpoint.

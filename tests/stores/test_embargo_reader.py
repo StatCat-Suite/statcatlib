@@ -1,15 +1,15 @@
 """`EmbargoReader` over a blob catalog on Azurite (Phase 5 D12, Part 5; Goal 8).
 
 Each store and DuckDB secret names Azurite on the loopback address, with its
-well-known key. Part 3's fold is not built, so a fixture seals editions in a local
-catalog and records each with `record_uploaded`, as the fold will: under embargo,
-each is recorded ``embargoed``. The reader's location carries a `ReadingOps`, so
-any write to the store fails the test.
+well-known key. A fixture seals editions in a local catalog, uploads each as
+``statcat upload`` does, and runs the release job, whose fold records each
+``embargoed`` and whose release step makes the due one live. The reader's location
+carries a `ReadingOps`, so any write to the store fails the test.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ import statcatlib as sc
 from statcatlib import catalog as catalog_module
 from statcatlib.admin import CatalogAdmin
 from statcatlib.model import InternationalString
+from statcatlib.release import ReleaseReport
 from statcatlib.store.blob import BlobLocation
 from statcatlib.store.inventory import InventoryWriter
 from tests.conftest import sealed_data_edition
@@ -63,11 +64,20 @@ def sealed(tmp_path_factory: pytest.TempPathFactory) -> Sealed:
     return Sealed(root, first, first.parent / second.edition_id, other)
 
 
+def _run_release_job(location: BlobLocation) -> ReleaseReport:
+    """One run of the release job, its storage clock three minutes ahead of this machine's."""
+    with _stores.release_job(location, clock=lambda: datetime.now(UTC) + timedelta(minutes=3)) as job:
+        return job.run()
+
+
 @pytest.fixture
 def placed(writer: InventoryWriter, location: BlobLocation, sealed: Sealed) -> Placed:
-    live = _stores.record_uploaded(writer, location, sealed.first)
-    writer.try_commit(writer.head(), {}, embargo=True, kind="embargo-change", reason="embargo on")
-    held = _stores.record_uploaded(writer, location, sealed.second, release_at=_RELEASE)
+    """``a``'s first edition folded and released by one run, and its second folded by the next."""
+    del writer
+    live = _stores.upload(location, sealed.first, release_at=datetime.now(UTC) + timedelta(minutes=2))
+    assert _run_release_job(location).released == (f"a/{live.edition_id}",)
+    held = _stores.upload(location, sealed.second, release_at=_RELEASE)
+    assert _run_release_job(location).folded == (f"a/{held.edition_id}",)
     return Placed(live.edition_id, held.edition_id)
 
 
@@ -146,12 +156,12 @@ class TestViews:
         assert reading.cache_dir is not None
         assert not reading.cache_dir.exists() or not list(reading.cache_dir.rglob(placed.held))
 
-    def test_refresh_sees_a_new_fold(self, writer, location, reading, placed, sealed) -> None:
+    def test_refresh_sees_a_new_fold(self, location, reading, placed, sealed) -> None:
         reader = sc.EmbargoReader.open(reading)
         try:
             assert [e.product_id for e in reader.editions()] == ["a"]
-            # Part 3's fold is not built: `record_uploaded` records the upload as the fold will.
-            other = _stores.record_uploaded(writer, location, sealed.other, release_at=_RELEASE)
+            other = _stores.upload(location, sealed.other, release_at=_RELEASE)
+            assert _run_release_job(location).folded == (f"b/{other.edition_id}",)
             assert [e.product_id for e in reader.editions()] == ["a"]
             with pytest.raises(sc.InventoryRuleError, match="no product b"):
                 reader.view("b", other.edition_id)

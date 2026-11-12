@@ -1,18 +1,19 @@
 """statcatlib command-line interface.
 
 Top-level entry point installed as the ``statcat`` console script. It has
-seven commands: `build_index`, which builds the search index of a product's
+eight commands: `build_index`, which builds the search index of a product's
 working copy; `verify_catalog`, which checks a catalog's integrity; `doctor`,
 which reports on a catalog for support; `prune`, which retires old editions
 and deletes the files no edition needs; `upload`, which copies a sealed
 edition to Azure Blob Storage; `advance_current`, which moves ``CURRENT``
-forward; and `gc`, the GC job over a catalog in Azure Blob Storage. The
+forward; `gc`, the GC job over a catalog in Azure Blob Storage; and `release`,
+the release job over one. The
 ``admin`` group (`admin_app`) makes the operational changes: ``editions``,
 ``release``, ``cancel``, ``rollback`` and ``embargo``, over a catalog directory
 or ``az://``. The CLI is intentionally thin — the work lives
 in `statcatlib.WorkingCopy.build_index`, `statcatlib.diagnostics`,
-`statcatlib.CatalogAdmin`, `statcatlib.upload_edition` and
-`statcatlib.gc.collect_garbage`.
+`statcatlib.CatalogAdmin`, `statcatlib.upload_edition`,
+`statcatlib.gc.collect_garbage` and `statcatlib.release.ReleaseJob`.
 
 `build_index` requires the ``[search]`` extra (typer + sentence-transformers +
 lancedb), and `upload` the ``[blob]`` extra (typer + obstore + azure-identity).
@@ -54,9 +55,12 @@ from sdmxlib.inventory import InventoryError
 
 import statcatlib as sc
 from statcatlib import diagnostics
+from statcatlib.access import ARM_SCOPE, AzureReaderListing
 from statcatlib.gc import GcReport, GcStoppedError, collect_garbage
 from statcatlib.jobs import _EVENT_ATTRIBUTE, JobsConfigError, _emit, _stamp, load_jobs_config
+from statcatlib.release import ReleaseJob, ReleaseReport
 from statcatlib.store.blob import (
+    AzureBlobRest,
     BlobInventoryStorage,
     BlobLocation,
     BlobStoreError,
@@ -70,6 +74,7 @@ from statcatlib.upload import UploadCheckError, upload_edition
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
+    from azure.identity import DefaultAzureCredential
     from sdmxlib.edition import Lifecycle
 
 __all__ = ["admin_app", "app", "main"]
@@ -107,7 +112,8 @@ _REFUSED_KEYS = frozenset(name.lower() for name in _REFUSED_VARIABLES)
 #: How long one request may take: a 5,000 MiB Put at about 1.4 MB/s.
 _UPLOAD_TIMEOUT = "1h"
 
-#: How long one request of `advance-current` or `admin` may take: each reads or writes one small document.
+#: How long one request of `advance-current`, `admin`, `gc` or `release` may take: each reads or writes one small
+#: document, or one of an edition's catalog files.
 _ADMIN_TIMEOUT = "5m"
 
 
@@ -700,6 +706,17 @@ def _azure_location(uri: str, account: str, *, command: str = "upload", timeout:
     value `obstore` cannot parse, such as ``AZURE_DISABLE_TAGGING=junk``: obstore 0.12.1 raises `GenericError`
     from the store build, before any request.
     """
+    return _azure_clients(uri, account, command=command, timeout=timeout)[0]
+
+
+def _azure_clients(
+    uri: str, account: str, *, command: str, timeout: str
+) -> tuple[BlobLocation, DefaultAzureCredential]:
+    """`_azure_location`'s catalog, with the `DefaultAzureCredential` its store asks for tokens.
+
+    ``statcat release`` asks the same credential for its Azure Resource Manager token, so one identity reads the
+    store and lists the role assignments.
+    """
     try:
         from azure.identity import DefaultAzureCredential  # noqa: PLC0415
         from obstore.auth.azure import AzureCredentialProvider  # noqa: PLC0415
@@ -707,17 +724,17 @@ def _azure_location(uri: str, account: str, *, command: str = "upload", timeout:
         from obstore.store import from_url  # noqa: PLC0415
     except ImportError:
         _usage(f"{command} needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')")
-    credential = TokenIdentity(AzureCredentialProvider(DefaultAzureCredential()))
+    credential = DefaultAzureCredential()
     try:
         store = from_url(
             uri.removesuffix("/"),
             account_name=account,
-            credential_provider=credential,
+            credential_provider=TokenIdentity(AzureCredentialProvider(credential)),
             client_options={"timeout": timeout},
         )
     except GenericError as exc:
         _usage(_store_build_message(exc))
-    return BlobLocation(uri, store)
+    return BlobLocation(uri, store), credential
 
 
 def _auth_error() -> type[Exception]:
@@ -1169,6 +1186,132 @@ def gc(
         except ValueError as exc:
             _usage(str(exc))
     _gc_summary(report)
+    if report.failed:
+        raise typer.Exit(code=1)
+
+
+# -- release ------------------------------------------------------------------
+
+#: The logger `statcatlib.release` logs its events on.
+_RELEASE_LOGGER = "statcatlib.release"
+
+
+def _release_summary(report: ReleaseReport, names: dict[str, str]) -> None:
+    """Print *report*'s refusals, skipped and failed steps and its summary on standard error.
+
+    *names* gives each allowlisted object id its name from the jobs configuration.
+    """
+    for refusal in report.refused:
+        _tell(
+            f"REFUSED {refusal.product_id}/{refusal.edition_id} {refusal.rule or '-'}: {refusal.reason}",
+            style="yellow",
+        )
+    for grant in report.access.outsiders:
+        _tell(
+            f"OUTSIDER {grant.principal_id} ({grant.principal_type}) holds {grant.role} at {grant.scope}; "
+            "remove the assignment, or add the principal to [access] allowlist after a review",
+            style="red",
+        )
+    for sentinel in report.access.missing_sentinels:
+        _tell(f"UNCHECKED the listing lacks the sentinel assignment {sentinel}", style="red")
+    for error in report.access.errors:
+        _tell(f"UNCHECKED {error}", style="red")
+    for object_id in report.access.unused:
+        _tell(f"UNUSED {object_id} ({names.get(object_id, '?')}) is on the allowlist and holds no blob-read role")
+    for step, why in report.skipped.items():
+        _tell(f"SKIPPED {step}: {why}", style="yellow")
+    for step, error in report.failed.items():
+        _tell(f"ERROR {step}: {error}", style="red")
+    versions = ", ".join(str(seq) for seq in report.versions) or "none"
+    verb = "would fold" if report.dry_run else "folded"
+    summary = (
+        f"Release {verb} {len(report.folded)} registration(s), released {len(report.released)} edition(s) and "
+        f"retired {len(report.retired)}; {len(report.refused)} refused, {len(report.skipped)} step(s) skipped, "
+        f"{len(report.failed)} failed. Inventory version(s) written: {versions}."
+    )
+    if report.dry_run:
+        summary += " This dry run wrote nothing."
+    _tell(summary, style="red" if report.failed else "green")
+
+
+@app.command("release")
+def release(
+    az_url: str = typer.Argument(
+        ..., metavar="AZ_URL", help="The catalog root: az://<container>, or az://<container>/<prefix>."
+    ),
+    config: Path = typer.Option(..., "--config", metavar="FILE", help="The jobs configuration, a TOML file."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Run the access check and plan the steps; move no CURRENT and write nothing."
+    ),
+) -> None:
+    """Fold ``pending/``, release what is due and retire old entries: the release job (Phase 5 D1).
+
+    It runs `statcatlib.release.ReleaseJob` with the jobs configuration, under
+    `DefaultAzureCredential` and the account in ``AZURE_STORAGE_ACCOUNT_NAME``,
+    with `statcat upload`'s environment rules. One run moves ``CURRENT`` to the
+    newest root; lists who holds a role that reads the catalog's blobs and
+    compares them with ``[access] allowlist``; records each passing ``pending/``
+    registration as an ``embargoed`` entry; writes the refusal record and, when
+    the access check passed and the catalog's embargo is off, makes every due
+    entry ``live``; and tombstones the superseded and withdrawn entries older
+    than ``retire_after``. Each step writes at most one Inventory version, and a
+    run against an unchanged catalog writes nothing. Run it at least twice for
+    each release time: before, so pre-materialisation can open the folded
+    editions, and just after.
+
+    Standard output holds one JSON line per event and nothing else:
+    ``jobs.config`` with the file's SHA-256, then ``current.behind``,
+    ``access.mismatch``, ``access.unchecked``, ``fold.refused``,
+    ``fold.release_at_past``, ``fold.restored``, ``release.refused``,
+    ``release.held``, ``release.unprepared``, ``release.overdue`` and
+    ``step.failed``. Standard error holds the human lines (``REFUSED
+    <product>/<edition> <rule or ->: <reason>``, ``SKIPPED <step>: <reason>``,
+    ``ERROR <message>``) and the summary. It exits 0 when every step ran, with
+    refusals, a held release and a skipped release reported; 1 when a step
+    failed or the run stopped, each printed as ``ERROR <message>``: a refused
+    configuration, one with no ``[access]``, a catalog that has opted in to
+    expiry, a clock more than 30 s ahead of the storage clock, or a store or
+    credential failure; and 2 on a usage error, as ``statcat upload``'s, or a
+    store other than `AzureStore`.
+    """
+    uri = _catalog_uri(az_url, command="release")
+    try:
+        jobs = load_jobs_config(config)
+    except JobsConfigError as exc:
+        _tell(f"ERROR {exc}", style="red")
+        raise typer.Exit(code=1) from None
+    access = jobs.access
+    if access is None:
+        _tell(f"ERROR {config}: [access] is missing; the release job requires it for the access precondition", "red")
+        raise typer.Exit(code=1)
+    location, credential = _azure_clients(uri, _azure_account("release"), command="release", timeout=_ADMIN_TIMEOUT)
+    _require_azure(location, "release")
+    auth_error = _auth_error()
+    storage = BlobInventoryStorage(location)
+    at: datetime | None = None
+    with _events(_RELEASE_LOGGER) as events, AzureBlobRest(location) as rest:
+        try:
+            listing = AzureReaderListing(
+                access.storage_account,
+                access.container,
+                arm_token=lambda: credential.get_token(ARM_SCOPE).token,
+                scopes=access.scopes,
+            )
+            job = ReleaseJob(location, jobs, rest=rest, listing=listing, storage=storage)
+        except ValueError as exc:
+            _tell(f"ERROR {config}: {exc}", style="red")
+            raise typer.Exit(code=1) from None
+        try:
+            at = storage.now()
+            detail: dict[str, object] = {"path": str(config), "sha256": jobs.sha256}
+            _emit(events, logging.INFO, _event("jobs.config", "info", at, uri, detail), f"jobs.config {jobs.sha256}")
+            report = job.run(dry_run=dry_run)
+        except (FileNotFoundError, InventoryError, BlobStoreError, auth_error) as exc:
+            failure = _event("step.failed", "error", at, uri, {"step": "start", "error": str(exc)})
+            _emit(events, logging.ERROR, failure, f"step.failed {exc}")
+            _tell(f"ERROR {exc}", style="red")
+            raise typer.Exit(code=1) from None
+    _release_summary(report, {principal.object_id: principal.name for principal in access.allowlist})
     if report.failed:
         raise typer.Exit(code=1)
 

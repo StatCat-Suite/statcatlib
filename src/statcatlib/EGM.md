@@ -18,7 +18,8 @@ products (`catalog.py`), the operational changes to its Inventory
 an sdmxlib edition manifest (`bundle.py`), the integrity and support
 checks behind `statcat verify-catalog` and `statcat doctor`
 (`diagnostics.py`), the copy of a sealed edition to object storage (`upload.py`), the
-jobs configuration the release and GC jobs read (`jobs.py`), the GC job (`gc.py`), composable query filters
+jobs configuration the release and GC jobs read (`jobs.py`), the GC job (`gc.py`), the release job
+(`release.py`) and its access precondition (`access.py`), composable query filters
 (`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`)
 and test catalogs (`testing.py`).
 
@@ -231,8 +232,9 @@ re-exported from `statcatlib`. Standard library and `attrs` only.
   `namespace`, `deployments` or `port`, a port outside 1 to 65535, or a failed
   inequality.
 - `JobsConfig(retention, access, expiry, sha256, format_version=1)`: `access` is
-  `None` when the file has no `[access]`; `expiry` is `ExpiryPolicy()` (disabled)
-  when it has no `[expiry]`; `sha256` is the file's, which each run logs.
+  `None` when the file has no `[access]`, which `ReleaseJob` refuses; `expiry` is
+  `ExpiryPolicy()` (disabled) when it has no `[expiry]`; `sha256` is the file's,
+  which each run logs.
 - `RetentionPolicy(backup, gc_window, tombstone_window, inventory_window,
   retire_after, pod_staleness, keep_roots=DEFAULT_KEEP_ROOTS (10),
   upload_grace=DEFAULT_UPLOAD_GRACE (24 h))`, `durations()`, and `check()`,
@@ -307,6 +309,116 @@ The GC job (Phase 5 D10), imported from `statcatlib.gc`; nothing is re-exported 
   alerts (`event`, `severity`, `at`, `catalog`, and `product`, `edition`, `reason`,
   `detail` when they apply).
 
+### `release.py`
+
+The release job (Phase 5 Part 3), imported from `statcatlib.release`; nothing is
+re-exported from `statcatlib`. `statcat release` runs it.
+
+- `ReleaseJob(location, config, *, rest, listing, storage=None)`: *config* is a
+  `JobsConfig` whose `access` is set and names the container of `location.uri`
+  (`az://<container>/...`) and, when the store's config names `account_name`, that
+  account (`JobsConfigError` otherwise); *rest* has `head(path) -> RemoteFile | None`
+  (`AzureBlobRest`); *listing* is an `access.ReaderListing`; *storage* defaults to
+  `BlobInventoryStorage(location)`. It holds one `InventoryWriter` over the storage.
+- `run(*, dry_run=False) -> ReleaseReport`: step 0 reads `catalog.json`
+  (`FileNotFoundError` when absent), refuses an opted-in catalog with
+  `InventoryWriteRefusedError` naming Part 6, and reads `storage.now()`. Then, each
+  through `_step`, which catches `_STEP_ERRORS` (`BlobStoreError`, `ManifestError`,
+  `InventoryError`, `InventoryConflictError`, `InventoryContentionError`,
+  `InventoryRuleError`, `IncompatibleCatalogError`, `OSError`), logs `step.failed`
+  and goes on: `_advance` (`InventoryWriter.advance_current`, `current.behind`; left
+  out of a dry run); `_access`, outside `_step` (`listing.readers()` and
+  `access.check_access`; an `AccessListingError` becomes a failed `AccessResult`;
+  any other error stops the run); `_fold`; `_release`; `_retire`. Each of the last
+  three reads `storage.now()` once and commits through `InventoryWriter.commit` with
+  a *change* that plans on the head it is given and returns `None` when nothing
+  changes; a dry run calls the plan on `writer.full()` and commits nothing.
+- The fold (`_plan_fold`, kind `seal`, reason `fold of pending/ registrations`):
+  `full.leaves()`, one LIST of `pending/` a run, then for each
+  `pending/<p>/<e>.json` the head neither records in a leaf nor tombstones, in path
+  order, `_judge`: `_read` (kept by path for the run: the document through
+  `jobs.decode_registration`, `too-old` against `tombstone_window`, the manifest
+  through `decode_manifest` and `blob._refuse_unsafe_files`, `canonical-form`,
+  `files` through `verify_remote` over `upload._ALL_TIERS` and `upload._lookup`),
+  then `fold_lifecycle`, `_kind`, `chain` and `_refuse_changed_final`. A recorded
+  registration is skipped by its path and never read; an object of another shape
+  under `pending/` is ignored. A `BlobStoreError` is the registration's `store`
+  refusal. `_check_structures` runs `_reference_check` for each candidate with no
+  binding (`pull_edition` into the run's temporary directory, each home through
+  `structure_entries`, `check_edition(at="receive", remote=, lookup=, structures=,
+  extensions={"statcat": ...})`), the fold's structure editions together until a
+  pass refuses none, and keeps each answer by edition and homes given.
+  `_refuse_forks` refuses passing registrations of one product, `previous` and
+  schema (`pending-fork`). `_record_stable` records per product in id order
+  (`_record`: `fold_lifecycle` on the evolving leaf, sdmxlib's `record(embargo=True)`
+  with `recorded_routing(routing_fields(manifest))`, `supersede_pending` for each
+  embargoed entry with its `previous` and schema), runs `drop_until_stable`, refuses
+  every registration of a dropped product, and refuses with `references` a product
+  whose check was given a fold edition that is refused, until a pass refuses none.
+  `_release_at` records `None` for a `release_at` before the registration's
+  last-modified time (`fold.release_at_past`) and, on a restore epoch above 0, for a
+  registration last modified before the epoch's first root (`fold.restored`), which
+  `_find_epoch` takes from the head's record or finds by reading roots back from the
+  head while they carry the epoch.
+- The release step (`_plan_release`, kind `release`, reason `release_due at <time>`):
+  `full.leaves()`, then, when the head's `embargo` is off and the access result
+  passed, sdmxlib's `release_due` and `drop_until_stable`; the record from
+  `refusal_record`; a `Change` when a leaf or the record differs. It logs
+  `release.refused`, `release.held` (embargo on), `release.unprepared` (released and
+  folded by this run) and `release.overdue` (every entry still embargoed with a
+  `release_at` at or before the step's time). A failed fold makes the record keep
+  the head's fold refusals.
+- Retirement (`_retire`, kind `retire`): `inventory.retire_change(full, now -
+  retire_after, now=, artefacts=writer.artefacts)`.
+- `ReleaseReport(folded, released, retired, refused, skipped, failed, versions,
+  access, dry_run)` and `ReleaseRefusal(product_id, edition_id, step, rule, reason,
+  since)`, frozen; `Step` is `fold` or `release`.
+- `refusal_record(full, refusals, now, *, epoch=(0, None))`: the next root's
+  `extensions`, with `statcat.release` set to `{refused, omitted, epoch_started_at,
+  restore_epoch}` and `format_version` to `bundle.ROOT_SECTION_FORMAT`; `since`
+  carried from the head's record by `(product_id, edition_id, step)`; at most
+  `MAX_REFUSALS` (500) kept, the oldest `since` first; the head's sections unchanged
+  when there is no refusal, no epoch time and no record. `current_record(full)` is
+  the head's `extensions`, and `current_refusals(full)` the refusals its record
+  holds, leaving out an entry it cannot read. `RELEASE_KEY` is `"release"`.
+- `drop_until_stable(writer, full, leaves) -> (kept, dropped)`: reads each incoming
+  entry's manifest through `writer.artefacts` (`ManifestError` drops the product with
+  `manifest`, `BlobStoreError` with `store`), then `writer.refusals`, dropping each
+  refused product's whole change until a pass refuses none. `Dropped(edition_id,
+  rule, reason)`. A manifest of another product's unfilled entry that cannot be
+  read propagates.
+- `structure_entries(full, *, product_id, batch) -> list[StructureEntry]`:
+  `working_copy.structure_editions`'s choice as `StructureEntry(product_id,
+  edition_id, manifest_sha256)` values.
+- Events go through `jobs._emit` on the `statcatlib.release` logger: `event`,
+  `severity`, `at` (the step's storage time), `catalog`, and `product`, `edition`,
+  `rule`, `reason`, `detail` where they apply.
+
+### `access.py`
+
+The release job's access precondition (Phase 5 D8), imported from
+`statcatlib.access`. `httpx`, the standard library and `attrs` only.
+
+- `ReaderListing` (a `Protocol`): `readers() -> ReaderReport`, raising
+  `AccessListingError` (`RuntimeError`) when the listing cannot be made.
+- `ReaderReport(assignment_ids, grants)` and `ReaderGrant(assignment_id,
+  principal_id, principal_type, role, scope)`, frozen.
+- `check_access(report, allowlist, sentinels) -> AccessResult(passed, outsiders,
+  unused, missing_sentinels, errors)`: passed when every grant's principal is on
+  the allowlist and every sentinel id is listed; ids compare without regard to case.
+- `AzureReaderListing(storage_account, container, *, arm_token, scopes=())`:
+  `readers()` sends, with the bearer token *arm_token* returns for `ARM_SCOPE`,
+  `GET https://management.azure.com{scope}/providers/Microsoft.Authorization/roleAssignments?$filter=atScope()&api-version=2022-04-01`
+  at `{storage_account}/blobServices/default/containers/{container}` and at each of
+  *scopes*, following each `nextLink` on that host and refusing one on another;
+  then one `GET {storage_account}/providers/Microsoft.Authorization/roleDefinitions/{guid}`
+  per distinct role. A 429 or 5xx is tried again after each of `_BACKOFF` (1, 2 and
+  4 s); any other failure raises `AccessListingError`. A resource id that does not
+  start with `/`, or a container that is empty or holds `/`, raises `ValueError`.
+- `reads_blobs(permissions) -> bool`: whether one permission block's `dataActions`
+  match `BLOB_READ` and none of its `notDataActions` does, `*` matching any run of
+  characters, case ignored.
+
 ### `checks.py`
 
 - `SealCheck`: the type `Callable[[EditionView], Iterable[Finding]]`, passed
@@ -369,8 +481,9 @@ The module keeps its 0.11 name and describes editions. Imported from
   refuses a store other than `AzureStore` (`TypeError`, naming W3) and a store with
   no `TokenIdentity` (`ValueError`), then runs `_upload` with an `AzureBlobRest`.
 - `_upload(edition_dir, location, *, release_at=None, rest)`: the steps, over any
-  store and any digest client with `head(path) -> RemoteFile | None`. Tests and
-  `record_uploaded` call it. A naive `release_at` raises `ValueError`.
+  store and any digest client with `head(path) -> RemoteFile | None`. Tests call it,
+  through `tests/stores/_stores.py`'s `upload` and `record_uploaded`. A naive
+  `release_at` raises `ValueError`.
 - `UploadReport(edition_id, product_id, sent, kept, registered)`: `sent` and `kept`
   hold store paths, and `registered` is advisory, since a retried create can report
   false against its own earlier success.
@@ -533,8 +646,9 @@ read.
 - A library call never takes a credential from the environment: `Catalog.open` over a
   store takes a `BlobLocation` the caller built. `catalog.py` and `store/blob.py` read
   no environment variable.
-- Only `CatalogAdmin` changes the Inventory, apart from a seal's record and
-  the journal repair. It runs over a catalog directory or a `BlobLocation`,
+- Only `CatalogAdmin` and, on a catalog in object storage, the release job
+  (`release.ReleaseJob`) change the Inventory, apart from a seal's record and
+  the journal repair. `CatalogAdmin` runs over a catalog directory or a `BlobLocation`,
   `prune` on a directory only. No attribute of `Catalog`, `Product` or `EditionView`
   returns a `CatalogAdmin`, an `EmbargoReader` (spec §6.4) or an embargoed,
   superseded or withdrawn edition. `Catalog`'s reads (`products`, `Product.view`,
@@ -565,6 +679,18 @@ read.
   none. A refusal in one product never stops another's. A crash during the
   batch leaves each sealed, unrecorded edition's journal entry, so its
   product's next `working_copy()` records it, in a version of its own.
+- `ReleaseJob.run` writes nothing under `products/` or `pending/` and deletes
+  nothing in the store. It releases no edition while the access result failed or the
+  head's `embargo` is on, and each retry of the release commit checks both again on
+  the new head. Every entry the fold records is `embargoed`, carries its manifest's
+  SHA-256 as read and its artefact records, and passed every check of its own; no
+  entry goes live whose manifest differs from the one its entry records. A refusal
+  in one registration or product never stops another's, and a failure of one step
+  never stops the next. A run against an unchanged catalog writes nothing. A dry
+  run writes nothing, `CURRENT` included.
+- `check_access` fails closed: a listing error, a missing sentinel and a principal
+  off the allowlist each fail it, and `AzureReaderListing` sends its token to
+  `management.azure.com` alone.
 - `collect_garbage` deletes nothing when it cannot read the Inventory back through
   the window (`GcStoppedError`), nothing under the `data/` of a product whose
   manifest or registration it cannot read or verify, no file a kept or registered
@@ -604,9 +730,17 @@ read.
 - `diagnostics.verify_catalog` opens each edition in a DuckDB engine of
   `check_edition`'s own; neither it nor `diagnostics.doctor` writes a file.
 - These modules make no network calls, except `upload.py`, `admin.py`, `gc.py`,
-  `catalog.py` and `embargo.py`, which reach a store only through the `BlobLocation`
-  they are given. `jobs.py` reads
+  `release.py`, `catalog.py` and `embargo.py`, which reach a store only through the
+  `BlobLocation` they are given, and `access.py`, whose `AzureReaderListing` sends
+  GET requests to Azure Resource Manager. `jobs.py` reads
   the one file it is given.
+- `ReleaseJob.run` writes at most three Inventory versions (kinds `seal`, `release`
+  and `retire`) and `CURRENT`, creates and deletes one temporary directory holding
+  the pulled files of the editions the fold's reference check reads, and logs each
+  event on the `statcatlib.release` logger at WARNING, or ERROR for `step.failed`,
+  `access.mismatch` and `access.unchecked`. It sends one anonymous `HEAD` for the
+  storage clock at its start and at each of its three committing steps, unless its
+  storage has a `clock=`.
 - `gc.collect_garbage` writes nothing. It deletes under `products/` and `pending/`
   only, unless `dry_run`, and logs each event on the `statcatlib.gc` logger at INFO
   (`gc.planned`, `gc.deleted`), WARNING (`gc.failed_closed`, `gc.unregistered`,
@@ -619,6 +753,13 @@ read.
 - `EmbargoReader`: `tests/test_embargo_reader.py` (a local catalog), the
   `TestNoOperationalReach` and blob-extra tests in `tests/test_public_api.py`, and,
   against Azurite, `tests/stores/test_embargo_reader.py`.
+- The release job: `tests/test_release_fold.py`, `tests/test_release_step.py` and
+  `tests/test_release_job.py` (every step over a `MemoryStore`, with the catalog of
+  `tests/_release.py` and the fakes of `tests/_fakes.py`),
+  `tests/test_access_listing.py` (`AzureReaderListing` through `pytest-httpx`, and
+  `check_access`), `tests/test_cli_release.py` and, against Azurite,
+  `tests/stores/test_release_job.py` (the 200-table release, the reference check, a
+  crash, a fork and its discard, a restore).
 - GC: `tests/test_gc.py` (every rule over a `MemoryStore`, with the helpers in
   `tests/_gc.py`), `tests/test_cli_gc.py` and, against Azurite,
   `tests/stores/test_gc.py`; `decode_registration` in `tests/test_jobs_config.py`.
