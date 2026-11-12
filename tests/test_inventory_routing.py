@@ -4,7 +4,8 @@ A seal, a batched seal and the journal repair record ``dataflows``,
 ``pull_bytes`` and ``artefacts`` for every edition, data and structure, from
 the edition's manifest. A rollback and a reinstate keep them, and ``statcat
 verify-catalog`` detects an edited field. `tests/stores/test_upload_store.py`
-checks the same for `record_uploaded`, the fold's stand-in.
+checks the same for `record_uploaded`, and `tests/test_release_fold.py` for the
+release job's fold.
 """
 
 from __future__ import annotations

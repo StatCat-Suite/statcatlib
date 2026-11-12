@@ -2,7 +2,8 @@
 
 Each store and DuckDB secret names Azurite on the loopback address, with its
 well-known key. Fixtures seal editions in a local catalog and place them with
-`record_uploaded`, since Phase 4 has no fold.
+`record_uploaded`, which records an edition live with no release job run; these
+tests read what a reader finds, however the edition was recorded.
 """
 
 from __future__ import annotations

@@ -10,8 +10,14 @@ Inventory's paths. `ReadingOps` records a reader's calls, its listings
 included, and fails any write. `KeyedRest` is
 `AzureBlobRest` with Azurite's account key, the one path no deployment uses,
 and signs each ``HEAD`` with SharedKey.
-`record_uploaded` places an uploaded edition in a blob Inventory, since Phase 4
-has no fold.
+
+`upload` and `release_job` are the server path: an upload registers an edition in
+``pending/``, and a run of the release job folds and releases it, with a
+`FakeListing` for the access check and the test's clock. `record_uploaded` places
+an uploaded edition in a blob Inventory with no release job: live at once when
+the head's embargo is off, which the fold never records. The tests of readers,
+of `CatalogAdmin` and of GC use it where they need a recorded edition and no
+run. `seal_mix` seals the release job's 200-table corpus (Phase 5 Part 3).
 
 Every store and DuckDB secret here names Azurite's loopback address and its
 well-known key, so no test can reach a real account. `location` refuses any other
@@ -31,7 +37,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -48,11 +54,23 @@ from obstore.store import AzureStore
 from sdmxlib.edition import MANIFEST_NAME, Lifecycle, read_manifest
 from sdmxlib.inventory import CATALOG_NAME, CURRENT_NAME, Root, record, routing_fields, sha256_hex
 
+import statcatlib as sc
+from statcatlib.jobs import AccessPolicy, ExpiryPolicy, JobsConfig, Principal, RetentionPolicy
+from statcatlib.release import ReleaseJob
 from statcatlib.store import blob as blob_module
-from statcatlib.store.blob import _AZURE_VERSION, AzureBlobRest, BlobLocation, _ObjectOps, pull_edition
+from statcatlib.store.blob import (
+    _AZURE_VERSION,
+    AzureBlobRest,
+    BlobInventoryStorage,
+    BlobLocation,
+    _ObjectOps,
+    pull_edition,
+)
 from statcatlib.store.inventory import InventoryWriter
 from statcatlib.store.working_copy import Edition, edition_kind, fold_lifecycle, recorded_routing
+from statcatlib.testing import STRUCTURE_PRODUCTS, CodrShape, CorpusGroup, codr_corpus
 from statcatlib.upload import _upload
+from tests._fakes import FakeListing, grant
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -413,6 +431,90 @@ class KeyedRest(AzureBlobRest):
         return self._client.head(url, headers=_shared_key("HEAD", url))
 
 
+def upload(location: BlobLocation, edition_dir: Path, *, release_at: datetime | None = None) -> Edition:
+    """Upload an edition and register it in ``pending/``, as ``statcat upload`` does; the edition, unrecorded."""
+    with KeyedRest(location) as rest:
+        _upload(edition_dir, location, release_at=release_at, rest=rest)
+    manifest = read_manifest(edition_dir)
+    sha = sha256_hex((edition_dir / MANIFEST_NAME).read_bytes())
+    return Edition(manifest.edition_id, manifest.product_id, manifest.previous, sha)
+
+
+#: The object id every `release_job`'s listing grants a blob-read role, and its configuration allows.
+RELEASE_IDENTITY = "oid-release"
+
+#: Azurite's account as a resource id, for ``[access] storage_account``.
+ACCOUNT_ID = f"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/{ACCOUNT}"
+
+
+def jobs_config(*, retire_after: timedelta = timedelta(days=90)) -> JobsConfig:
+    """The design's retention values, and an ``[access]`` that names Azurite's account and `CONTAINER`."""
+    retention = RetentionPolicy(
+        backup=timedelta(days=30),
+        gc_window=timedelta(days=35),
+        tombstone_window=timedelta(days=400),
+        inventory_window=timedelta(days=36),
+        retire_after=retire_after,
+        pod_staleness=timedelta(minutes=5),
+    )
+    access = AccessPolicy(
+        storage_account=ACCOUNT_ID,
+        container=CONTAINER,
+        allowlist=(Principal(RELEASE_IDENTITY, "release job"),),
+        sentinels=(),
+    )
+    return JobsConfig(retention=retention, access=access, expiry=ExpiryPolicy(), sha256="0" * 64)
+
+
+@contextmanager
+def release_job(location: BlobLocation, *, clock: Callable[[], datetime] | None = None) -> Generator[ReleaseJob]:
+    """A release job over *location*: Azurite's digest read, a `FakeListing` that passes, and *clock* or this machine's.
+
+    Azurite has no role assignment, so the listing is a fake; `tests/test_access_listing.py`
+    runs `AzureReaderListing` against `pytest-httpx`.
+    """
+    storage = BlobInventoryStorage(location, actor="release", clock=clock or (lambda: datetime.now(UTC)))
+    with KeyedRest(location) as rest:
+        yield ReleaseJob(
+            location,
+            jobs_config(),
+            rest=rest,
+            listing=FakeListing([grant(RELEASE_IDENTITY)], sentinels=()),
+            storage=storage,
+        )
+
+
+#: The 200-table release of Phase 5's gating test, in the plan's mix: 10 one-table products, and grouped products of
+#: 5, 10 and 15 tables and eight of 20.
+RELEASE_MIX = (
+    CorpusGroup(10),
+    CorpusGroup(1, tables=5),
+    CorpusGroup(1, tables=10),
+    CorpusGroup(1, tables=15),
+    CorpusGroup(8, tables=20),
+)
+
+#: A grouped product beside the mix, of 12 tables, for the refusal that holds back all of one product's tables.
+HELD_BACK = CorpusGroup(1, tables=12)
+
+#: The smallest corpus shape: each edition's size is its two DuckDB files.
+_MIX_SHAPE = CodrShape(geography_codes=6, geography_depth=2, classification_codes=(3, 3, 3), observations=4)
+
+
+def seal_mix(root: Path) -> dict[str, Path]:
+    """Seal `RELEASE_MIX`, `HELD_BACK` and their three structure products in a local catalog at *root*.
+
+    Returns:
+        Each product's sealed edition directory, by product: 22 data products
+        and the structure products they are cut from.
+    """
+    with sc.Catalog.create(root) as cat:
+        products = codr_corpus(cat, (*RELEASE_MIX, HELD_BACK), shape=_MIX_SHAPE, embargoed=0)
+    with sc.Catalog.open(root) as cat:
+        editions = {name: cat.product(name).editions()[0] for name in (*STRUCTURE_PRODUCTS, *products)}
+    return {name: root / "products" / name / edition.edition_id for name, edition in editions.items()}
+
+
 def record_uploaded(
     writer: InventoryWriter,
     location: BlobLocation,
@@ -421,9 +523,11 @@ def record_uploaded(
     lifecycle: Lifecycle | None = None,
     release_at: datetime | None = None,
 ) -> Edition:
-    """Upload an edition and record it in the blob Inventory, with no cross-product rule, as the fold will (D8).
+    """Upload an edition and record it in the blob Inventory with no release job and no cross-product rule (D8).
 
-    With no *lifecycle*, the record takes the one `fold_lifecycle` resolves, as the fold does (Phase 5 D3).
+    The record is ``live`` when the head's embargo is off, where the release
+    job's fold always records ``embargoed``. With no *lifecycle*, the record
+    takes the one `fold_lifecycle` resolves, as the fold does (Phase 5 D3).
     """
     with KeyedRest(location) as rest:
         _upload(edition_dir, location, release_at=release_at, rest=rest)
