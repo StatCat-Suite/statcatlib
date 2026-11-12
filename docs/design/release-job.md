@@ -337,8 +337,13 @@ The owner decided these before this design. They are inputs.
 ### D1: the shape of `statcat release`
 
 ```text
-statcat release AZ_URL --config FILE [--dry-run] [--expire] [--state-dir DIR]
+statcat release AZ_URL --config FILE [--dry-run]                              # Part 3
+statcat release AZ_URL --config FILE [--dry-run] [--expire] [--state-dir DIR]  # from Part 6
 ```
+
+Part 3 ships the first line. `--expire` and `--state-dir` arrive with Part 6, and so do
+`ReleaseJob`'s `pods=` and `state_dir=` and `run`'s `expire=` (D15), since each would be accepted
+and do nothing before it.
 
 A run performs these steps in order. Each step that changes the Inventory writes its own version
 through `InventoryWriter.commit`, so a lost race re-plans that step against the new head (spec
@@ -356,12 +361,17 @@ through `InventoryWriter.commit`, so a lost race re-plans that step against the 
 | 7. Expire | Only with `--expire`, on an opted-in Azure catalog with expiry enabled and both gates passed (D13). | none; segments and deletes |
 | 8. Finish | Print the summary, release the lease. | none |
 
-**Failure isolation.** Steps 4, 5 and 6 each catch the errors of their own work: a store fault, a
-`ManifestError` from an unfilled entry's manifest, or `InventoryContentionError`. A failed step
-logs `step.failed` with the error and the run goes on to the next step, so a fault in the fold
-does not hold a release that the pre-flight run already folded. A store fault on one
-registration is that registration's refusal (rule `store`). Step 0's refusals, a held lease
-(step 1) and a credential error stop the run.
+**Failure isolation.** Steps 2, 4, 5 and 6 each catch the errors of their own work: a store
+fault, a `ManifestError` from an unfilled entry's manifest, or `InventoryContentionError`. A
+failed step logs `step.failed` with the error and the run goes on to the next step, so a fault in
+the fold does not hold a release that the pre-flight run already folded. Step 2 is isolated with
+them, since a `CURRENT` that cannot move holds no release: the root is the commit point, and
+readers probe forward. A store fault on one registration is that registration's refusal (rule
+`store`). Step 0's refusals, a held lease (step 1) and a credential error stop the run.
+
+**The clock.** The run reads the storage clock once at step 0 and once at the start of each of
+steps 4, 5 and 6. A step's rules, its version and its events carry that step's time, so a release
+planned after a long fold uses the time the release step read.
 
 A step that finds nothing to do writes nothing (`commit` returns `None` for a `None` change, a
 Part 2 change), so a re-run against an unchanged catalog writes nothing. `--dry-run` runs steps 0
@@ -401,10 +411,17 @@ pool), lists `pending/`, and checks each registration in the order of its path. 
 the order of the table, and the first that fails is the registration's refusal. Every check reads
 the head's leaf for the product, or `retired`; none reads another registration.
 
+The skip of a recorded edition comes first, and is decided from the registration's path,
+`pending/<product_id>/<edition_id>.json`, before its bytes are read. A folded registration stays
+in `pending/` until GC deletes it after the GC window (D10), so a catalog that folds 200
+registrations a day lists about 7,000 folded ones, and a fold that read each would make that many
+GETs in sequence on every run. GC skips them the same way. An object under `pending/` of another
+shape is left alone, as GC leaves it.
+
 | Check | Refused with rule | Source |
 |---|---|---|
+| The head records the edition its path names, in the product's leaf or `retired`. | none: skipped, and never read | O1 |
 | The bytes equal `upload._pending_document(edition_id, release_at)` re-encoded from their decode: two keys in spec §11.2 step 1's order, compact, `edition_id` equal to the file name and a UUIDv7, `release_at` `null` or UTC with `Z` and milliseconds. | `pending-document` | spec §11.2 step 1 |
-| The head records the edition in the product's leaf or `retired`. | none: skipped | O1 |
 | The `edition_id`'s UUIDv7 time is older than `tombstone_window` by the storage clock. | `too-old` | spec §11.2 step 2 |
 | `products/<p>/<e>/manifest.json` exists, decodes (`decode_manifest`), names the product and edition of its path, and passes `_refuse_unsafe_files` (`store/blob.py`). | `manifest` | spec §6.5 item 2, StatCat-Suite/sdmxlib#380 |
 | `canonical_form` equals `sdmxlib.edition.CANONICAL_FORM`. sdmxlib knows one form today, so equality is "one the release job knows". | `canonical-form` | spec §6.5 item 3 |
@@ -461,12 +478,26 @@ recorded with `release_at: null` and logged `fold.restored` (S25), so a registra
 re-armed publishes only by an explicit release. The fold finds that root's `created_at` by walking
 back from the head once per epoch and keeps it in the refusal record as `epoch_started_at` (D5).
 
-The callable then runs `writer.refusals(full, leaves)`, drops each refused product's whole leaf
-change, a `supersede_pending` included, with the rule the refusal names, and repeats until a pass
-refuses none, as `precheck_refusals` does (`store/working_copy.py:848-890`). It commits with
-`kind="seal"` and the reason `fold of <n> registrations`. The per-registration reads are kept in
-the `ReleaseJob` by path for the run, so a lost race re-plans the recording without reading them
-again.
+The callable then runs `drop_until_stable(writer, full, leaves)`. Each pass first reads every
+incoming entry's manifest through the writer's reader, which compares its SHA-256 with the entry's
+(spec §6.5 item 2): a `ManifestError`, for a manifest that is absent or changed since the fold
+read it, drops that product with `manifest`, and a `BlobStoreError` drops it with `store`. The
+pass then runs `writer.refusals(full, leaves)` and drops each refused product's whole leaf change,
+a `supersede_pending` included, with the rule the refusal names. Passes repeat until one refuses
+none, as `precheck_refusals` does (`store/working_copy.py:848-890`). A dropped product refuses
+each registration its change would have recorded. A manifest of another product's unfilled entry
+that cannot be read fails the step (D1).
+
+**Dependents.** A reference check can pass because of a fold edition that ends up unrecorded: one
+of a fork, one sdmxlib's `record` refuses, or one of a dropped product. An edition whose check was
+given such an edition is refused with `references`, its product's whole change is dropped, and the
+recording runs again until a pass drops none, as `Catalog.seal`'s `_drop_dependents` does. The
+next run checks it against what the Inventory then records.
+
+It commits with `kind="seal"` and the reason `fold of pending/ registrations`. The reason carries
+no count, since `commit` takes it before the callable plans, and a plan made beforehand would read
+every leaf a second time. The per-registration reads are kept in the `ReleaseJob` by path for the
+run, so a lost race re-plans the recording without reading them again.
 
 The fold writes nothing under `pending/`, deletes nothing, and reads `pending/` and `products/`
 only.
@@ -546,7 +577,12 @@ writer.commit(change, kind="release", reason=f"release_due at {now:%Y-%m-%dT%H:%
   lease keeps admin calls out during the run, and the switch takes effect at the next run.
 - A crash before the root leaves every entry `embargoed`; the next run plans the same release.
 - After the step, every entry still `embargoed` with a `release_at` before `now` is logged
-  `release.overdue`.
+  `release.overdue`. That holds in the held and the skipped branches too, where the event is the
+  only one that names each waiting edition, so the step reads the leaves in every branch.
+- When the fold failed, it judged nothing, so `run_refusals` holds the head's fold refusals
+  unchanged and the record keeps them with their `since`. Under a hold or a failed access check
+  the release step judges nothing either, and the record then holds the fold's refusals alone, as
+  the code above writes.
 
 | Option for the embargo flag (Q1) | Gain | Cost |
 |---|---|---|
@@ -564,7 +600,7 @@ The newest release run's refusals live in the root's `statcat` section, beside `
    {"product_id": "14100287", "edition_id": "01a18e76-…", "step": "release", "rule": null,
     "reason": "14100287: 01a18e76-… is built on 01a17f00-…, but the live edition at schema 2.52 is 01a18e63-…. Discard it, then build from 01a18e63-….",
     "since": "2026-11-12T13:30:05.120Z"}
- ], "omitted": 0, "epoch_started_at": null}}
+ ], "omitted": 0, "epoch_started_at": null, "restore_epoch": 0}}
 ```
 
 | Field | Meaning |
@@ -575,7 +611,8 @@ The newest release run's refusals live in the root's `statcat` section, beside `
 | `reason` | The refusal's message. |
 | `since` | The storage time of the first run that refused the same product, edition and step, carried from the head's record. |
 | `omitted` | How many refusals the cap left out. At most 500 are kept, the oldest `since` first, so a standing refusal is never pushed out by new ones; the events hold them all. |
-| `epoch_started_at` | The `created_at` of the first root of the current restore epoch, or `null` on epoch 0 (D2). |
+| `epoch_started_at` | The `created_at` of the first root of the restore epoch `restore_epoch` names, once a fold has found it, else `null`; always `null` on epoch 0 (D2). |
+| `restore_epoch` | The catalog's restore epoch when the record was written. Every later root carries the record, a restore's root included, so after a second restore the carried `epoch_started_at` is the earlier epoch's. Read as the new epoch's start, it would let a registration written between the two starts keep its `release_at`. The fold trusts the time only when this key equals the catalog's epoch, and otherwise walks back for the new epoch's first root. |
 
 - Step 5 writes the record whenever it differs from the head's, also when the release is held or
   skipped, so the fold's refusals persist under a failed access check. A record equal to the
@@ -779,22 +816,27 @@ It holds no Reader at the management group or subscription, no `Microsoft.Storag
 Microsoft Graph permission. The deployment creates the role and the assignment; the runbook
 gives the JSON.
 
-**The listing.** `AzureReaderListing(storage_account, container, *, arm_token)` in `access.py`,
-through `httpx`; the command line passes the token callable for
+**The listing.** `AzureReaderListing(storage_account, container, *, arm_token, scopes=())` in
+`access.py`, through `httpx`; the command line passes the token callable for
 `https://management.azure.com/.default` (D15):
 
 1. `GET {container scope}/providers/Microsoft.Authorization/roleAssignments?$filter=atScope()&api-version=2022-04-01`,
    where the container scope is
    `{storage_account}/blobServices/default/containers/{container}`. It returns the assignments at
    the container and, by A1 below, every assignment inherited from the account, the
-   resource group, the subscription and the management groups. Every `nextLink` is followed.
+   resource group, the subscription and the management groups. Every `nextLink` on
+   `https://management.azure.com` is followed. A `nextLink` on another host fails the listing, so
+   the bearer token is sent to Azure Resource Manager alone.
 2. For each distinct role definition,
    `GET {storage_account}/providers/Microsoft.Authorization/roleDefinitions/{id}?api-version=2022-04-01`,
    and read `permissions[].dataActions` and `notDataActions`. A role reads blobs when a data
    action matches `Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read`, with `*`
-   matching any run of characters, and no not data action does. The built-in Storage Blob Data
-   Reader, Contributor and Owner match by this rule, as does any custom role with the blob read
-   data action.
+   matching any run of characters and case ignored, and no not data action does. `reads_blobs`
+   judges each permission block by itself, as Azure does, and the role reads blobs when any block
+   grants the action: a `notDataActions` entry withholds only what its own block grants. Judged
+   over the whole role, one block's exclusion would hide another block's grant. The built-in
+   Storage Blob Data Reader, Contributor and Owner match by this rule, as does any custom role
+   with the blob read data action.
 
 **The comparison.** `check_access` passes when the principal object id of every kept assignment
 is on the allowlist, and every assignment id in `[access] sentinels` is in the listing. A group
@@ -802,9 +844,16 @@ principal is one principal: its object id must be on the allowlist, and its memb
 read. Any principal not on the list stops the release, as O6 decided. Allowlisted principals that
 hold no blob-read role are reported as information. A request answered 429 or 5xx is retried
 three times with backoff; a 403, any other error, one that persists, or a missing sentinel fails
-the check. A failed check skips the release in step 5, logs `access.mismatch` or
-`access.unchecked`, and leaves the fold and retirement to run, since neither makes anything
-public.
+the check. A listing that cannot be made raises `AccessListingError`, the one error the job
+catches from a `ReaderListing`: it becomes a failed `AccessResult` with the message in `errors`.
+Any other error from the listing, a credential error included, stops the run (D1). A failed
+check skips the release in step 5, logs `access.mismatch` or `access.unchecked`, and leaves the
+fold and retirement to run, since neither makes anything public.
+
+**The catalog's own container.** `ReleaseJob` raises `JobsConfigError` when `[access] container`
+is another than the container the catalog's `az://` URI names, or `[access] storage_account`
+names another account than the store's `account_name`, compared without regard to case. A check
+of another container would pass or fail on assignments that say nothing about the catalog's.
 
 **Known limits.** Each is outside the check, and the deployment's owner reviews it elsewhere.
 
@@ -1094,7 +1143,8 @@ upload` (`src/statcatlib/EGM.md:386-388`). For `statcat release` and `statcat gc
 The library classes take each as an argument, plus `storage=` and `clock=` seams for tests:
 
 ```python
-ReleaseJob(location, config, *, rest, listing, pods=None, storage=None, state_dir=None)
+ReleaseJob(location, config, *, rest, listing, storage=None)                                 # Part 3
+ReleaseJob(location, config, *, rest, listing, pods=None, storage=None, state_dir=None)      # from Part 6
 collect_garbage(location, policy, *, storage=None, dry_run=False, forecast=None, discard=()) -> GcReport
 ```
 
@@ -1108,13 +1158,17 @@ collect_garbage(location, policy, *, storage=None, dry_run=False, forecast=None,
 | `load_jobs_config` | Unknown key, bad duration, missing `format_version` or section, failed inequality | `JobsConfigError(ValueError)`, exit 1 |
 | `statcat release`, `statcat gc` | A store other than `AzureStore` | `TypeError`, naming Phase 4 W3, exit 2 |
 | Step 0 | Clock ahead by more than 30 s, or no `Date` | `InventoryWriteRefusedError`, exit 1 |
-| Step 0, before Part 6 | Opted-in catalog | exit 1, naming Part 6 |
+| Step 0, before Part 6 | Opted-in catalog | `InventoryWriteRefusedError` naming Part 6, exit 1 |
+| `ReleaseJob` | No `[access]`, or one whose `container` or `storage_account` names another container or account than the catalog's | `JobsConfigError`, exit 1 |
 | Step 1 | Lease held by another run | exit 1, nothing written |
 | Fold, per registration | Any D2 check, a store fault | a refusal |
 | Fold, reference check | A structure pull fails | the registration's `references` refusal |
+| Fold, reference check | The check was given a fold edition that ends up unrecorded | the product's registrations refused with `references` |
+| Fold and release, per product | `ManifestError` or `BlobStoreError` on an incoming entry's manifest | the product dropped with `manifest` or `store` |
 | Release, per product | `release_due`, item 2, cross-product rules | a refusal |
-| Steps 4 to 6 | `ManifestError` from an unfilled entry, `BlobStoreError`, `InventoryContentionError`, `InventoryCommitUnknownError` | `step.failed`; the run goes on; exit 1 |
-| Access | Mismatch, listing error | the release skipped |
+| Steps 2 and 4 to 6 | `ManifestError` from an unfilled entry, `BlobStoreError`, `InventoryContentionError`, `InventoryCommitUnknownError` | `step.failed`; the run goes on; exit 1 |
+| Access | Mismatch, or `AccessListingError` from the listing: a failed request, an answer that is not the documented JSON, a `nextLink` off Azure Resource Manager | the release skipped |
+| Access | Any other error from the listing, a credential error included | the run stops, exit 1 |
 | Expiry | Lease lost, cap reached, gate failed | expiry stops or skips |
 | GC | Missing root above `expired_through` | deletes nothing, `GcStoppedError`, exit 1 |
 | GC, per product | Unreadable or unverified manifest | failed closed |
@@ -1123,7 +1177,7 @@ collect_garbage(location, policy, *, storage=None, dry_run=False, forecast=None,
 | `EmbargoReader.view` | Entry not `embargoed` or `live` | `ValueError` |
 | `BlobInventoryStorage` on an opted-in catalog | Lease not taken in 120 s | `InventoryWriteRefusedError` (Part 6) |
 
-`JobsConfigError`, `GcStoppedError` and `LeaseLostError` are new.
+`JobsConfigError`, `GcStoppedError`, `AccessListingError` and `LeaseLostError` are new.
 
 ### Symbols
 
@@ -1141,11 +1195,17 @@ collect_garbage(location, policy, *, storage=None, dry_run=False, forecast=None,
 | `_ObjectOps.list` | `store/blob.py` | `(prefix: str) -> Iterator[ObjectMeta]` | 2 |
 | `JobsConfig`, `RetentionPolicy`, `AccessPolicy`, `ExpiryPolicy`, `load_jobs_config(path) -> JobsConfig`, `JobsConfigError` | `jobs.py` | D7 | 2 |
 | `decode_registration` | `jobs.py` | `(path: str, raw: bytes) -> Registration`, raising `ValueError`; shared by the fold and GC | 3 or 4, whichever lands first |
-| `ReleaseJob`, `ReleaseReport`, `ReleaseRefusal` | `release.py` | D15; `run(*, dry_run=False, expire=False) -> ReleaseReport` | 3 |
+| `ReleaseJob`, `ReleaseReport`, `ReleaseRefusal` | `release.py` | D15; `run(*, dry_run=False) -> ReleaseReport`; `expire=` from Part 6 | 3 |
 | `ReleaseRefusal` | `release.py` | frozen: `product_id`, `edition_id`, `step`, `rule \| None`, `reason`, `since` | 3 |
-| `ReleaseReport` | `release.py` | frozen: `folded`, `released`, `retired` (each `<product>/<edition>` tuples), `refused` (`ReleaseRefusal` tuple), `skipped` (step to reason), `failed` (step to error), `versions` (seqs written) | 3 |
-| `refusal_record`, `drop_until_stable`, `structure_entries`, `_check_structures` | `release.py` | D4, D2 | 3 |
+| `Step` | `release.py` | `Literal["fold", "release"]`: a `ReleaseRefusal.step` | 3 |
+| `ReleaseReport` | `release.py` | frozen: `folded`, `released`, `retired` (each `<product>/<edition>` tuples), `refused` (`ReleaseRefusal` tuple), `skipped` (step to reason), `failed` (step to error), `versions` (seqs written), `access` (the `AccessResult`), `dry_run` | 3 |
+| `refusal_record`, `current_record`, `current_refusals` | `release.py` | D5; `refusal_record(full, refusals, now, *, epoch=(0, None))` returns the next root's `extensions`; `current_record(full)` is the head's; `current_refusals(full) -> tuple[ReleaseRefusal, ...]` reads the head's record | 3 |
+| `RELEASE_KEY`, `MAX_REFUSALS` | `release.py` | `"release"`, the record's key in `extensions.statcat`; 500, the cap | 3 |
+| `drop_until_stable`, `Dropped` | `release.py` | D4, D2; `(writer, full, leaves) -> (kept, dropped)`; `Dropped(edition_id, rule, reason)` per dropped product | 3 |
+| `structure_entries`, `StructureEntry` | `release.py` | D2; `(full, *, product_id, batch) -> list[StructureEntry]`; `StructureEntry(product_id, edition_id, manifest_sha256)` | 3 |
+| `ReleaseJob._check_structures` | `release.py` | D2; a method, since it reads the run's pulled editions and kept answers | 3 |
 | `ReaderListing`, `ReaderGrant`, `ReaderReport`, `AzureReaderListing`, `check_access`, `AccessResult` | `access.py` | D8; `AzureReaderListing(storage_account, container, *, arm_token, scopes=())`; `AccessResult(passed, outsiders, unused, missing_sentinels, errors)` | 3 |
+| `AccessListingError`, `reads_blobs`, `BLOB_READ`, `ARM_SCOPE` | `access.py` | D8; `AccessListingError(RuntimeError)`; `reads_blobs(permissions) -> bool`; the blob read data action; the token scope `https://management.azure.com/.default` | 3 |
 | `collect_garbage`, `GcReport`, `GcStoppedError` | `gc.py` | D15; `GcReport(planned, deleted, failed, failed_closed, unregistered, deviations, dry_run)` | 4 |
 | `EmbargoReader`, `_open_view` | `embargo.py`, `catalog.py` | D12 | 5 |
 | `AzureHistoryLease`, `LeaseLostError`, `BlobExpiryStorage` | `store/blob.py` | D13 | 6 |

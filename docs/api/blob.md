@@ -218,11 +218,11 @@ inside a process.
 
 ## Real-account checklist
 
-**None of these has run.** Azurite and `pytest-httpx` test the code, and neither proves
-how real Azure behaves. No test reads a real account through DuckDB either. The owner
-runs this list once, with a real storage account, before Phase 5 relies on the blob
-writer, the upload and the remote read, and records the results in GH-134. Item 9 runs in
-the same pass and feeds Phase 6, serving.
+Azurite and `pytest-httpx` test the code, and neither proves how real Azure behaves, so
+the owner runs this list against a real storage account. It ran on 2026-11-10 against
+statcatlib 0.16.2: nine items passed, and the private-endpoint half of item 2 did not run.
+Item 9 ran again on 2026-11-12 with artefact records in the leaves, and GH-134 holds the
+results.
 
 1. A commit under a workload identity: `event.actor` holds the `oid`.
 2. The anonymous `Date` `HEAD`, also behind the deployment's private endpoint.
