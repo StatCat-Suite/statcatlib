@@ -7,8 +7,9 @@ TOML file, the jobs configuration. A deployment keeps the file in one ConfigMap,
 reviews it in a PR, and mounts it into both jobs. Each run checks the file and
 logs its SHA-256, so two jobs running different copies show in the logs.
 
-statcatlib reads and checks the file, and [the GC job](gc.md) reads its
-`[retention]`. The release job comes in a later release (Phase 5 Part 3).
+statcatlib reads and checks the file. [The release job](release.md) reads its
+`[retention]` and requires its `[access]`, and [the GC job](gc.md) reads its
+`[retention]`.
 
 ```python
 from statcatlib.jobs import load_jobs_config
@@ -107,9 +108,11 @@ first step.
 
 ## `[access]`
 
-The release job's access precondition reads this table: before any release, it
-lists the role assignments that let a principal read the container's blobs and
-compares each principal with the allowlist.
+The release job's [access precondition](release.md#the-access-precondition)
+reads this table: before any release, it lists the role assignments that let a
+principal read the container's blobs and compares each principal with the
+allowlist. The job refuses a table whose `container` or `storage_account` names
+another container or account than the catalog's.
 
 | Key | Meaning | Required |
 |---|---|---|
@@ -123,7 +126,7 @@ compares each principal with the allowlist.
 
 | Key | Meaning | Required when `enabled = true` |
 |---|---|---|
-| `enabled` | Whether a `statcat release --expire` run may expire Inventory versions; `false` by default | no |
+| `enabled` | Whether a `statcat release --expire` run may expire Inventory versions; `false` by default. The flag arrives with expiry (Phase 5 Part 6). | no |
 | `not_before` | Gate 1: no expiry before this instant | yes |
 | `namespace` | The Kubernetes namespace of the pods gate 2 reads | yes |
 | `deployments` | Gate 2's label selectors; statcat-serve's manifests must use the same labels | yes |

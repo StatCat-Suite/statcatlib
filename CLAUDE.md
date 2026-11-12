@@ -64,12 +64,14 @@ src/
     │   ├── __init__.py
     │   ├── sdmx.py          # ingest_sdmx() — writes sdmxlib tables + catalog record; ingest_dataflows(); ingest_data()
     │   └── ckan.py          # CkanClient, ingest_ckan()
-    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload, advance-current, gc, admin
+    ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload, advance-current, gc, release, admin
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
     ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, advance_current, prune; local and blob
     ├── jobs.py         # The jobs configuration: load_jobs_config, RetentionPolicy, AccessPolicy, ExpiryPolicy (Phase 5 D7); decode_registration
     ├── gc.py           # collect_garbage, GcReport, GcStoppedError: the GC job, `statcat gc` (Phase 5 D10)
+    ├── release.py      # ReleaseJob, ReleaseReport, ReleaseRefusal, refusal_record: the release job, `statcat release` (Phase 5 D1 to D5, D9)
+    ├── access.py       # check_access, AzureReaderListing, ReaderListing: the release job's access precondition (Phase 5 D8)
     ├── embargo.py      # EmbargoReader: embargoed and live editions in every state, for the preview and pre-materialisation (Phase 5 D12)
     ├── checks.py       # Seal checks: SealCheck, conf_status
     ├── diagnostics.py  # verify_catalog(), doctor(): the integrity and support checks, stale data editions
@@ -401,6 +403,40 @@ Inventory and seals editions:
   manifests cannot be verified, and never touches `inventory/` or `history/`. Each
   event is a record on the `statcatlib.gc` logger; `statcat gc` prints them as JSON
   lines on standard output.
+- **The release job.** `ReleaseJob(location, config, *, rest, listing,
+  storage=None).run(*, dry_run=False)` (`release.py`, `statcat release`,
+  `statcatlib[blob]`) is one run over a catalog in object storage, and the only
+  writer of Inventory versions on a server. It refuses an opted-in catalog,
+  moves `CURRENT` to the head, runs the access precondition, then commits up to
+  three versions, each through `InventoryWriter.commit` with a change that
+  returns `None` when nothing changes. The fold (kind `seal`) records each
+  `pending/` registration the head does not record as `embargoed`, after its
+  checks in order: `pending-document`, `too-old`, `manifest`, `canonical-form`,
+  `files` (`verify_remote` over every tier), `lifecycle` (`fold_lifecycle`),
+  `kind`, `chain`, `final`, and for an edition with no binding `references`
+  (`check_edition(at="receive", remote=, structures=)` on a pulled copy). Two
+  passing registrations of one product, `previous` and schema are each refused
+  (`pending-fork`), an embargoed entry a new one corrects is withdrawn
+  (`supersede_pending`), and `drop_until_stable` drops each product the
+  cross-product rules or the manifest SHA-256 check refuse. The release step
+  (kind `release`) writes the refusal record (`refusal_record`: the root's
+  `extensions.statcat.release`, `since` carried, capped at 500) and, when the
+  access check passed and the head's `embargo` is off, releases what sdmxlib's
+  `release_due` and the rules accept. Retirement (kind `retire`) commits
+  `retire_change` at `now - retire_after`. Each of the three steps catches its
+  own store, manifest and contention errors, logs `step.failed`, and the run
+  goes on. Each event is a record on the `statcatlib.release` logger;
+  `statcat release` prints them as JSON lines on standard output. The catalog
+  lock and expiry are Phase 5 Part 6.
+- **The access precondition.** `check_access(report, allowlist, sentinels)`
+  (`access.py`) passes when every blob-read role assignment that applies to the
+  catalog's container names a principal on `[access] allowlist`, a group by its
+  own object id, and the listing holds every sentinel assignment.
+  `AzureReaderListing` lists the assignments at the container scope with
+  `$filter=atScope()` and reads each role definition at the storage account,
+  through `httpx` under a two-action custom role; it reads no directory object.
+  A listing error, a missing sentinel and an outsider each skip the release
+  step and leave the fold and retirement to run.
 - **The cross-product rules.** `commit` runs `InventoryWriter.refusals`
   (`store/cross_product.py`) on every change that makes an entry live or
   embargoed, and raises the first `CrossProductRuleError` by product id:
@@ -507,7 +543,7 @@ Inventory and seals editions:
   `prune(*, older_than, reason, dry_run=True)` is the narrow laptop prune
   (P7), and raises `TypeError` on blob: it retires old superseded and
   withdrawn editions in one `retire` version, built by
-  `store.inventory.retire_change` (which the release job will share),
+  `store.inventory.retire_change` (which the release job shares),
   deletes the directories of editions tombstoned longer than the window and
   the `data/` files no on-disk manifest lists, skips a product
   with a working copy or a journal entry, keeps a structure edition a live

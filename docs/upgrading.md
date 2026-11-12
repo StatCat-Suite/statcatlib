@@ -5,6 +5,46 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## Next release: `statcat release`, the release job
+
+No call changes, and no catalog is rebuilt. This release adds the release job for a
+catalog in Azure Blob Storage: `statcat release AZ_URL --config FILE [--dry-run]`,
+`statcatlib.release.ReleaseJob` and the access precondition in `statcatlib.access`.
+[The release job](api/release.md) describes a run, its rules and the runbook for each
+event.
+
+A deployment that uploads editions now needs the job on a schedule: an uploaded
+edition stays in `pending/` until a run folds it, and stays `embargoed` until a run
+after its `release_at` releases it. Three things to set up before the first run:
+
+- **`[access]` in the jobs configuration.** `statcat release` exits 1 without it.
+  Its `container` and `storage_account` must name the catalog's own, its `allowlist`
+  every principal that holds a blob-read role on the container, and its `sentinels`
+  one known role assignment at each scope above the account
+  ([The jobs configuration](api/jobs.md#access)).
+- **The access-check role.** The release identity needs one custom role at the
+  storage account with `Microsoft.Authorization/roleAssignments/read` and
+  `Microsoft.Authorization/roleDefinitions/read`. Without it every automatic release
+  is skipped with `access.unchecked`, and `statcat admin release` still publishes
+  ([The access precondition](api/release.md#the-access-precondition)).
+- **Editions of new products sealed with 0.17 or later.** The fold records a product
+  the Inventory does not record yet with the `lifecycle` its edition's `statcat`
+  section names, and refuses an edition that names none with the rule `lifecycle`.
+  Seal such an edition again with statcatlib 0.17 or later.
+
+The Inventory root's `statcat` section gains `release`, the refusals of the newest
+release job run ([the format](catalog-format.md#12-the-inventory-roots-statcat-section)).
+`format_version` stays `"3"`. A reader ignores a key it does not know, so an older
+statcatlib reads such a root, and `Catalog.description` is unchanged.
+
+While the catalog's embargo is on, the release job releases nothing. A catalog in
+object storage therefore runs with the embargo off, and `statcat admin embargo <url>
+on` stops automatic releases. On a local catalog the embargo keeps its meaning: a
+seal records its edition `embargoed`.
+
+The release job refuses a catalog that has opted in to expiry (`catalog.json` 2.x)
+and exits 1, as every writer in this release does.
+
 ## 0.17.0: artefact records in every leaf entry, the section's `lifecycle`, `CatalogAdmin` on object storage, `statcat gc` and `EmbargoReader`, on sdmxlib 0.88
 
 statcatlib requires `sdmxlib>=0.88,<0.89`. No catalog is rebuilt. sdmxlib 0.88's

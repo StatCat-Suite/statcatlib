@@ -21,7 +21,8 @@ design decisions in full. This file indexes the code contracts.
 - `src`: [`./src/EGM.md`](./src/EGM.md) — src layout holding the one package.
   - `src/statcatlib`: [`./src/statcatlib/EGM.md`](./src/statcatlib/EGM.md) —
     public API re-exports, `catalog.py`, `admin.py`, `embargo.py`, `checks.py`, `bundle.py`,
-    `query.py`, `expr.py`, `urn.py`, `testing.py`.
+    `upload.py`, `jobs.py`, `gc.py`, `release.py`, `access.py`, `query.py`, `expr.py`,
+    `urn.py`, `testing.py`.
   - `src/statcatlib/model`: [`./src/statcatlib/model/EGM.md`](./src/statcatlib/model/EGM.md)
     — attrs domain model with no I/O.
   - `src/statcatlib/store`: [`./src/statcatlib/store/EGM.md`](./src/statcatlib/store/EGM.md)
@@ -67,7 +68,8 @@ design decisions in full. This file indexes the code contracts.
   keeps serving; nothing on the view or search path rebuilds it (GH-3).
 - `store/inventory.py`'s `InventoryWriter` is the only code that writes
   `catalog.json`, `inventory/` and `CURRENT`. Apart from a seal's record and
-  the journal repair, only `CatalogAdmin` (`admin.py`) calls it.
+  the journal repair, only `CatalogAdmin` (`admin.py`) and the release job
+  (`release.py`) call it.
 - A product has one unsealed edition at a time. `WorkingCopy.seal` rebuilds
   the search index, computes the `statcat` section with
   `bundle.catalog_section`, seals with `sdmxlib.edition.seal`, and records
@@ -84,9 +86,10 @@ design decisions in full. This file indexes the code contracts.
 
 ## Global Side Effects
 
-- `Catalog.create` writes `catalog.json`; each seal, and each `CatalogAdmin`
-  change, writes an Inventory root under `inventory/`, a leaf when a product
-  changes, and `CURRENT`.
+- `Catalog.create` writes `catalog.json`; each seal, each `CatalogAdmin`
+  change, and each step of a release job run that changes the Inventory, writes
+  an Inventory root under `inventory/`, a leaf when a product changes, and
+  `CURRENT`.
 - One `metadata.duckdb` per edition under `products/<product>/<edition_id>/`,
   shared by the `statcat` and `sdmx` schemas; sdmxlib's DuckLake holds
   observations, its data files shared by the product's editions under
@@ -97,8 +100,9 @@ design decisions in full. This file indexes the code contracts.
   `products/<product>/journal/` and the edition's `manifest.json`;
   statcatlib clears the journal entry once the edition is recorded.
 - Network access comes from SDMX registries (through sdmxlib) and the CKAN
-  Action API (`httpx`), and from embedding model downloads when vector search
-  is enabled.
+  Action API (`httpx`), from embedding model downloads when vector search
+  is enabled, from the object store a `BlobLocation` names, and, for the release
+  job's access check, from Azure Resource Manager.
 
 ## System Verification
 

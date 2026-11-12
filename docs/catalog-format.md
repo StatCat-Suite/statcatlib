@@ -88,8 +88,9 @@ taken from the process and unauthenticated.
 
 ### 1.2 The Inventory root's `statcat` section
 
-An Inventory root's `extensions` MAY hold a `statcat` section, the catalog's
-description. `CatalogAdmin.describe` writes it in a version whose
+An Inventory root's `extensions` MAY hold a `statcat` section: the catalog's
+description and, on a catalog in object storage, the release job's refusal
+record. `CatalogAdmin.describe` writes the description in a version whose
 `event.kind` is `describe`, a kind sdmxlib 0.81 added; an older reader skips
 that root and stays on the version before it. Every later version carries
 the section unchanged. Its fields:
@@ -98,11 +99,40 @@ the section unchanged. Its fields:
 | --- | --- |
 | `format_version` | `"3"` |
 | `description` | The catalog-level fields of a `CatalogDescription`: `identifier`, `title`, `description`, `publisher` (`name`, `id`, `type`, `homepage`), `homepage`, `language`, `licence` (`id`, `label`, `uri`), `theme_taxonomy` (each `uri`, `label`), `issued` and `modified`. Multilingual text is an object of language tag to text, and an instant an ISO 8601 string. |
+| `release` | The refusal record of the newest [release job](api/release.md) run, below. Absent until a run has a refusal to record. |
 
-A reader MUST ignore a key it does not know, in the section and in
-`description`, so a later field does not stop it. The description never holds
+A reader MUST ignore a key it does not know, in the section, in `description`
+and in `release`, so a later field does not stop it. The description never holds
 datasets, services or records: those come from the live editions.
 `Catalog.description` reads the section of the version the catalog holds.
+
+**The refusal record.** `release` holds the registrations the newest run's fold
+did not record and the due editions its release step did not release, each with
+its reason (sharded catalog specification §6.4):
+
+```json
+{"refused": [
+   {"product_id": "14100287", "edition_id": "019a2b00-0000-7000-8000-000000000001", "step": "fold",
+    "rule": "chain", "reason": "…", "since": "2026-11-12T13:00:02.000Z"}
+ ], "omitted": 0, "epoch_started_at": null, "restore_epoch": 0}
+```
+
+| Field | Value |
+| --- | --- |
+| `refused` | The refusals, sorted by `product_id`, `edition_id` and `step`; at most 500 |
+| `refused[].step` | `"fold"` or `"release"` |
+| `refused[].rule` | The rule's name, or `null` for a refusal of sdmxlib's `release_due`, whose `reason` says why |
+| `refused[].reason` | The refusal's message |
+| `refused[].since` | The storage time of the first run that refused the same product, edition and step: UTC, `Z`, milliseconds |
+| `omitted` | How many refusals the cap of 500 left out. The oldest `since` are kept, so a standing refusal is never pushed out. |
+| `epoch_started_at` | The `created_at` of the first root of the restore epoch `restore_epoch` names, once a fold has found it, else `null`; always `null` on epoch 0 |
+| `restore_epoch` | The catalog's restore epoch when the record was written. A record carried across a later restore names an older epoch, and the fold then finds the new epoch's first root. |
+
+The release job writes the record whenever it differs from the head's, in a
+version whose `event.kind` is `release`. A version that changes the record
+alone has an empty change list. Every other version carries it unchanged, so
+it reads as of the newest release job run. It names embargoed editions, as a
+leaf does, so a live-only export drops it.
 
 ### 1.3 Supported locations
 
@@ -126,7 +156,8 @@ re-ingest steps.
 ### 1.5 The `pending/` registrations
 
 A catalog in object storage also holds `pending/<product_id>/<edition_id>.json`, one
-document per uploaded edition that waits for Phase 5's fold. [`statcat
+document per uploaded edition that waits for [the release job's
+fold](api/release.md#the-fold). [`statcat
 upload`](api/blob.md) creates it after every listed file is verified, and nothing else
 writes it. [`statcat gc`](api/gc.md) deletes it once the Inventory has recorded the
 edition for longer than the GC window, once its `edition_id` time is older than the
@@ -140,8 +171,9 @@ The document is UTF-8 compact JSON with two keys in this order:
 
 `release_at` is `null` for no scheduled release. Times are UTC, `Z`, in milliseconds,
 as a root's `created_at` is. Equal input gives equal bytes, so a second upload of the
-same edition leaves the same document. This form is a proposal to the specification
-(spec question S14), and Phase 5's fold reads it.
+same edition leaves the same document. The specification states this form (§11.2
+step 1), and the fold refuses any other bytes (`statcatlib.jobs.decode_registration`)
+with the rule `pending-document`.
 
 ## 2. The catalog schema
 
