@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: artefact records in every leaf entry, the section's `lifecycle`, `CatalogAdmin` on object storage, `statcat gc` and `EmbargoReader`, on sdmxlib 0.88
+## 0.17.0: artefact records in every leaf entry, the section's `lifecycle`, `CatalogAdmin` on object storage, `statcat gc` and `EmbargoReader`, on sdmxlib 0.88
 
 statcatlib requires `sdmxlib>=0.88,<0.89`. No catalog is rebuilt. sdmxlib 0.88's
 `read_manifest` and `decode_manifest` raise `sdmxlib.edition.ManifestError` for a

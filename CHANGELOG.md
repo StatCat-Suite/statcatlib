@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0] - 2026-11-12
+
+### Breaking Changes
+
+- **admin**: Run CatalogAdmin over a blob catalog, with statcat admin and advance-current (GH-52)
+- **deps**: Require sdmxlib>=0.88,<0.89 (GH-52)
+- **store**: Write the product's lifecycle into the statcat section and add fold_lifecycle; catalog_section requires the lifecycle keyword (GH-52)
+
+### Bug Fixes
+
+- **tests**: Sign the stores tier's HEAD with SharedKey (GH-136)
+- **tests**: Remove Azurite's anonymous volume when the tier stops (GH-136)
+
+### Documentation
+
+- **design**: Add the EGM review of the Phase 5 release job design (GH-52)
+- **design**: Add the Phase 5 release job and garbage collection design (GH-52)
+- **design**: Record the owner's decisions on the Phase 5 questions (GH-52)
+- Describe leaf artefact records and the section's lifecycle (GH-52, GH-125)
+- Describe the GC job, its deletion log and runbook (GH-52)
+- Describe EmbargoReader for the preview and pre-materialisation (GH-52)
+
+### Features
+
+- **store**: Record artefact records in every leaf entry and read them from leaves (GH-52, GH-125)
+- **jobs**: Add the jobs configuration (GH-52)
+- **store**: Add Change.now, a None change, advance_current, retire_change and _ObjectOps.list (GH-52)
+- **gc**: Add statcat gc and collect_garbage, the GC job (GH-52)
+- **embargo**: Add EmbargoReader, the reader of embargoed editions (GH-52)
+
+### Testing
+
+- Expect sdmxlib 0.88's refusal of an unsafe manifest path (GH-52)
+
 ## [0.16.2] - 2026-11-07
 
 ### Bug Fixes
