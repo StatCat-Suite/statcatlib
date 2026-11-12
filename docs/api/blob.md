@@ -5,6 +5,10 @@ catalog in Azure Blob Storage, and registers it in `pending/`. `Catalog.open`
 reads a catalog there, returning live editions only. Install both with
 `uv add 'statcatlib[blob]'`, or `pip install 'statcatlib[blob]'`.
 
+The catalog is created once, before its first upload, with
+[`statcat admin create`](admin.md#creating-a-catalog), which writes its
+`catalog.json`.
+
 An uploaded edition waits in `pending/`. [The release job](release.md) folds it
 into the Inventory as an `embargoed` entry and releases it at its `release_at`, so
 no reader sees it until then. Upload supports
