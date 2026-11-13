@@ -67,7 +67,7 @@ src/
     ├── cli/            # The `statcat` command (Typer): build-index, verify-catalog, doctor, prune, upload, advance-current, gc, release, admin
     │   └── __init__.py
     ├── catalog.py      # Catalog (create, open), Product, NoLiveEditionError
-    ├── admin.py        # CatalogAdmin: rollback, release, cancel, set_embargo, describe, advance_current, prune; local and blob
+    ├── admin.py        # CatalogAdmin: create (blob), rollback, release, cancel, set_embargo, describe, advance_current, prune; local and blob
     ├── jobs.py         # The jobs configuration: load_jobs_config, RetentionPolicy, AccessPolicy, ExpiryPolicy (Phase 5 D7); decode_registration
     ├── gc.py           # collect_garbage, GcReport, GcStoppedError: the GC job, `statcat gc` (Phase 5 D10)
     ├── release.py      # ReleaseJob, ReleaseReport, ReleaseRefusal, refusal_record: the release job, `statcat release` (Phase 5 D1 to D5, D9)
@@ -535,7 +535,14 @@ Inventory and seals editions:
   (design decision P1), the storage clock on blob (S29: on a server it runs
   under the release identity, and the operator is named in `reason`).
   `advance_current()` moves `CURRENT` forward. `statcat admin` and `statcat
-  advance-current` run them over a directory or `az://`. `editions(product)`
+  advance-current` run them over a directory or `az://`.
+  `CatalogAdmin.create(BlobLocation, *, actor=None, clock=None)` (`statcat
+  admin create AZ_URL`, GH-159) creates a catalog in object storage: it writes
+  `catalog.json` alone, by `write_catalog_json`'s create-only Put, and refuses
+  a prefix that holds `catalog.json` (`FileExistsError` naming its
+  `catalog_id`) or objects under `inventory/`, `products/` or `pending/`
+  without one (`IncompatibleCatalogError`). The first root records `embargo:
+  false`. `Catalog.create(path)` creates a local catalog. `editions(product)`
   lists every state. No attribute of `Catalog`, `Product` or `EditionView`
   returns one. `describe` writes `{format_version: "3", description}` into
   the root's `extensions.statcat` (`bundle.description_to_json`), every later
