@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.0] - 2026-11-13
+
+### Documentation
+
+- **design**: Add the Inventory history stage 2 design (GH-125)
+- **design**: Add the EGM review of the Inventory history stage 2 design (GH-125)
+- **design**: Revise the Inventory history stage 2 design after review (GH-125)
+- Describe statcat admin create and CatalogAdmin.create (GH-159)
+- **design**: Record the owner's answers to the stage 2 questions (GH-125)
+
+### Features
+
+- **admin**: Add CatalogAdmin.create for a catalog in object storage (GH-159)
+- **cli**: Add statcat admin create (GH-159)
+
 ## [0.18.0] - 2026-11-12
 
 ### Documentation
