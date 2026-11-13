@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: `statcat admin create`
+## 0.19.0: `statcat admin create`
 
 No call changes, and no catalog is rebuilt. `statcat admin create AZ_URL` creates a
 catalog in Azure Blob Storage: it writes `catalog.json` with a new `catalog_id` and
