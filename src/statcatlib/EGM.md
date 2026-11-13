@@ -131,6 +131,21 @@ and test catalogs (`testing.py`).
 `CatalogAdmin` is exported from `statcatlib`; `EditionEntry` and `PruneReport`
 are imported from `statcatlib.admin`.
 
+- `CatalogAdmin.create(location, *, actor=None, clock=None)`: creates a catalog
+  in object storage and returns the operational object over it (GH-159).
+  *location* is a `BlobLocation`; a path raises `TypeError` naming
+  `Catalog.create`. It reads `catalog.json` and raises `FileExistsError` naming
+  the held `catalog_id` when one exists (`_held_catalog` builds the message); lists `inventory`,
+  `products` and `pending` through `location.ops.list`, taking the first object
+  of each, and raises `IncompatibleCatalogError` naming an object found
+  (`_refuse_orphans`); then calls `InventoryWriter.write_catalog_json()`, whose
+  create-only Put raises `FileExistsError` when another create won, re-raised
+  naming the winner's `catalog_id`. It writes `catalog.json` alone, reads no
+  storage clock and resolves no actor. The catalog has no Inventory version, so
+  `embargo` is `False`, and the first root takes `embargo: false` from
+  `sdmxlib.inventory.next_root`'s default unless `set_embargo(on=True)` writes
+  it. `catalog_id` is the id `catalog.json` held when the object was opened or
+  created.
 - `CatalogAdmin.open(path, *, actor=None, clock=None)`: *path* is a catalog
   directory or a `BlobLocation`. A directory: refuses a legacy layout
   (`catalog._refuse_legacy_layout`) and a path with no `catalog.json`
@@ -720,6 +735,8 @@ read.
   synthetic edition, the catalog rows, the search index when lancedb is
   installed, the manifest and Inventory version 1. `temporary_catalog`
   deletes its directory on exit.
+- `CatalogAdmin.create` writes `catalog.json` alone, with one create-only Put,
+  and logs the URI at INFO on the `statcatlib.admin` logger.
 - Each `CatalogAdmin` change writes one Inventory version (a root, and for a
   product change one leaf) and `CURRENT`; over a `BlobLocation` it sends one
   anonymous `HEAD` for the storage clock unless given `clock=`.
@@ -753,6 +770,11 @@ read.
 - `EmbargoReader`: `tests/test_embargo_reader.py` (a local catalog), the
   `TestNoOperationalReach` and blob-extra tests in `tests/test_public_api.py`, and,
   against Azurite, `tests/stores/test_embargo_reader.py`.
+- `CatalogAdmin.create`: `tests/test_catalog_admin_create.py` (the refusals, the
+  bounded listing, a lost race and the first version's embargo, over a
+  `MemoryStore`), `tests/test_cli_admin_create.py` and, against Azurite,
+  `tests/stores/test_admin_create.py` (create, upload and two release runs; six
+  creates at one time).
 - The release job: `tests/test_release_fold.py`, `tests/test_release_step.py` and
   `tests/test_release_job.py` (every step over a `MemoryStore`, with the catalog of
   `tests/_release.py` and the fakes of `tests/_fakes.py`),

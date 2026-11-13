@@ -54,7 +54,16 @@ from typing import TYPE_CHECKING, Self
 
 from attrs import frozen
 from sdmxlib.edition import ManifestError, edition_files, list_editions, read_manifest
-from sdmxlib.inventory import CATALOG_NAME, TransitionError, cancel, head, release, rollback
+from sdmxlib.inventory import (
+    CATALOG_NAME,
+    InventoryError,
+    TransitionError,
+    cancel,
+    decode_catalog,
+    head,
+    release,
+    rollback,
+)
 from sdmxlib.storage.schema import SCHEMA_VERSION
 
 from statcatlib.bundle import ROOT_SECTION_FORMAT, STATCAT_SECTION, description_to_json
@@ -68,6 +77,7 @@ from statcatlib.store.inventory import (
     NonFastForwardError,
     retire_change,
 )
+from statcatlib.store.store import IncompatibleCatalogError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
@@ -204,6 +214,43 @@ def _leaf(full: FullInventory | None, product_id: str) -> Leaf:
     return full.leaf(product_id)
 
 
+#: The prefixes whose objects belong to a catalog: the Inventory, the editions and the registrations.
+_CATALOG_PREFIXES = ("inventory", "products", "pending")
+
+
+def _held_catalog(location: str, raw: bytes) -> str:
+    """Why a create at *location* is refused, whose ``catalog.json`` holds *raw*; it names the ``catalog_id``."""
+    try:
+        found = f"catalog_id {decode_catalog(raw).catalog_id}"
+    except InventoryError as exc:
+        found = f"a {CATALOG_NAME} that cannot be read ({exc})"
+    return f"{location} is a catalog already, with {found}; nothing was written"
+
+
+def _refuse_orphans(location: BlobLocation) -> None:
+    """Refuse a prefix that holds a catalog's objects and no ``catalog.json``.
+
+    It lists each of ``inventory/``, ``products/`` and ``pending/`` and stops
+    at the first object, so it asks the store for one page of each listing at most.
+
+    Args:
+        location: The catalog root.
+
+    Raises:
+        IncompatibleCatalogError: An object exists under one of the prefixes;
+            the message names it.
+    """
+    for prefix in _CATALOG_PREFIXES:
+        first = next(iter(location.ops.list(prefix)), None)
+        if first is not None:
+            msg = (
+                f"{location.uri} holds {first['path']} and no {CATALOG_NAME}: the objects under {prefix}/ belong to "
+                f"a catalog whose catalog_id is lost. Nothing was written. Restore that catalog's {CATALOG_NAME} "
+                "from the backup, or create the new catalog at an empty prefix."
+            )
+            raise IncompatibleCatalogError(msg)
+
+
 class CatalogAdmin:
     """Operational changes to a catalog's Inventory: rollback, release, cancel, embargo, description and prune.
 
@@ -213,13 +260,17 @@ class CatalogAdmin:
     """
 
     _writer: InventoryWriter
+    _catalog_id: str
 
-    def __init__(self, *args: object, _writer: InventoryWriter | None = None, **kwargs: object) -> None:
+    def __init__(
+        self, *args: object, _writer: InventoryWriter | None = None, _catalog_id: str = "", **kwargs: object
+    ) -> None:
         """Refuse construction from outside, with a TypeError naming `open`."""
         if _writer is None or args or kwargs:
             msg = "open the operational object with CatalogAdmin.open(path)"
             raise TypeError(msg)
         self._writer = _writer
+        self._catalog_id = _catalog_id
 
     @classmethod
     def open(
@@ -254,8 +305,7 @@ class CatalogAdmin:
         """
         if isinstance(path, BlobLocation):
             writer = InventoryWriter(BlobInventoryStorage(path, actor=actor, clock=clock))
-            writer.catalog_document()
-            return cls(_writer=writer)
+            return cls(_writer=writer, _catalog_id=writer.catalog_document().catalog_id)
         if actor is not None or clock is not None:
             msg = (
                 "actor= and clock= apply to a catalog in object storage; a catalog directory records "
@@ -268,11 +318,76 @@ class CatalogAdmin:
             msg = f"{root} is not a catalog (no {CATALOG_NAME}); create one with Catalog.create({str(path)!r})"
             raise FileNotFoundError(msg)
         writer = InventoryWriter(root)
-        writer.catalog_document()
-        return cls(_writer=writer)
+        return cls(_writer=writer, _catalog_id=writer.catalog_document().catalog_id)
+
+    @classmethod
+    def create(
+        cls,
+        location: BlobLocation,
+        *,
+        actor: str | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> Self:
+        """Create a catalog in object storage at *location*, and open it for operational changes.
+
+        It writes ``catalog.json``, holding a new UUIDv7 ``catalog_id`` and
+        ``restore_epoch`` 0, with one create-only Put, and nothing else. The
+        catalog has no Inventory version: the first release job run that folds
+        a registration writes version 1, with the embargo off. ``statcat admin
+        create`` runs it. A local catalog is created by `Catalog.create`.
+
+        Two calls at one time cannot both succeed: the store accepts one
+        create of ``catalog.json``, and the other call raises `FileExistsError`.
+
+        Args:
+            location: The catalog root, an empty prefix.
+            actor: As `open` takes it, for the changes made through the
+                returned object.
+            clock: As `open` takes it.
+
+        Returns:
+            The operational object over the new catalog; `catalog_id` reads its id.
+
+        Raises:
+            FileExistsError: *location* holds a ``catalog.json``; the message
+                names its ``catalog_id``. Nothing is written.
+            TypeError: *location* is a path; `Catalog.create` creates a local catalog.
+
+        A *location* that holds an object under ``inventory/``, ``products/`` or
+        ``pending/`` and no ``catalog.json`` raises `IncompatibleCatalogError`,
+        and nothing is written. A store fault raises `BlobStoreError`, and a
+        create whose outcome stays unknown raises `InventoryCommitUnknownError`.
+        """
+        if not isinstance(location, BlobLocation):
+            msg = (
+                "CatalogAdmin.create writes a catalog in object storage and takes a BlobLocation; create a "
+                f"local catalog with Catalog.create({str(location)!r})"
+            )
+            raise TypeError(msg)
+        storage = BlobInventoryStorage(location, actor=actor, clock=clock)
+        held = storage.read(CATALOG_NAME)
+        if held is not None:
+            raise FileExistsError(_held_catalog(location.uri, held))
+        _refuse_orphans(location)
+        writer = InventoryWriter(storage)
+        try:
+            document = writer.write_catalog_json()
+        except FileExistsError:
+            # Another create won between the read above and the Put.
+            winner = storage.read(CATALOG_NAME)
+            if winner is None:
+                raise
+            raise FileExistsError(_held_catalog(location.uri, winner)) from None
+        log.info("created the catalog %s", location.uri)
+        return cls(_writer=writer, _catalog_id=document.catalog_id)
 
     def __repr__(self) -> str:
         return f"<CatalogAdmin {self._writer.storage.location}>"
+
+    @property
+    def catalog_id(self) -> str:
+        """The catalog's id, as ``catalog.json`` held it when this object was opened or created."""
+        return self._catalog_id
 
     def advance_current(self) -> int | None:
         """Move ``CURRENT`` forward to the newest Inventory version (`InventoryWriter.advance_current`).

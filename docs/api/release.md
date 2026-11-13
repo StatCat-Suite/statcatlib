@@ -39,6 +39,23 @@ It holds no account key and no SAS, no Reader role above the account, and no
 Microsoft Graph permission. It never writes or deletes under `pending/` or
 `products/`. Specification §10.1 lists every principal's rights.
 
+## Creating the catalog
+
+A new catalog needs `catalog.json` before its first upload. Run this once, under
+the release identity, at an empty prefix:
+
+```bash
+statcat admin create az://catalogs/stc
+```
+
+The command prints the new `catalog_id` and writes `catalog.json` alone
+([Creating a catalog](admin.md#creating-a-catalog)). It exits 1 and writes nothing
+when the prefix holds a `catalog.json`, or holds objects under `inventory/`,
+`products/` or `pending/` without one. `statcat upload` then registers editions in
+`pending/`, and the first release run that folds one writes Inventory version 1 with
+the embargo off. Until `catalog.json` exists, `statcat release` exits 1 with `ERROR
+az://<container>/<prefix>/ has no catalog.json`.
+
 ## What one run does
 
 A run is short and idempotent. Each step that changes the Inventory commits its own

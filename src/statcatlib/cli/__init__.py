@@ -10,7 +10,8 @@ forward; `gc`, the GC job over a catalog in Azure Blob Storage; and `release`,
 the release job over one. The
 ``admin`` group (`admin_app`) makes the operational changes: ``editions``,
 ``release``, ``cancel``, ``rollback`` and ``embargo``, over a catalog directory
-or ``az://``. The CLI is intentionally thin — the work lives
+or ``az://``, and ``create``, which creates a catalog at an ``az://`` URL.
+The CLI is intentionally thin — the work lives
 in `statcatlib.WorkingCopy.build_index`, `statcatlib.diagnostics`,
 `statcatlib.CatalogAdmin`, `statcatlib.upload_edition`,
 `statcatlib.gc.collect_garbage` and `statcatlib.release.ReleaseJob`.
@@ -113,7 +114,7 @@ _REFUSED_KEYS = frozenset(name.lower() for name in _REFUSED_VARIABLES)
 _UPLOAD_TIMEOUT = "1h"
 
 #: How long one request of `advance-current`, `admin`, `gc` or `release` may take: each reads or writes one small
-#: document, or one of an edition's catalog files.
+#: document, or one of an edition's catalog files, or lists one page.
 _ADMIN_TIMEOUT = "5m"
 
 
@@ -826,7 +827,8 @@ def upload(
 admin_app = typer.Typer(
     name="admin",
     help=(
-        "Operational changes to a catalog's Inventory: release, cancel, roll back, embargo. "
+        "Create a catalog in object storage, and make operational changes to a catalog's Inventory: release, "
+        "cancel, roll back, embargo. "
         "On a server, run them under the release job's identity and name yourself in --reason."
     ),
     no_args_is_help=True,
@@ -914,6 +916,48 @@ def advance_current(url: str = typer.Argument(..., metavar="URL", help=_URL_HELP
         _say("CURRENT names the newest Inventory version already; nothing was written.", style="green")
         return
     _say(f"CURRENT moved to Inventory version {seq}.", style="green")
+
+
+@admin_app.command("create")
+def admin_create(
+    az_url: str = typer.Argument(
+        ..., metavar="AZ_URL", help="The new catalog's root: az://<container>, or az://<container>/<prefix>."
+    ),
+) -> None:
+    """Create a catalog in Azure Blob Storage (`statcatlib.CatalogAdmin.create`).
+
+    It writes ``catalog.json`` with a new ``catalog_id`` and ``restore_epoch``
+    0, by one create-only Put, and nothing else: ``statcat upload`` and
+    ``statcat release`` then run against the prefix, and the first release run
+    that folds a registration writes Inventory version 1 with the embargo off.
+    Standard output holds the ``catalog_id`` alone, and standard error the
+    human line. Run it once, under the release job's identity, which holds
+    write on ``catalog.json``. A local catalog is created by
+    `statcatlib.Catalog.create`, so a directory exits 2.
+
+    It exits 0 when the catalog is created; 1 when the prefix holds a
+    ``catalog.json`` already, naming its ``catalog_id``, when it holds objects
+    under ``inventory/``, ``products/`` or ``pending/`` and no ``catalog.json``,
+    or on a store or credential failure, each printed as ``ERROR <message>``
+    on standard error with nothing written; and 2 on a usage error, as
+    ``statcat upload`` does, or a store other than Azure Blob Storage.
+    """
+    if "://" not in az_url:
+        _usage(
+            f"{az_url}: admin create creates a catalog in object storage, at az://<container>[/<prefix>]; "
+            "Catalog.create(path) creates a local catalog"
+        )
+    uri = _catalog_uri(az_url, command="admin create")
+    location = _azure_location(uri, _azure_account("admin create"), command="admin create", timeout=_ADMIN_TIMEOUT)
+    _require_azure(location, "admin create")
+    auth_error = _auth_error()
+    try:
+        catalog_id = sc.CatalogAdmin.create(location).catalog_id
+    except (FileExistsError, IncompatibleCatalogError, InventoryError, BlobStoreError, auth_error) as exc:
+        _tell(f"ERROR {exc}", style="red")
+        raise typer.Exit(code=1) from None
+    _say(catalog_id)
+    _tell(f"Created the catalog {uri} with catalog_id {catalog_id}.", style="green")
 
 
 @admin_app.command("editions")

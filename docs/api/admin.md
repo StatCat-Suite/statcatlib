@@ -5,6 +5,8 @@ rolls a product back, releases or cancels an embargoed edition, turns the
 embargo on and off, records the catalog's description, moves `CURRENT`
 forward, and prunes old editions. It runs on a catalog directory and on a
 catalog in object storage, except `prune`, which runs on local disk only.
+`CatalogAdmin.create` creates a catalog in object storage
+([Creating a catalog](#creating-a-catalog)).
 `statcat admin` and `statcat advance-current` run the changes from the command
 line ([The `statcat admin` commands](#the-statcat-admin-commands)). Two
 `statcat` commands check a catalog and report on it, and only read;
@@ -227,6 +229,48 @@ the only one with write on `inventory/`, so the version's `event.actor` is the
 job's object id. Name yourself in the reason, which the version records as
 `event.reason`.
 
+### Creating a catalog
+
+```python
+admin = CatalogAdmin.create(BlobLocation("az://catalogs/stc/", store))
+admin.catalog_id  # the new catalog's UUIDv7
+```
+
+`CatalogAdmin.create` writes `catalog.json` at an empty prefix, with a new
+UUIDv7 `catalog_id` and `restore_epoch` 0, and returns the operational object
+over the new catalog. It writes nothing else. `statcat upload`,
+`statcat release` and `statcat gc` each need that `catalog.json`, so creation
+is the first step of a new catalog on a server, and
+[`statcat admin create`](#the-statcat-admin-commands) runs it. The identity
+needs write on `catalog.json`, which the release identity holds
+([The release identity](release.md#the-release-identity)).
+
+The call refuses two prefixes, and writes nothing to either:
+
+- A prefix that holds `catalog.json` raises `FileExistsError`, and the message
+  names the existing `catalog_id`. `create` never replaces a `catalog.json`:
+  the write is one create-only Put, so of two calls at one time the store
+  accepts one, and the other raises `FileExistsError` naming the winner's
+  `catalog_id`.
+- A prefix that holds an object under `inventory/`, `products/` or `pending/`
+  and no `catalog.json` raises `IncompatibleCatalogError`, naming the first
+  object found. Those objects belong to a catalog whose `catalog_id` is lost.
+  Restore that catalog's `catalog.json` from the backup, or create the new
+  catalog at an empty prefix. The check lists each of the three prefixes and
+  stops at the first object.
+
+A new catalog has no Inventory version and holds no embargo setting. The
+release job's first fold writes version 1, which records `embargo: false`, so
+the job releases each edition at its `release_at`
+([the design's Q1](../design/release-job.md#open-questions)). `admin.embargo` reads `False`
+until then. To hold every automatic release from the start, call
+`set_embargo(on=True, reason=...)` on the new catalog before the first upload;
+that call writes version 1 with the embargo on.
+
+`create` takes a `BlobLocation` only, and raises `TypeError` for a path. A
+local catalog is created by `Catalog.create(path)`, which the program that
+builds the catalog calls to get its writable `Catalog`.
+
 ### Moving `CURRENT` forward
 
 ```python
@@ -250,6 +294,7 @@ The commands need the `blob` extra for an `az://` catalog
 
 ```bash
 statcat advance-current URL
+statcat admin create AZ_URL
 statcat admin editions URL PRODUCT
 statcat admin release URL PRODUCT EDITION --reason TEXT
 statcat admin cancel URL PRODUCT EDITION --reason TEXT
@@ -275,10 +320,25 @@ schema, the time it entered its state and its `release_at`. Each change prints
 the Inventory version it wrote. `embargo on` holds every automatic release; an
 explicit `statcat admin release` still releases.
 
+`create` takes an `az://` URL only and runs
+[`CatalogAdmin.create`](#creating-a-catalog); a directory exits 2, since
+`Catalog.create(path)` creates a local catalog. Standard output holds the new
+`catalog_id` alone, and standard error the human line, so a script reads the id
+from the command's output:
+
+```bash
+catalog_id=$(statcat admin create az://catalogs/stc)
+```
+
+It exits 1 and writes nothing when the prefix holds a `catalog.json`, naming
+its `catalog_id`, or holds objects under `inventory/`, `products/` or
+`pending/` and no `catalog.json`. It prints each `ERROR <message>` on standard
+error. It exits 2 for a store other than Azure Blob Storage.
+
 | Exit code | Meaning |
 | --- | --- |
-| 0 | The change was written, `CURRENT` moved or was current, or the editions were listed |
-| 1 | The change was refused, the catalog cannot be read, or a store or credential failed; each prints as `ERROR <message>`. `editions` of a product the catalog does not record exits 1 too |
+| 0 | The change was written, the catalog was created, `CURRENT` moved or was current, or the editions were listed |
+| 1 | The change or the creation was refused, the catalog cannot be read, or a store or credential failed; each prints as `ERROR <message>`. `editions` of a product the catalog does not record exits 1 too |
 | 2 | Usage: a missing or blank `--reason`, a bad `URL`, `s3://`, no `AZURE_STORAGE_ACCOUNT_NAME`, a refused variable, or a missing `blob` extra |
 
 ## Pruning old editions

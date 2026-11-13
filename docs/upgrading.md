@@ -5,6 +5,20 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## Next release: `statcat admin create`
+
+No call changes, and no catalog is rebuilt. `statcat admin create AZ_URL` creates a
+catalog in Azure Blob Storage: it writes `catalog.json` with a new `catalog_id` and
+`restore_epoch` 0, and prints the `catalog_id`. `CatalogAdmin.create(location)` is
+the library call, and `CatalogAdmin.catalog_id` reads the id
+([Creating a catalog](api/admin.md#creating-a-catalog)). It replaces the Python call
+`InventoryWriter(BlobInventoryStorage(location)).write_catalog_json()` as the step
+before a new catalog's first `statcat upload`; that call still works.
+
+The command takes an `az://` URL only. `Catalog.create(path)` creates a local
+catalog, as before. A new catalog holds no embargo setting, and the release job's
+first fold writes Inventory version 1 with the embargo off.
+
 ## 0.18.0: `statcat release`, the release job
 
 No call changes, and no catalog is rebuilt. This release adds the release job for a
