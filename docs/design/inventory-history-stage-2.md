@@ -5,7 +5,9 @@
     ([report](egm/inventory-history-stage-2/review-1.md): 4 Blocker, 22 Major, 31 Minor). The
     project owner then decided seven points and accepted four recommendations on 2026-11-12
     (the table "Owner decisions"). This revision applies those decisions and every Blocker and
-    Major; the section "Review response" maps each finding to its change.
+    Major; the section "Review response" maps each finding to its change. On 2026-11-13 the
+    project owner answered revision 2's two open questions (O12, O13), and this text records
+    the answers.
 *   **Build deferred.** The project owner starts Phase 6 (serving) first. No part of this design
     is scheduled. The session that builds it re-reads the heads named below, and revises this
     design where they have moved, before Part 1 starts.
@@ -15,7 +17,9 @@
 *   **Read against:**
     *   statcatlib `dfc519d` (`origin/main`, v0.18.0). 0.18.0 shipped the release job without
         any part of this design. `src/` and `tests/` are unchanged since `932e8b8`, which
-        revision 1 read.
+        revision 1 read. `main` has since moved to `fac3613`, which adds `CatalogAdmin.create`
+        and `statcat admin create` for a catalog in object storage (GH-159) and shifts lines in
+        `admin.py` and `cli/__init__.py`; land-order row A's re-read covers it.
     *   sdmxlib `4886fdb` (`origin/main`): the 0.88.0 code plus the `tiers` argument of
         StatCat-Suite/sdmxlib#391, which is unreleased. `src/sdmxlib/inventory/` is unchanged
         since `v0.88.0`.
@@ -42,16 +46,17 @@
     *   StatCat-Suite/sdmxlib#361, whose acceptance list holds the stage-2 conformance cases.
     *   The [Phase 5 design](release-job.md) ("the release-job design"): its section "GH-125's
         parts", D13, Part 6, handoff rows 11 and 12, Q9, S23, S25 and S26.
-*   **Identifier prefixes.** E1 to E19 are this design's decisions, O1 to O11 the project
-    owner's, and Q1 and Q2 the questions still open. N1 to N7 are handoff rows for sdmxlib, and
-    R1 to R12 changes to the release-job design's Part 6. S31 to S48 continue the S series of the
-    Phase 4 and Phase 5 designs, which ends at S30; a number keeps its meaning across revisions,
-    and a withdrawn row keeps its number. Every identifier of the release-job design carries its
-    name: "release-job D13", "release-job Q9", "release-job S25", "release-job Part 6". F14 is
-    a finding of the [Phase 4 design](catalog-on-blob-storage.md). H1 to H24 are the suite
-    design's, and P1 to P7 the [Phase 2a design](phase-2a-catalog-editions.md)'s. `GH-N` is a
-    statcatlib issue. "Part 1" to "Part 5" are this design's parts, and "GH-125 part N" is a
-    part of the issue.
+*   **Identifier prefixes.** E1 to E19 are this design's decisions, O1 to O13 the project
+    owner's. Q1 to Q9 name questions of revision 1, and "revision 2's Q1" and "revision 2's Q2"
+    the two questions O12 and O13 answer; no question is open. N1 to N7 are handoff rows for
+    sdmxlib, and R1 to R12 changes to the release-job design's Part 6. S31 to S49 continue the S
+    series of the Phase 4 and Phase 5 designs, which ends at S30; a number keeps its meaning
+    across revisions, and a withdrawn row keeps its number. Every identifier of the release-job
+    design carries its name: "release-job D13", "release-job Q9", "release-job S25",
+    "release-job Part 6". F14 is a finding of the [Phase 4 design](catalog-on-blob-storage.md).
+    H1 to H24 are the suite design's, and P1 to P7 the [Phase 2a
+    design](phase-2a-catalog-editions.md)'s. `GH-N` is a statcatlib issue. "Part 1" to "Part 5"
+    are this design's parts, and "GH-125 part N" is a part of the issue.
 
 --------------------------------------------------------------------------------
 
@@ -91,7 +96,8 @@ expiry gates and the persistent volume for the leaf-set cache, and calls the sam
 | Opt-in | Part 5 | release-job Part 6 | Refused (H21, H23) |
 | Expiry | Part 3, in `prune` | release-job Part 6, in `statcat release --expire` | Refused |
 | Restore | Part 4 | Unbuilt. R9 asks the release-job design to plan it. | Refused |
-| History checks in `verify-catalog` and `doctor` | Part 5 | Open (Q2) | Open (Q2) |
+| The history checks of `verify-catalog` | Part 5 | Part 5, without the edition checks (O13) | Not planned |
+| The edition checks of `verify-catalog`, and `doctor` | today, and Part 5's history lines | Not planned | Not planned |
 
 GH-125's parts map to this design's parts as follows.
 
@@ -136,7 +142,7 @@ lock. This design uses these terms as well:
 | Candidate | A root that expiry step 1 takes in this run. |
 | Pending segment | An `expiry` segment on the segment chain after `HISTORY.cleaned_through`. Its roots and leaves may still exist. |
 | Orphan segment | A segment under `history/` that the chain from `HISTORY.newest_segment` does not reach. |
-| S | A restore's target `seq`. The restore discards every root above S and writes root S + 1. The S-numbered rows (S31 to S48) are a different series. |
+| S | A restore's target `seq`. The restore discards every root above S and writes root S + 1. The S-numbered rows (S31 to S49) are a different series. |
 | Unfinished restore | The state E4 defines: a restore wrote `HISTORY` and has not yet written root S + 1. |
 | W, K | The retention window and the number of newest roots expiry keeps (spec §11.6): `inventory_window` and `keep_roots`. |
 | GC | Garbage collection. On a server it is `statcat gc`; on local disk `prune` deletes edition files. |
@@ -188,8 +194,9 @@ defines the interface (release-job Q9, release-job handoff row 11).
 5.  After a process is killed at any point of a run, readers find the same head and the same
     entries as before the run, and the next run finishes the work (Part 3).
 6.  "What was live at time T" has the same answer after expiry as before it (E18, Part 3).
-7.  `statcat verify-catalog` detects an edited segment line and a deleted root, and `statcat
-    doctor` shows the state of `HISTORY`, the segments and the lock (Part 5).
+7.  `statcat verify-catalog` detects an edited segment line and a deleted root, on a catalog
+    directory and on a catalog in Azure Blob Storage, and `statcat doctor` shows the state of
+    `HISTORY`, the segments and the lock (Part 5).
 8.  A restore to root S records every root it discards. An edition that only a readable
     discarded root recorded keeps its files from GC and `prune` for their retention window
     (Part 4).
@@ -219,8 +226,9 @@ defines the interface (release-job Q9, release-job handoff row 11).
 
 ### Owner decisions
 
-The project owner decided these on 2026-11-12, after the review of revision 1. They are inputs
-to this revision. "Rev 1" names revision 1's question.
+The project owner decided O1 to O11 on 2026-11-12, after the review of revision 1, and O12 and
+O13 on 2026-11-13, answering revision 2's two open questions. They are inputs to this text. The
+column "Rev 1" names the question of revision 1, or of revision 2 where it says so.
 
 | ID | Rev 1 | Decision | Consequence here |
 |---|---|---|---|
@@ -235,16 +243,12 @@ to this revision. "Rev 1" names revision 1's question.
 | O9 | Q4 | `prune` expires only when the caller gives `inventory_window`. | E13 |
 | O10 | Q5 | On local disk W is measured by the machine's clock. | E13, S37 |
 | O11 | Q7 | An orphan segment is a note of `verify-catalog`, which does not change its exit status. | E15, S36 |
+| O12 | revision 2's Q1, review M2 | A restore to a root S that records a `live` or `embargoed` edition whose files are gone is refused, and the refusal names each such edition. | E14, its refusals and Part 4's tests. |
+| O13 | revision 2's Q2 | Part 5 adds a history-only check over `az://`: `statcat verify-catalog` runs `check_history` over a `Fetch` on a catalog in object storage, without the edition checks, which stay a later piece of work. The project owner's catalogs live on ADLS, so the history that matters is the server's. | E15, S49, R11, Part 5. |
 
 ### Questions still open
 
-Each lists its options with the cost of each. The recommendation is the option this design is
-written to. Both gate the part named, and neither gates Parts 1 to 3.
-
-| # | Question | Options and their costs | Recommendation | Gates |
-|---|---|---|---|---|
-| Q1 | Root S can record an edition whose files are gone. `prune` deletes the directory of an edition tombstoned longer than its window (`admin.py:740-769`), and a restore to a root older than that brings the entry back. What does `restore` do when root S records such an edition `live` or `embargoed`? | **(a) Refuse**, naming each edition whose `manifest.json` is missing or differs from `manifest_sha256`. Cost: no command restores to that root; the operator picks a newer S or puts the files back first. **(b) Restore and list them** in the report. Cost: the new head names editions no reader can open, and `Product.view` raises for those products until a new seal. **(c) Tombstone them in root S + 1.** Cost: the restore version rewrites leaves and removes a product's live edition; a rule the suite design lacks. | (a). A head that names missing files is the state a restore exists to leave. The report also lists the `superseded` and `withdrawn` entries of S whose directories are gone, which only limits a later `rollback`. | Part 4 |
-| Q2 | Do the history checks run on object storage? The suite design's Handoff lists "`verify-catalog` and `doctor` reporting" with no local qualifier, and both commands take a directory today. | **(a) Local only here.** `check_history` takes a `Fetch` and two listings, so a later issue adds `az://` as a command-line change. Cost: until then a server catalog's history is checked only on a downloaded copy. **(b) Release-job Part 6 adds `statcat verify-catalog az://`.** Cost: the edition checks need every edition's files over the store, a design of its own. **(c) Part 5 adds a history-only check over `az://`.** Cost: Part 5 reads a blob store, and the check reads every retained root, 1.7 GB on the GH-126 corpus. | (a), with R11 recording the need for the release-job design's re-review. | Part 5 |
+None. The project owner answered revision 2's two questions on 2026-11-13 (O12, O13).
 
 ### Proposed suite design and specification changes
 
@@ -278,11 +282,12 @@ text another repository owns, and this design edits neither the spec nor the sui
 | S46 | Spec §6.9 Expiry, "Each run, under the catalog lock"; suite design Steps | Expiry steps 0 to 2 and the plan of step 3 read without the lock. Under the lock the run reads `HISTORY` and `catalog.json` again, stops when either changed, lists `inventory/` again, and performs steps 3 to 7. A run takes at most 1,000 candidates. A run that finds pending segments finishes steps 5 to 7 for them and takes no candidate (O7). | Hold the lock for the whole run, which blocks every commit while the run reads each retained root. | contradicts | sdmxlib, hub | Part 3 |
 | S47 | Spec §6.9 Segments | One run names every segment it writes with one UUIDv7. A restore's segments are the `restore` segments on the chain that share the newest segment's UUID. | Derive a restore's segments from their rosters, which fails across two restores. | adds | sdmxlib, hub | Part 3 |
 | S48 | Spec §6.9 Restores step 5; suite design Restores step 5 | Root S + 1's added tombstones are computed from the change lists of the `restore` segments' lines: each edition in a leaf those lists name that root S records in neither a leaf nor `retired`. Restore step 4 keeps a root that carries the new epoch. | Compute them from the discarded roots' `products`, which a rerun cannot read once restore step 4 has deleted the roots. | clarifies | sdmxlib, hub | Part 4 |
+| S49 | Spec §10.1 table, `history/` column | The release identity reads and lists `history/`, for the history check of `statcat verify-catalog` over `az://` (O13), which runs under that identity and writes nothing. | A separate audit identity, which needs its own blob-read role and an `[access] allowlist` entry (release-job D8). | adds (the table gives the release job "create only" there) | sdmxlib | Part 5 |
 
 ## Cross-repo contract
 
 This design writes the documents sdmxlib 0.88 already decodes and changes no format. It does
-propose changes to the rules: sixteen rows of the table above stand, fourteen of them also
+propose changes to the rules: seventeen rows of the table above stand, fourteen of them also
 change the suite design, and seven contradict a sentence of revision 5. The hub's rule is that "a
 local design that needs a contract change brings it back to the suite design first". Every part
 is therefore provisional until the suite design's revision 6 and the spec carry the rows that
@@ -295,7 +300,7 @@ The table lists each output, its writer and its readers.
 | `<catalog>/LOCK` | every stage-2 writer on local disk | none; no code reads its content |
 | `catalog.json` 2.0 with `history.since_seq` | opt-in; a restore's epoch bump | sdmxlib's reader fallback, `statcat gc`, every writer's decode |
 | `inventory/HISTORY` | opt-in, the engine, a restore | sdmxlib's reader fallback, `statcat gc` (`gc.py:303-319`), `verify-catalog`, `doctor` |
-| `history/<epoch>/<first>-<last>-<uuid7>.jsonl` | the engine, a restore | `verify-catalog`, `doctor`; a stage-3 exporter |
+| `history/<epoch>/<first>-<last>-<uuid7>.jsonl` | the engine, a restore | `verify-catalog`, locally and over `az://`; `doctor`; a stage-3 exporter |
 | The `expiry.*` and `restore.*` events (E12) | the engine, a restore | Phase 8 alerting, through release-job Part 6's `statcat release` |
 | `ExpiryStorage`, and `InventoryStorage.exclusive()`, `check()` and `stage_2` (E2, E8) | this design | release-job Part 6 |
 
@@ -332,7 +337,9 @@ which ships in the same 0.89.0.
 **N2. `check_history(fetch, *, roots, segments) -> list[HistoryFinding]`.** It runs
 `verify-catalog`'s checks 1 to 3 of spec §6.9, with S36 and S38, over a `Fetch`, the listed root
 numbers and the listed segment paths. A finding carries its kind, so an orphan can print as a
-note. It stands beside `verify_entry`, which already serves check 4.
+note. It fetches leaves on a pool of `leaf_threads` threads, as `FullInventory` does, since the
+check over `az://` (O13) makes one GET per distinct leaf. It stands beside `verify_entry`, which
+already serves check 4.
 
 **N3. Stage-2 conformance.**
 
@@ -491,8 +498,8 @@ anything. A script on statcatlib 0.13 fails at `Catalog.open` with `InventoryErr
 | E11 | Expiry steps 4 to 7 work from the pending segments, and a run that finds pending segments only finishes them. | spec §6.9 steps 4 to 7, Crashes |
 | E12 | The engine emits one event per action, and expiry step 8 closes the run. | spec §6.9 step 8 |
 | E13 | `prune` expires when given `inventory_window`, by the storage's clock. | O9, O10 |
-| E14 | `CatalogAdmin.restore` runs spec §6.9's order above `expired_through` and resumes an unfinished restore. | spec §6.9 Restores, O1, O5, Q1 |
-| E15 | `verify-catalog` runs sdmxlib's history checks, and `doctor` reports `HISTORY`, the segments and the lock. | spec §6.9 `verify-catalog`, O11, Q2 |
+| E14 | `CatalogAdmin.restore` runs spec §6.9's order above `expired_through` and resumes an unfinished restore. | spec §6.9 Restores, O1, O5, O12 |
+| E15 | `verify-catalog` runs sdmxlib's history checks, on a catalog directory and, without the edition checks, over `az://`; `doctor` reports `HISTORY`, the segments and the lock. | spec §6.9 `verify-catalog`, O11, O13 |
 | E16 | GC is unchanged, and the release job keeps its 2.x refusal until release-job Part 6. | release-job D1, D10, D13 |
 | E17 | The pure rules come from sdmxlib 0.89, and the engine holds the reads, the writes and their order. | O3 |
 | E18 | "Live at time T" is a replay from a checkpoint over the change lists of roots and `expiry` lines. | Goal 6 |
@@ -1301,8 +1308,13 @@ before it writes anything, for each of these (S40):
   nothing is a failover's case, which R9 hands to the server-restore design;
 - root `to` missing or undecodable, or a leaf it names missing or with bytes that do not hash
   to its name;
-- under Q1 (a), a `live` or `embargoed` entry of root `to` whose `manifest.json` is missing or
-  differs from its `manifest_sha256`;
+- a `live` or `embargoed` entry of root `to` whose files are gone: its `manifest.json` is
+  missing, or its bytes differ from the entry's `manifest_sha256` (O12). The message names each
+  such edition as `<product>/<edition> (<state>)`. The check reads each manifest once and no
+  data file; `prune` deletes an edition's directory and then the `data/` files no remaining
+  manifest lists, so a present manifest whose hash matches keeps its data files. The
+  `superseded` and `withdrawn` entries of root `to` whose directories are gone refuse nothing:
+  the report lists them as `missing`, since they only limit a later `rollback`;
 - an unfinished restore whose S differs from `to`. The message names S.
 
 A real run on Windows or on a lock-refusing filesystem raises `CatalogLockUnsupportedError`
@@ -1449,6 +1461,68 @@ rerun, from `unfinished_restore()`, and skips the history checks in that state. 
 `notes`, and `statcat verify-catalog` (`cli/__init__.py:514-550`) prints each as an `ORPHAN`
 line, which does not change the exit status, as a `STALE` line does not.
 
+**Over object storage (O13).** `verify_history(location: BlobLocation) -> HistoryReport`, in
+`diagnostics.py`, runs the same `check_history` on a catalog in object storage and nothing else.
+It imports the `blob` extra inside the function, so `verify_catalog` on a directory still runs
+without the extra.
+
+1.  It reads `catalog.json` and `inventory/HISTORY` through
+    `BlobInventoryStorage(location).read`, which is the `Fetch`, and keeps `HISTORY`'s tag from
+    `location.ops.read` (`store/blob.py:179-187`).
+2.  It lists `inventory/` and `history/` with `location.ops.list` (`store/blob.py:212-222`). The
+    root numbers come from the names `root_path` gives, the segments from the names
+    `parse_segment_path` accepts (N1); a staged file and a leaf are neither. The listing is the
+    check's snapshot: a root created after it is outside the check, and the head is the highest
+    listed root.
+3.  It reads `CURRENT` and reports a `CURRENT` that names a root outside the listing or lags the
+    head, as `doctor` does locally.
+4.  It calls `check_history(fetch, roots=..., segments=...)`. Every root, every segment and every
+    distinct leaf a retained root names is one GET.
+5.  It reads `HISTORY`'s tag again. A tag that changed means an expiry ran during the check, and
+    the function raises `CatalogUnreadableError` naming the change, with no findings.
+
+It runs no edition check: no manifest, no data file and no `check_edition`. The edition checks
+over a `BlobLocation` stay a later piece of work (Future work). It takes no lease and writes,
+deletes or creates nothing. It calls no `unfinished_restore()`: `BlobInventoryStorage` is no
+`ExpiryStorage` before release-job Part 6, and no restore runs on object storage before R9's
+design. A `catalog.json` and a `HISTORY` whose epochs differ are one finding.
+
+```python
+@frozen
+class HistoryReport:
+    location: str                   # the catalog's URI
+    seq: int | None                 # the highest listed root, None when there is none
+    roots: int                      # roots checked
+    segments: int                   # segments checked
+    findings: tuple[VerifyFinding, ...]
+    notes: tuple[VerifyFinding, ...]   # orphan segments (O11)
+```
+
+**What it may read.** The check reads `catalog.json`, `CURRENT`, and every object under
+`inventory/` and `history/`, and lists the last two. It needs read and list on those four paths
+and nothing else: no write, no delete, no lease, and no read of `products/`, `pending/` or
+`results/`.
+
+- On Azure, Storage Blob Data Reader is the narrowest built-in role, and a role on a container
+  reads every path in it, `products/` and `pending/` included, which hold embargoed bytes.
+  Limiting an identity to the four paths needs ACLs on a hierarchical-namespace account (spec
+  §10.1).
+- Every identity that holds a blob-read role on the container must be on the jobs
+  configuration's `[access] allowlist`, or the release job's access check skips every automatic
+  release (release-job D8).
+- The check therefore runs under the release identity, from a pod of the release CronJob's
+  template, as `statcat admin` runs (release-job S29). That identity already reads and writes
+  `inventory/` and creates under `history/`, so the check adds no principal, no role and no
+  allowlist entry. The spec's §10.1 table gives the release job "create only" on `history/`, and
+  S49 adds its read. Whether the role it holds today also reads `history/` is unverified (see
+  "Not confirmed").
+
+**When to run it.** The check reads every retained root: about 1.7 GB per run on the GH-126
+corpus, 2,979 versions at 560 KB a root. It is an occasional audit job: monthly, as spec §10.3's
+restore test, and after an incident. It does not run on every release. A run during an
+`--expire` run ends with exit 2 (step 5 above), so the schedule keeps the two apart. The page
+Part 5 adds says so.
+
 The conformance cases reach these checks through N3's `ExpiryBackend.verify()`, which the
 adapter in `tests/test_inventory_conformance.py` maps to `verify_catalog`. The cases that come
 from sdmxlib are the chain across a restore, the edited segment line, the deleted root and the
@@ -1505,7 +1579,8 @@ to `BlobInventoryStorage(lease=)`, and calls `expire` in release-job D1 step 7.
 | Gates | none on local disk | `not_before`, the pod check |
 | The cache | `state_dir=` on `expire` | `--state-dir` on a persistent volume (release-job S23) |
 | Restore | `restore`, local | unbuilt; R9 |
-| `verify-catalog`, `doctor` | local | Q2, R11 |
+| `verify-catalog` | local; the history checks over `az://` (O13) | the edition checks over `az://`, a later piece of work; the audit's schedule in the runbook (R11) |
+| `doctor` | local | not planned |
 
 **Changes release-job Part 6's text needs.** The project owner decides each when the
 release-job design is re-reviewed (release-job handoff row 11).
@@ -1522,7 +1597,7 @@ release-job design is re-reviewed (release-job handoff row 11).
 | R8 | D1's step 7 and `--dry-run` | A dry run with `--expire` takes no lease and calls `expire(dry_run=True)` (E19). The engine plans before the lock (S46), so a release run holds the lease for expiry's writes only. |
 | R9 | No part plans a restore on object storage. | Plan one, in release-job Part 6 or a design of its own, over `BlobExpiryStorage` and the code of E14. It settles four things this design leaves to it: whether root S + 1 guards against an automatic release of an entry whose cancellation the restore discarded (revision 1's Q6, with release-job Q1); an epoch bump that discards no root, for a failover; a stop in `gc.py` on an unfinished restore; and whether a target at or below `expired_through` stays refused. |
 | R10 | | Withdrawn. sdmxlib-rest reports `sdmxlib_version` from 0.10.0 on. |
-| R11 | No command checks a server catalog's history. | Record Q2's answer. Under Q2 (a), a later issue adds `az://` to `verify-catalog` over `check_history`. |
+| R11 | No command checks a server catalog's history. | Part 5 adds `statcat verify-catalog az://`, which runs the history checks only (O13). Release-job Part 6's runbook schedules it as an occasional audit job under the release identity, outside the `--expire` runs, and its D14 needs no event for it: the command prints human lines and sets its exit status. The edition checks over `az://` stay a later piece of work. |
 | R12 | D13 and Part 6 give the release identity's storage rights no list. | State them. Expiry adds one data action to what the identity uses today: it already reads, writes and lists blobs in the catalog's container, and expiry also deletes blobs, under `inventory/` only. Whether a lease request needs a further action is unverified. A role on a container covers every path in it, so a delete right limited to `inventory/` needs the ACL-only setup spec §10.1 describes. |
 
 ### E17: pure rules in sdmxlib, I/O in the engine
@@ -1650,11 +1725,34 @@ as for the other `admin` commands.
 | Outcome | Exit |
 |---|---|
 | A dry run; applied; already restored | 0 |
-| A refusal of E14, a lock error | 1, `ERROR <message>` |
+| A refusal of E14, the refusal of O12 among them, a lock error | 1, `ERROR <message>` |
 | A usage error | 2 |
 
-**`statcat verify-catalog`** adds `ORPHAN <path>` lines and counts them in its summary. Its exit
-codes stay 0, 1 and 2. **`statcat doctor`** adds E15's items in its two existing line forms.
+**`statcat verify-catalog URL`**
+
+The argument becomes a URL, as for the `admin` commands (`_URL_HELP`): a catalog directory, or
+`az://<container>[/<prefix>]`, read with `statcat upload`'s environment rules
+(`_azure_location`, `cli/__init__.py:702`) and a five-minute request timeout. On a directory the
+command runs `verify_catalog` and adds `ORPHAN <path>` lines, counted in its summary. Over
+`az://` it runs `verify_history` (E15):
+
+| Line | When |
+|---|---|
+| `history only: the edition checks do not run on object storage` | always, first |
+| `FAIL <file>: <detail>` | each finding |
+| `ORPHAN <path>` | each orphan segment |
+| `Inventory history at version <seq>: <r> root(s) and <s> segment(s) checked, <n> problem(s) found.` | the summary |
+| `<uri> has no Inventory version yet; there is nothing to verify.` | no root listed |
+
+| Outcome | Exit |
+|---|---|
+| No finding; orphan notes only | 0 |
+| A finding | 1 |
+| The catalog cannot be read: no `catalog.json`, a store fault, a credential error, or `HISTORY` changed during the check | 2, `Cannot read the catalog: <message>` |
+| A usage error, an `az://` URL the store cannot be built from | 2 |
+
+**`statcat doctor`** adds E15's items in its two existing line forms, and still takes a
+directory.
 
 ### Errors
 
@@ -1687,6 +1785,8 @@ codes stay 0, 1 and 2. **`statcat doctor`** adds E15's items in its two existing
 | `expire`, expiry steps 5 and 6 | A delete raises `OSError` or `BlobStoreError` | `expiry.delete_failed`; `ExpiryReport.failed`; `cleaned_through` unchanged |
 | `restore` | A blank reason | `ValueError` |
 | `restore` | Each refusal of E14 | `ExpiryRefusedError`, nothing written |
+| `restore` | Root `to` records a `live` or `embargoed` edition whose `manifest.json` is missing or differs from its `manifest_sha256` | `ExpiryRefusedError` naming each such edition, nothing written (O12) |
+| `verify_history` | No `catalog.json`; a `BlobStoreError`; `HISTORY`'s tag changed during the check | `CatalogUnreadableError` |
 
 `CatalogLockTimeoutError`, `CatalogLockUnsupportedError`, `CatalogLockLostError`,
 `UnfinishedRestoreError`, `ExpiryRefusedError` and `StaleBaseError` are new. The first five
@@ -1716,6 +1816,7 @@ subclass `InventoryWriteRefusedError`, and `StaleBaseError` subclasses `Inventor
 | `restore`, `RestoreReport`, `DiscardedVersion`, `Transition` | `store/expiry.py` | E14 | 4 | the three classes |
 | `CatalogAdmin.restore` | `admin.py` | E14 | 4 | yes |
 | `verify_catalog`, `VerifyReport.notes` | `diagnostics.py` | E15 | 5 | as today |
+| `verify_history`, `HistoryReport` | `diagnostics.py` | E15 | 5 | as `verify_catalog` |
 | `doctor` | `diagnostics.py` | E15's items | 2 and 5 | as today |
 | `CatalogAdmin.opt_in` | `admin.py` | E6 | 5 | yes |
 
@@ -1785,6 +1886,13 @@ with r retained roots, s segments, and v versions committed while the run plans:
     185 KB for a release of 200, 6.5 MB for a republish of 7,000. No code deletes under it.
     `LOCK` is empty. `expiry-cache.json` holds about 80 bytes a leaf hash per retained root.
 *   **Durability.** E11 states the crash model and what the engine fsyncs.
+*   **The history check over `az://` (O13).** One run makes one GET per retained root, per
+    segment and per distinct leaf a retained root names, plus the listing pages of `inventory/`
+    and `history/` and three documents. On the GH-126 corpus that is 2,979 roots, about 1.7 GB;
+    at 7,000 products a root is 1.6 MB. The leaf GETs run on `check_history`'s pool (N2). The
+    function holds lines, hashes and leaf sets, and frees each root's bytes once it has checked
+    them. It is an occasional audit job, monthly or after an incident, and never runs on every
+    release.
 *   **Idempotency.** A second `prune` with the same arguments expires nothing more and writes
     nothing. A second `opt_in` returns `already=True`. A second `restore` with the same `to`,
     while root S + 1 is the head, returns `already=True`.
@@ -1802,7 +1910,7 @@ with r retained roots, s segments, and v versions committed while the run plans:
 | `store/inventory.py` | the lock span, E4's four checks and both retry branches, `unfinished_restore`, the decoder choice, the six local storage methods | the Azure lease |
 | `store/expiry.py` | every expiry step, every stop of E9's table, a kill after every storage change, the dry run, over `LocalInventoryStorage` and over the in-memory tagged storage of `tests/_fakes.py` | `BlobExpiryStorage` on Azurite |
 | `admin.py`, `cli/` | `opt_in`, `prune` with expiry, `restore`, each command's lines and exit codes | the same over `az://` |
-| `diagnostics.py` | every finding and note, on catalogs the engine built and a test then damaged | Q2 |
+| `diagnostics.py` | every finding and note, on catalogs the engine built and a test then damaged; `verify_history` over a `MemoryStore` location | `verify_history` on Azurite runs in Part 5's stores tests |
 
 ### Not confirmed
 
@@ -1816,6 +1924,7 @@ says what settles it.
 | The `errno` values `flock` gives on a filesystem without advisory locks: `ENOLCK`, `ENOTSUP`, `EOPNOTSUPP` and `ENOSYS` are assumed. Whether Linux maps `flock` on NFS to a lock other clients see. | No test. The risk row "A filesystem refuses the lock with another error" covers it: any other `OSError` propagates and fails the commit. |
 | sdmxlib accepts a change item whose `leaf_sha256` is `{"from": null, "to": null}`. The review read that it does. | N4, and Part 4's tombstone test |
 | The names and signatures of N1 to N3 | sdmxlib's design; the re-read step before Part 3 |
+| The role or ACL the release identity holds lets it read and list `history/` (S49) | the run before the first audit on the real account, in the Verification plan |
 | Every time, and the 80 bytes a leaf hash of the cache file | the bench of the Verification plan |
 | Everything on Azure: that a lease request on a missing blob answers 404, the renewal rules, the `If-Match` delete, `obstore.get_range` under a bearer token, which data action a lease request needs, and which role or ACL the release identity holds today. The author sent no request to an Azure host. | release-job Part 6 and its Not confirmed list |
 
@@ -1839,6 +1948,8 @@ says what settles it.
 | The retained set is wrong and a named leaf is deleted | The engine stops on an unreadable root (S42), lists again under the lock, discards a cache file of another catalog or epoch, and Part 3's reachability test compares every deletion with an independent computation. |
 | sdmxlib's final signatures differ from N1 to N3 | The re-read step before Part 3, in the land order. |
 | The build starts long after this revision | The header names every commit read, and the land order's first row is a re-read of them. |
+| The history audit reads 1.7 GB per run, and an expiry can run during it | It is an occasional job, monthly or after an incident; a run that sees `HISTORY` change ends with exit 2 and changes nothing; the runbook keeps it outside the `--expire` runs (R11). |
+| The audit's identity reads embargoed bytes | It runs under the release identity, which already reads them and is on the allowlist (E15, S49). |
 
 ## Detailed implementation plan
 
@@ -1849,7 +1960,7 @@ The build is deferred until Phase 6 has started (the header). The rows are in or
 
 | Row | What | Repository | Waits on |
 |---|---|---|---|
-| A | Re-read this design against the heads of statcatlib, sdmxlib, sdmxlib-rest, the hub and statcat-serve, and revise it where they moved. Record the answers to Q1 and Q2. | statcatlib | the project owner scheduling the build |
+| A | Re-read this design against the heads of statcatlib, sdmxlib, sdmxlib-rest, the hub and statcat-serve, and revise it where they moved. | statcatlib | the project owner scheduling the build |
 | B | Suite design revision 6, with the fourteen hub rows, and its review | hub | A |
 | C | The spec PR with the accepted S rows (N5) | sdmxlib | B |
 | D | Part 1 | statcatlib | C, for S33, S39, S44 and S45 |
@@ -1857,8 +1968,8 @@ The build is deferred until Phase 6 has started (the header). The rows are in or
 | F | sdmxlib's design for N1 to N4, then 0.89.0 (N7) | sdmxlib | C. It can run beside D and E. |
 | G | Read sdmxlib's design and revise E9, E10, E14 and E15 to its names | statcatlib | F |
 | H | Part 3 | statcatlib | E, G; C, for S32, S35, S37, S42, S46 and S47 |
-| I | Part 4 | statcatlib | H; Q1; C, for S40 and S48 |
-| J | Part 5 | statcatlib | I; Q2; C, for S36 and S38 |
+| I | Part 4 | statcatlib | H; C, for S40 and S48 |
+| J | Part 5 | statcatlib | I; C, for S36, S38 and S49 |
 | K | Release-job Part 6, after its re-review against this design (R1 to R12) | statcatlib | J; release-job handoff rows 11 and 12 |
 
 The parts land in the order 1, 2, 3, 4, 5. Part 5's conformance run and its `verify-catalog`
@@ -1870,7 +1981,7 @@ test across a restore need Part 4's restore, and Part 4 needs nothing of Part 5.
 | 2 | `opt_in`, internal; `doctor`'s `catalog.json`, `LOCK` and `HISTORY` items | 0.88 |
 | 3 | The engine, `prune` with expiry, the events | 0.89 |
 | 4 | Restores | 0.89 |
-| 5 | `verify-catalog`'s history checks, `doctor`'s other items, the stage-2 conformance run, public opt-in | 0.89 |
+| 5 | `verify-catalog`'s history checks, locally and over `az://`; `doctor`'s other items; the stage-2 conformance run; public opt-in | 0.89 |
 
 Each part is a branch from `origin/main` and a PR, merged with a merge commit after the gate
 passes. Each updates `docs/upgrading.md`, the `EGM.md` beside the code, `CLAUDE.md` where it
@@ -2053,7 +2164,8 @@ over `MemoryExpiryStorage`.
 | Test | File | Tier | Covers |
 |---|---|---|---|
 | `test_the_order_of_a_restore`, with a recording storage: the segments, `HISTORY` with the new epoch and an unchanged `expired_through`, `catalog.json`, the deletes from the head down, root S + 1 of kind `restore` linked to root S, `CURRENT` | `tests/test_restore.py` (Create) | integration | GH-125 part 3 |
-| `test_restore_refusals`, parametrised: a 1.x catalog; `to` at `expired_through` and below it; `to` below `since_seq - 1`; no root above `to`; a missing root; a missing leaf; under Q1 (a) a live entry with no manifest; a blob storage; a refused lock. Each writes nothing. | `tests/test_restore.py` | unit | S40, O1, Q1 |
+| `test_restore_refusals`, parametrised: a 1.x catalog; `to` at `expired_through` and below it; `to` below `since_seq - 1`; no root above `to`; a missing root; a missing leaf; a blob storage; a refused lock. Each writes nothing. | `tests/test_restore.py` | unit | S40, O1 |
+| `test_a_restore_onto_missing_editions_is_refused`: root S records a `live` edition whose directory `prune` deleted and an `embargoed` one whose `manifest.json` a test edited; the dry run and the real run each raise `ExpiryRefusedError` naming both, and write nothing; a `superseded` entry of S whose directory is gone refuses nothing and appears as `missing` in the report | `tests/test_restore.py` | integration | O12 |
 | `test_the_tombstones`: root S + 1's `retired` holds S's tombstones and one for each edition only a readable discarded root recorded, a product root S does not record included; its change list holds them; `collect_garbage`'s kept set, built by hand, includes them | `tests/test_restore.py`, `tests/test_gc.py` | integration, unit | release-job S25, S48, Goal 8, N4 |
 | `test_unread_roots`: listed in `unread`, deleted, and the report is `incomplete` | `tests/test_restore.py` | integration | O5 |
 | `test_the_report`: a discarded cancellation, a rescheduled `release_at`, a discarded `embargo-change` and root S's own flag each appear | `tests/test_restore.py` | integration | O5, review M3 |
@@ -2070,7 +2182,12 @@ over `MemoryExpiryStorage`.
 ### Part 5: `verify-catalog`, `doctor`, the conformance run and public opt-in
 
 *   **`src/statcatlib/diagnostics.py` (Modify):** `verify_catalog` through `check_history`,
-    `VerifyReport.notes`; `doctor`'s pending, checkpoint, segments, restore and leftover items.
+    `VerifyReport.notes`; `verify_history` and `HistoryReport` (O13); `doctor`'s pending,
+    checkpoint, segments, restore and leftover items.
+*   **`src/statcatlib/cli/__init__.py` (Modify):** `statcat verify-catalog URL` takes a directory
+    or `az://` (`:514-550`), with the lines and exit codes of "Command output and exit codes".
+*   **`tests/_history.py` (Modify):** `copy_to_store(root, location)`, which copies a catalog
+    directory the engine built into a `BlobLocation`, for the tests of `verify_history`.
 *   **`src/statcatlib/admin.py`, `src/statcatlib/cli/__init__.py` (Modify):**
     `CatalogAdmin.opt_in`; `statcat admin opt-in`, beside the other `admin` commands
     (`:826-836`); the `ORPHAN` lines (`:514-550`); `src/statcatlib/cli/EGM.md`.
@@ -2083,7 +2200,12 @@ over `MemoryExpiryStorage`.
     order of upgrades, Windows and network filesystems, and the advice to run the first expiry
     soon after; its `verify-catalog` and `doctor` sections gain the history checks, the `ORPHAN`
     note and the new items. `docs/catalog-format.md` §6 names the checks, and §1 drops the
-    sentence that no command writes `HISTORY`.
+    sentence that no command writes `HISTORY`. `docs/api/release.md` gains "Auditing the
+    Inventory history": `statcat verify-catalog az://…` runs the history checks only, under the
+    release identity from a pod of the release CronJob's template; it reads about 1.7 GB per run
+    on the GH-126 corpus; it is an occasional audit job, monthly or after an incident, kept
+    outside the `--expire` runs and never run on every release; and it needs read and list on
+    `catalog.json`, `inventory/`, `history/` and `CURRENT` only.
 
 | Test | File | Tier | Covers |
 |---|---|---|---|
@@ -2096,6 +2218,10 @@ over `MemoryExpiryStorage`.
 | `test_run_expiry_passes_every_check` against the local writer | `tests/test_inventory_conformance.py` | integration | GH-125's first acceptance item |
 | `statcat admin opt-in`: the dry run's lines, `--apply`, already opted in, `az://`, exit codes | `tests/test_cli_admin.py` | unit | E6, Goal 3 |
 | `test_cuj_1`: opt in, seal across a month boundary with `clock=`, prune with expiry, verify, restore, verify | `tests/test_opt_in.py` | integration | CUJ 1, CUJ 4 |
+| `test_verify_history`, over a `MemoryStore` location holding a copy of an expired catalog: it passes; an edited segment line, a deleted root above `expired_through`, a deleted retained leaf and differing epochs are each one finding; an orphan is a note; a staged file and a leaf are no segment; a recording `_ObjectOps` shows no read and no list outside `catalog.json`, `CURRENT`, `inventory/` and `history/`, and no write or delete | `tests/test_verify_history.py` (Create) | unit | O13, Goal 7 |
+| `test_history_changed_during_the_check`: an `_ObjectOps` that rewrites `HISTORY` after the listing makes `verify_history` raise `CatalogUnreadableError` | `tests/test_verify_history.py` | unit | O13 |
+| `statcat verify-catalog az://…`, with `_azure_location` returning a `MemoryStore` location: each line, exit 0 with a note, exit 1 with a finding, exit 2 with no `catalog.json` | `tests/test_cli_verify_doctor.py` | unit | "Command output and exit codes" |
+| `test_verify_history_on_azurite`: a copy of an expired catalog passes under the stores tier's credential; a deleted root is one finding | `tests/stores/test_verify_history.py` (Create) | stores | O13 |
 
 ### Acceptance map
 
@@ -2116,7 +2242,7 @@ and the other four are GH-125's own.
 | A leaf rewritten after step 6's final check survives the `If-Match` delete | 9 | 3 for the engine; release-job Part 6 for the delete | `test_a_leaf_retagged_after_its_final_check_survives`; its `tests/stores/test_expiry_blob.py` |
 | The pod check with an unreachable pod or a missing `sdmxlib_version` skips expiry, and the release step still runs | | release-job Part 6 | its `tests/test_release_job.py` |
 | Every entry recorded after Phase 5 carries `artefacts` equal to its manifest's records | | done in 0.17.0 | `tests/test_inventory_routing.py` |
-| `verify-catalog` detects an edited segment line, a deleted root, and an entry whose `artefacts` differ from its manifest | 7 | 5; the third is done in 0.17.0 | `test_verify_findings` |
+| `verify-catalog` detects an edited segment line, a deleted root, and an entry whose `artefacts` differ from its manifest | 7 | 5, on a directory and over `az://`; the third is done in 0.17.0 | `test_verify_findings`, `test_verify_history`, `test_verify_history_on_azurite` |
 | `just ci` passes | | every part | the gate |
 
 The goals no acceptance item names map as follows.
@@ -2145,6 +2271,9 @@ refusals), Part 3 (the steps and the state after a kill), Part 4 (restores) and 
 *   Part 5: `statcat verify-catalog` on that corpus after the expiry, with its time recorded,
     and a restore drill on a copy: damage the two newest roots, restore, then run
     `verify-catalog`, a seal and a second expiry.
+*   Before the first audit on the real account: one `statcat verify-catalog az://…` run under
+    the release identity against a copy of the corpus in the GH-134 account, recording its time
+    and bytes, and showing that the identity reads and lists `history/` (S49).
 *   Before release-job Part 6: the engine's tests already run over `MemoryExpiryStorage`. The
     re-review of release-job Part 6 reads R1 to R12 against that storage's methods.
 
@@ -2153,7 +2282,7 @@ refusals), Part 3 (the steps and the state after a kill), Part 4 (restores) and 
 *   Collection of leaves no root names, after a crashed commit or a restore.
 *   A restore to a root at or below `expired_through`, of a 1.x catalog, and one that discards
     no root.
-*   `verify-catalog` and `doctor` over a `BlobLocation` (Q2).
+*   The edition checks of `verify-catalog`, and `doctor`, over a `BlobLocation` (O13).
 *   A lock on Windows, and a lock for S3 and GCS (H21, H23).
 *   A public reader of history segments with E18's replay, with the stage-3 exporter.
 *   `--state-dir` on `prune`, if the bench asks for it.
@@ -2170,12 +2299,12 @@ this revision.
 | B3 | One function, `InventoryWriter.unfinished_restore`, in Part 1 with tests. E4 orders four checks; a base of another epoch is a `StaleBaseError`; `commit` calls the function on its two error paths. The engine, `restore`, `verify_catalog` and `doctor` use it. GC's stop moves to R9. |
 | B4 | The order is 1, 2, 3, 4, 5 with restores as Part 4. The conformance run and the cross-restore `verify-catalog` test are in Part 5, and the land order has no "either order". |
 | M1 | S32 and expiry step 2 use the line only when c - 1 equals `expired_through`, of the head chain's epoch. O1 removes the reused `seq`. |
-| M2 | Q1, with refusal recommended; the report lists the `superseded` and `withdrawn` entries whose directories are gone. |
+| M2 | Revision 2's Q1, with refusal recommended; the project owner chose refusal (O12). The report lists the `superseded` and `withdrawn` entries whose directories are gone. |
 | M3 | O5: no guard here, S34 withdrawn, R9 carries the question. The report has each version's `kind`, `actor`, `reason`, `embargo` and each transition's `release_at`, root S's flag, and `incomplete`. CUJ 4 has one readable root and names `statcat admin cancel`. |
 | M4 | O2: no lock on Windows; E1 and E5 give the guard and the refusals; the `msvcrt` items leave "Not confirmed". |
 | M5 | O7 and S46: the plan and opt-in's verification run before the lock; a run takes at most 1,000 candidates; the Non-functional requirements state the lock's bound and opt-in's cost. |
 | M6 | The Cross-repo contract section says which rows contradict revision 5; each S row has Changes, Repositories and an "Other option"; twelve rows are marked hub; the land order has revision 6 as row B. |
-| M7 | S44 (the retried conflict, gating Part 1), S45 (the lock span) and S46 are new rows. GC's stop and the server restore go to R9. `verify-catalog` over a blob store is Q2. |
+| M7 | S44 (the retried conflict, gating Part 1), S45 (the lock span) and S46 are new rows. GC's stop and the server restore go to R9. `verify-catalog` over a blob store was revision 2's Q2, which O13 answers. |
 | M8 | O1 takes option (d). The exemption, the `restoring` parameter and S43's first half are gone. The remaining restore rows wait for revision 6 (land order rows B and C). |
 | M9 | Each S row gates the first part that codes it; S43 is one rule; Part 1 tests the unfinished-restore refusal. |
 | M10 | O4: `opt_in` is internal from Part 2 and public in Part 5, and the release table says no release opts a catalog in before Parts 3 to 5. |
@@ -2214,7 +2343,7 @@ this revision.
 | m21 | No adoption of `restore` segments; `already`; no `--state-dir` on `prune`. Not applied: `read_range` stays, since O3 puts the header decode in sdmxlib 0.89 and a whole-segment walk reads the full history in every run without the cache. |
 | m22 | Goal 1 names the filesystem. The lock on 1.x catalogs stays (O6), with the option in "Alternatives considered". |
 | m23 | The Azure terms table is gone, and the storage rights are R12; N4's `live_at` is dropped; Handoff has an sdmxlib-rest subsection, which corrects revision 1's R10. |
-| m24 | The answered questions are in "Owner decisions"; Q1 and Q2 give reasons; the Non-goals follow the decisions. |
+| m24 | The answered questions are in "Owner decisions"; revision 2's Q1 and Q2 gave reasons, and O12 and O13 answer them; the Non-goals follow the decisions. |
 | m25 | The sentence after the decision table says which sections hold options; E14 and E12 place the `restore.*` events; the Errors table is complete. |
 | m26 | One basis, the GH-126 corpus at 560 KB a root; every time is labelled an estimate. |
 | m27 | CUJ 2 names the base and both orders; CUJs 2 to 4 give lines and exit status. |
