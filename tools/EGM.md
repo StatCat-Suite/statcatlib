@@ -42,13 +42,17 @@ recipe runs all four with `lint`, `checkfmt` and `typecheck`.
 - `make_v3_fixture.py` (GH-91, LL-D15 of `docs/design/label-lookup.md`):
   writes `tests/fixtures/v3_catalog.tar.xz`, a catalog whose search indexes
   are format 3, for `tests/test_index_v3.py`. It runs under statcatlib
-  0.20.0, the last release that writes format 3:
-  `uv run --no-project --with "statcatlib[search]==0.20.0" python -I
-  tools/make_v3_fixture.py`. The catalog holds product `sealed` (one live
-  edition) and product `open` (a live edition and an unsealed working copy),
-  each dataset titled under `en`, `fr` and `en-t-fr`, indexed with
-  `StubEncoder`, a deterministic 8-dimension encoder, under the model name
-  `stub-encoder`, so the rows carry vectors and `text_sha256`. It imports
+  0.20.0, the last release that writes format 3, from a directory outside
+  the repository so it cannot import this checkout's `src/`:
+  `env -u VIRTUAL_ENV uv run --no-project --isolated --with
+  "statcatlib[search]==0.20.0" python -I /path/to/tools/make_v3_fixture.py`.
+  The catalog holds product `sealed` (one live edition: an SDMX dataflow with
+  a coded dimension, its concepts and a reference-metadata set, and a
+  CKAN-shaped dataset with a publisher, spatial coverage and `en-t-fr` text)
+  and product `open` (a live edition and an unsealed working copy), indexed
+  with `StubEncoder`, a deterministic 8-dimension encoder, under the model
+  name `stub-encoder`, codes and reference metadata included, so the rows
+  carry vectors and `text_sha256`. It imports
   statcatlib and is not stdlib-only.
 - `any_baseline.txt`: the `Any` ratchet baseline (currently `7`) after a
   3-line comment header.

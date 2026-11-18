@@ -22,6 +22,7 @@ from sdmxlib.edition import check_edition, read_manifest
 import statcatlib as sc
 import statcatlib.query as q
 from statcatlib import diagnostics
+from statcatlib._lang_sql import spatial_key
 from statcatlib.bundle import STATCAT_SECTION, check_catalog
 from statcatlib.store.lance import LanceIndex
 
@@ -80,12 +81,29 @@ def test_the_fixture_is_version_3(root: Path) -> None:
     assert read_manifest(edition_dir).extensions[STATCAT_SECTION]["search"]["index_version"] == 3  # pyrefly: ignore[bad-index]
 
 
+_MODES = ("bm25", "vector", "hybrid")
+
+
+def _find(scope: str, text: str, mode: str) -> Callable[[sc.EditionView], object]:
+    """A call of *scope*'s ``find`` for *text* in *mode*."""
+
+    def call(view: sc.EditionView) -> object:
+        return getattr(view, scope).find(text, lang="en", mode=mode)
+
+    return call
+
+
 _SEARCHES: dict[str, Callable[[sc.EditionView], object]] = {
-    "datasets.find": lambda v: v.datasets.find("rainfall", lang="en"),
-    "datasets.find hybrid": lambda v: v.datasets.find("rainfall", lang="en", mode="hybrid"),
-    "codes.find": lambda v: v.codes.find("rainfall", lang="en"),
-    "concepts.find": lambda v: v.concepts.find("rainfall", lang="en"),
-    "reference_metadata.find": lambda v: v.reference_metadata.find("rainfall", lang="en"),
+    **{
+        f"{scope}.find {mode}": _find(scope, text, mode)
+        for scope, text in (
+            ("datasets", "rainfall"),
+            ("codes", "Quebec"),
+            ("concepts", "Rainfall"),
+            ("reference_metadata", "station"),
+        )
+        for mode in _MODES
+    },
     "search": lambda v: v.search("rainfall", lang="en"),
     "QueryBuilder.search": lambda v: v.query(sc.OpenDataset).search("rainfall", lang="en").collect(),
     "QueryBuilder.hybrid_search": lambda v: v.query(sc.OpenDataset).hybrid_search("rainfall", lang="en").collect(),
@@ -114,10 +132,25 @@ def test_table_for_refuses_version_3(root: Path) -> None:
 def test_a_view_opens_and_answers_everything_but_search(root: Path) -> None:
     with sc.Catalog.open(root) as cat:
         view = cat.product("sealed").view()
-        assert [d.identifier for d in view.query(sc.OpenDataset).collect()] == ["rain"]
-        titles = view.query(sc.OpenDataset).select("title", lang="en-t-fr").rows()
-        assert titles == [{"title": "rainfall totals", "title__lang": "en-t-fr"}]
+        assert sorted(d.identifier for d in view.query(sc.BaseDataset).collect()) == ["V3:DF_RAIN(1.0)", "rain"]
+        titles = view.query(sc.OpenDataset).select("title", lang=("en", "en-t-fr")).rows()
+        assert titles == [{"title": "Rainfall totals", "title__lang": "en-t-fr"}]
         assert view.index_layout
+        # Labels and facets.
+        assert view.agent_labels(lang="fr")["STC"] == sc.LocalisedString("Statistique Canada", "fr")
+        spatial = view.facets("spatial")["spatial"]
+        assert set(spatial) == {"https://example.org/region/24", spatial_key({"en": "Ontario", "fr": "Ontario"})}
+        labels = view.spatial_labels(lang=("en", "fr"))
+        assert labels["https://example.org/region/24"] == sc.LocalisedString("Québec", "fr")
+        assert dict(view.code_map("V3:DF_RAIN(1.0)", lang="fr")["GEO"]) == {
+            "ON": sc.LocalisedString("Ontario", "fr"),
+            "QC": sc.LocalisedString("Québec", "fr"),
+        }
+        geo = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=V3:CL_GEO(1.0)"
+        assert view.codelist(geo).batch_labels(["QC"], lang="en-t-fr")["QC"] == sc.LocalisedString(
+            "Quebec province", "en-t-fr"
+        )
+        assert view.query(sc.OpenDataset).filter(q.has_spatial("Québec", lang="fr")).count() == 1
 
 
 def test_the_embargo_reader_opens_version_3(root: Path) -> None:
@@ -126,6 +159,7 @@ def test_the_embargo_reader_opens_version_3(root: Path) -> None:
         (entry,) = [e for e in reader.editions(states=("live",)) if e.product_id == "sealed"]
         view = reader.view("sealed", entry.edition_id)
         assert [d.identifier for d in view.query(sc.OpenDataset).collect()] == ["rain"]
+        assert view.agent_labels(lang="en")["STC"] == sc.LocalisedString("Statistics Canada", "en")
     finally:
         reader.close()
 
@@ -142,16 +176,30 @@ def test_verify_catalog_accepts_version_3(root: Path) -> None:
 
 
 def test_a_working_copy_over_version_3_reuses_its_vectors_and_seals_version_4(root: Path) -> None:
+    """A re-index carries every dataset, code and concept vector and moves ``en-t-fr`` rows into ``en``."""
     model = _StubEncoder()
     with sc.Catalog.create(root, exist_ok=True) as cat:
         wc = cat.product("sealed").working_copy(embedding_model=model)
-        wc.build_index(embedding_model=model, model_name=_MODEL_NAME)
-        assert model.calls == 0, "every carried vector is reused"
-        [hit] = wc.view().datasets.find("rainfall", lang="en").items
-        assert hit.lang == "en"
+        wc.add_language_alternates({"en": ["en-t-fr"]}, source="test")
+        wc.build_index(embedding_model=model, model_name=_MODEL_NAME, embed_codes=True, include_reference_metadata=True)
+        # Every row 0.20 indexed reuses its vector. The one row 0.20 did not
+        # write is encoded: QC's ``en-t-fr`` code label, which 0.20 skipped
+        # because the dataflow has no ``en-t-fr`` title.
+        assert model.calls == 1
+        view = wc.view()
+        assert set(view.index_layout) == {"en", "fr"}
+        [hit] = view.datasets.find("totals", lang="en").items
+        assert hit.lang == "en-t-fr"
+        codes = view.codes.find("province", lang="en").items
+        assert sc.LocalisedString("Quebec province", "en-t-fr") in {h.payload.code_label for h in codes}
+        concepts = view.concepts.find("amount", lang="en", mode="vector").items
+        assert concepts
+        assert any(h.lang == "en-t-fr" for h in view.concepts.find("amount", lang="en").items)
         edition = wc.seal()
     edition_dir = root / "products" / "sealed" / edition.edition_id
     assert _index_version(edition_dir) == 4
+    manifest = json.loads((edition_dir / "search" / "index.json").read_text())
+    assert manifest["language_pairs"] == {"en-t-fr": "en"}
     assert read_manifest(edition_dir).extensions[STATCAT_SECTION]["search"]["index_version"] == 4  # pyrefly: ignore[bad-index]
 
 

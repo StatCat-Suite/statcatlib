@@ -858,11 +858,16 @@ removes.
 ### Commit 14's version 3 fixture and tests
 
 `tools/make_v3_fixture.py` builds `tests/fixtures/v3_catalog.tar.xz` with
-statcatlib 0.20.0 from PyPI (`uv run --no-project --with
-"statcatlib[search]==0.20.0" python -I tools/make_v3_fixture.py`). The catalog
-holds two products: `sealed`, with one live edition whose index is version
-3, built with a deterministic stub encoder under the model name
-`stub-encoder` so its rows carry vectors and `text_sha256`; and `open`, with
+statcatlib 0.20.0 from PyPI, run from outside the repository in an isolated
+environment (`env -u VIRTUAL_ENV uv run --no-project --isolated --with
+"statcatlib[search]==0.20.0" python -I …/tools/make_v3_fixture.py`), so it
+cannot import this checkout's `src/`. The catalog holds two products:
+`sealed`, with one live edition whose index is version 3, holding an SDMX
+dataflow with a coded dimension, its concepts, a reference-metadata set and
+a CKAN-shaped dataset with a publisher, spatial coverage and `en-t-fr` text,
+built with a deterministic stub encoder under the model name `stub-encoder`
+so its dataset, code and concept rows carry vectors and `text_sha256`; and
+`open`, with
 a live edition and an unsealed working copy indexed under 0.20. Its tables
 hold the version 3 columns (`text`, no concept columns). The fixture is
 small (one dataset per product, `en`, `fr` and `en-t-fr` text) and checked
