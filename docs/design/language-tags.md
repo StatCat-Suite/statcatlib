@@ -192,9 +192,11 @@ Decided by the owner:
     An alternate tag may not also be a primary tag. RFC 6497 defines what
     `en-t-fr` means (English transformed from French) but no matching rule,
     and it does not mean machine-translated by itself, so statcatlib applies
-    no pairing rule of its own. `index.json` records a fingerprint of the
-    pairs; a changed set makes `open()` warn and `check_bundle` report until
-    `build_index()` runs (GH-3 rule).
+    no pairing rule of its own. `index.json` records the pairs, and search
+    routes an alternate tag to its primary's table. [Label
+    lookup](label-lookup.md) dropped the fingerprint and the warning this
+    decision first named, because the seal rebuilds the index whenever the pairs
+    change, so a sealed edition never holds stale pairs.
 12. **Search hits report the actual tag** of the matched text, as labels do.
 13. **Tag normalisation lives in sdmxlib** (`normalize_tag()`, applied in
     `InternationalString` and in sdmxlib's writers); statcatlib normalises
