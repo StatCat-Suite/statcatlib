@@ -85,6 +85,7 @@ from statcatlib.store.inventory import (
     NonFastForwardError,
     producer,
 )
+from statcatlib.store.lance import _MANIFEST_VERSION
 from statcatlib.store.store import EditionView, _refuse_statcat_schema_mismatch, _Store
 
 if TYPE_CHECKING:
@@ -1590,7 +1591,8 @@ class WorkingCopy:
         """Seal step 3: bring the search index up to this edition's rows, and drop the carried tables.
 
         The index `build_index` built is kept when ``statcat._meta`` records
-        the fingerprint the tables still have. Otherwise the index is rebuilt:
+        the fingerprint the tables still have and the index is at the
+        version this build writes. Otherwise the index is rebuilt:
         with the last `build_index` call on this object, with the options
         ``statcat._meta`` records (the call was made in another process, and
         the encoder is the working copy's), or with the defaults.
@@ -1604,10 +1606,15 @@ class WorkingCopy:
             return
         cursor = store._cursor()
         built_from = _meta_text(cursor, INDEX_BUILT_FROM_KEY)
+        # A carried or resumed version 3 index is rebuilt even when the
+        # tables have not changed: a version 4 build searches only version 4
+        # (``docs/design/label-lookup.md``, LL-D15).
         current = (
             built_from is not None
             and search_dir is not None
             and (search_dir / "index.json").is_file()
+            and store._lance is not None
+            and store._lance.version == _MANIFEST_VERSION
             and built_from == _tables_fingerprint(cursor)
         )
         if current:

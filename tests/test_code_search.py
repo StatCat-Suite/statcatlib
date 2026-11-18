@@ -92,7 +92,7 @@ class TestCollectCodeTexts:
     def test_text_contains_code_label(self) -> None:
         store = _build_store_with_sdmx()
         items = store._store._collect_code_texts()
-        en_texts = [r["text"] for r in items if r["lang"] == "en"]
+        en_texts = [r["document"] for r in items if r["lang"] == "en"]
         labels = {"Canada", "United States", "Annual", "Monthly"}
         found = {label for label in labels if any(label in t for t in en_texts)}
         assert found == labels
@@ -100,13 +100,13 @@ class TestCollectCodeTexts:
     def test_text_contains_dataset_title(self) -> None:
         store = _build_store_with_sdmx()
         items = store._store._collect_code_texts()
-        en_texts = [r["text"] for r in items if r["lang"] == "en"]
+        en_texts = [r["document"] for r in items if r["lang"] == "en"]
         assert all("Test Dataflow" in t for t in en_texts)
 
     def test_text_contains_dimension_label(self) -> None:
         store = _build_store_with_sdmx()
         items = store._store._collect_code_texts()
-        en_texts = [r["text"] for r in items if r["lang"] == "en"]
+        en_texts = [r["document"] for r in items if r["lang"] == "en"]
         geo_texts = [t for t in en_texts if "Canada" in t]
         assert any("Geography" in t for t in geo_texts)
 
@@ -120,7 +120,7 @@ class TestCollectCodeTexts:
     def test_french_labels(self) -> None:
         store = _build_store_with_sdmx()
         items = store._store._collect_code_texts()
-        fr_texts = [r["text"] for r in items if r["lang"] == "fr"]
+        fr_texts = [r["document"] for r in items if r["lang"] == "fr"]
         assert any("Flux de test" in t for t in fr_texts)
         assert any("Géographie" in t for t in fr_texts)
 

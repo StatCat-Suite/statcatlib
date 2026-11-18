@@ -266,7 +266,7 @@ class TestConceptIndexing:
         ingest_sdmx(store, _make_registry_with_concepts())
         items = store._store._collect_concept_texts()
         assert len(items) > 0
-        labels = {r["text"] for r in items if r["lang"] == "en"}
+        labels = {r["document"] for r in items if r["lang"] == "en"}
         assert any("Gross Domestic Product" in t for t in labels)
         assert any("basket of consumer goods" in t for t in labels)
 

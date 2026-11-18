@@ -96,7 +96,7 @@ def test_collect_row_shape(tmp_path: pathlib.Path) -> None:
     assert row["entity_type"] == "reference_metadata"
     assert row["section_title"] == "Data Quality Topic"
     assert (row["set_urn"] or "").endswith("MS_RG_004(1.0)")
-    assert row["text"].startswith("Data Quality Topic | ")
+    assert row["document"].startswith("Data Quality Topic | ")
 
 
 def test_metadataflow_filter(tmp_path: pathlib.Path) -> None:
@@ -142,11 +142,11 @@ def test_xhtml_section_is_down_converted_to_markdown(tmp_path: pathlib.Path) -> 
     cat.registry.add_all([msd, mdf, ms])
 
     row = next(r for r in cat._store._collect_reference_metadata_texts() if r["lang"] == "en")
-    assert "<table>" not in row["text"]  # tags gone
-    assert "<p>" not in row["text"]
-    assert "| Geo | Rate |" in row["text"]  # table recovered as markdown
-    assert "**Table 1 Rates**" in row["text"]
-    assert "Non-response was 2.0 percent." in row["text"]
+    assert "<table>" not in row["document"]  # tags gone
+    assert "<p>" not in row["document"]
+    assert "| Geo | Rate |" in row["document"]  # table recovered as markdown
+    assert "**Table 1 Rates**" in row["document"]
+    assert "Non-response was 2.0 percent." in row["document"]
 
 
 # ── search ──────────────────────────────────────────────────────────────

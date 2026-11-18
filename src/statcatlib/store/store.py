@@ -35,6 +35,7 @@ from attrs import Factory, define, field
 from sdmxlib import InternationalString, LocalisedString
 from sdmxlib.model.registry import artefact_urn
 
+from statcatlib._errors import IncompatibleCatalogError
 from statcatlib._lang_sql import pick_map, spatial_key_sql
 from statcatlib.labels import Gap, Labels, Langs, MissingTranslationError, RowList, ValueList, _as_langs
 from statcatlib.model.agents import Agent, ContactPoint
@@ -166,20 +167,6 @@ class IncompatibleIndexError(ValueError):
     """
 
 
-class IncompatibleCatalogError(RuntimeError):
-    """Raised when a catalog or an edition is in a layout or at a version this build does not read.
-
-    The cases: a directory holding a statcatlib 0.11 catalog, a 0.72 bundle or
-    other files (`statcatlib.catalog`); an edition whose ``manifest.json`` is
-    not the one the Inventory recorded; a ``statcat`` schema written by a
-    statcatlib with another `schema.SCHEMA_VERSION`
-    (`_refuse_statcat_schema_mismatch`); a ``search/index.json`` at another
-    manifest version (`_refuse_unreadable_index`); and a filesystem without
-    hard links under `Catalog.create`. An edition on another sdmxlib store
-    schema is refused by sdmxlib itself, with `sdmxlib.StoreSchemaError`.
-    """
-
-
 def statcat_schema_mismatch(conn: duckdb.DuckDBPyConnection) -> str | None:
     """The ``statcat`` schema version *conn* records, when it is not this build's.
 
@@ -237,17 +224,19 @@ def _refuse_unreadable_index(search_dir: Path) -> None:
     Args:
         search_dir: The catalog's ``search/`` directory, which may not exist.
 
+    Version 3 opens: only a search over it raises (``docs/design/label-lookup.md``, LL-D15).
+
     Raises:
-        IncompatibleCatalogError: ``index.json`` records a version above
-            ``lance._MANIFEST_VERSION``, or none.
+        IncompatibleCatalogError: ``index.json`` records a version outside
+            ``lance._READABLE_VERSIONS`` (3 and 4), or none.
     """
     found = LanceIndex.unreadable_version(search_dir)
     if found is None:
         return
     msg = (
-        f"this catalog's search index cannot be read by this build of statcatlib: {found}. "
-        f"Open the catalog with that statcatlib release or a later one, or delete {search_dir} "
-        "and rebuild it with build_index()."
+        f"this catalog's search index cannot be read by this build of statcatlib: {found}; it reads index "
+        "versions 3 and 4. Open the catalog with that statcatlib release or a later one; to re-index, open "
+        "a working copy with a statcatlib that reads it, call build_index(), and seal it."
     )
     raise IncompatibleCatalogError(msg)
 
@@ -1382,7 +1371,7 @@ _CODE_ROW_COLUMNS: tuple[str, ...] = (
     "codelist_urn",
     "parent_id",
     "depth",
-    "text",
+    "document",
     "lang",
 )
 
@@ -1392,7 +1381,9 @@ _CONCEPT_ROW_COLUMNS: tuple[str, ...] = (
     "concept_urn",
     "scheme_urn",
     "concept_id",
-    "text",
+    "concept_name",
+    "concept_description",
+    "document",
     "lang",
 )
 
@@ -1425,7 +1416,7 @@ def _row_to_code_hit(
         dimension_label=_tagged(row.get("dimension_label"), lang),
         code_id=row.get("code_id", "") or "",
         code_label=LocalisedString(row.get("code_label", "") or "", lang),
-        document=row.get("text", "") or "",
+        document=row.get("document", "") or "",
         code_urn=row.get("code_urn", "") or "",
         codelist_urn=row.get("codelist_urn", "") or "",
         parent_id=row.get("parent_id", "") or "",
@@ -1442,16 +1433,13 @@ def _row_to_concept_hit(
 ) -> Hit[ConceptHit]:
     """Build a ``Hit[ConceptHit]`` from a LanceDB row dict.
 
-    The Lance ``text`` column is ``"<name> | <description>"``; for the
-    typed payload we split on the first ``" | "`` so callers can get
-    name and description back as separate fields without round-tripping
-    to SQL.
+    The name and description come from the row's ``concept_name`` and
+    ``concept_description`` columns, in the row's tag; ``""`` reads as
+    ``None``.
     """
-    text = row.get("text", "") or ""
-    if " | " in text:
-        name, _, description = text.partition(" | ")
-    else:
-        name, description = text, ""
+    text = row.get("document", "") or ""
+    name = row.get("concept_name") or ""
+    description = row.get("concept_description") or ""
     lang = _row_lang(row)
     payload = ConceptHit(
         concept_urn=row.get("concept_urn", row.get("id", "")) or "",
@@ -1490,7 +1478,7 @@ _REFMETA_ROW_COLUMNS: tuple[str, ...] = (
     "set_urn",
     "attribute_path",
     "section_title",
-    "text",
+    "document",
     "lang",
 )
 
@@ -1516,7 +1504,7 @@ def _row_to_reference_metadata_hit(
         set_urn=row.get("set_urn", "") or "",
         attribute_path=row.get("attribute_path", "") or "",
         section_title=row.get("section_title", "") or "",
-        document=row.get("text", "") or "",
+        document=row.get("document", "") or "",
         chunk_index=chunk_index,
     )
     return Hit(kind="reference_metadata", score=score, payload=payload, lang=_row_lang(row), source=source)
@@ -2393,7 +2381,8 @@ class CodesScope:
         """
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
         codelist_urns = _as_seq(codelist_urn)
         id_filter = list(dataset_ids) if dataset_ids is not None else None
@@ -2401,7 +2390,7 @@ class CodesScope:
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(
+            bm25_rows = lance.bm25_search_rows(
                 query,
                 columns=_CODE_ROW_COLUMNS,
                 lang=lang,
@@ -2417,7 +2406,7 @@ class CodesScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_rows = store._lance.search_rows(
+            vec_rows = lance.search_rows(
                 qvec,
                 columns=_CODE_ROW_COLUMNS,
                 lang=lang,
@@ -2533,14 +2522,15 @@ class ConceptsScope:
         """Search concept rows; returns `Hit` objects wrapping `ConceptHit`."""
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
         scheme_urns = _as_seq(scheme_urn)
 
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(
+            bm25_rows = lance.bm25_search_rows(
                 query,
                 columns=_CONCEPT_ROW_COLUMNS,
                 lang=lang,
@@ -2555,7 +2545,7 @@ class ConceptsScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_rows = store._lance.search_rows(
+            vec_rows = lance.search_rows(
                 qvec,
                 columns=_CONCEPT_ROW_COLUMNS,
                 lang=lang,
@@ -2679,7 +2669,8 @@ class ReferenceMetadataScope:
         """
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
 
         set_urn_filter: list[str] | None = None
@@ -2691,7 +2682,7 @@ class ReferenceMetadataScope:
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(
+            bm25_rows = lance.bm25_search_rows(
                 query,
                 columns=_REFMETA_ROW_COLUMNS,
                 lang=lang,
@@ -2706,7 +2697,7 @@ class ReferenceMetadataScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_rows = store._lance.search_rows(
+            vec_rows = lance.search_rows(
                 qvec,
                 columns=_REFMETA_ROW_COLUMNS,
                 lang=lang,
@@ -2767,13 +2758,14 @@ class DatasetsScope:
         """Search datasets; returns `Hit` objects wrapping `BaseDataset`."""
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
 
         bm25_pairs: list[tuple[str, float, str]] = []
         vec_pairs: list[tuple[str, float, str]] = []
         if mode in ("bm25", "hybrid"):
-            bm25_pairs = store._lance.bm25_search(
+            bm25_pairs = lance.bm25_search(
                 query,
                 lang=lang,
                 limit=oversample if mode == "hybrid" else limit + offset,
@@ -2786,7 +2778,7 @@ class DatasetsScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_pairs = store._lance.search(
+            vec_pairs = lance.search(
                 qvec,
                 lang=lang,
                 limit=oversample if mode == "hybrid" else limit + offset,
@@ -3590,6 +3582,23 @@ class _Store:
     # Semantic & hybrid search
     # ------------------------------------------------------------------
 
+    def _search_index(self) -> LanceIndex | None:
+        """The search index, or ``None`` without one; every search entry point calls it first.
+
+        Called before any early return, so a search over a version 3 index
+        raises whatever its filters match (``docs/design/label-lookup.md``,
+        LL-D15).
+
+        A version 3 index raises `IncompatibleCatalogError`
+        (`LanceIndex.check_searchable`).
+
+        Returns:
+            The index, or ``None`` when lancedb or the index is absent.
+        """
+        if self._lance is not None:
+            self._lance.check_searchable()
+        return self._lance
+
     def _rrf_rank(
         self,
         text: str,
@@ -3908,7 +3917,7 @@ class _Store:
                         "id": ident,
                         "entity_type": "code",
                         "lang": lang,
-                        "text": text,
+                        "document": text,
                         "dimension_id": dim_id or "",
                         "dimension_label": dim_label,
                         "code_id": code_id or "",
@@ -3920,6 +3929,8 @@ class _Store:
                         "concept_urn": "",
                         "scheme_urn": "",
                         "concept_id": "",
+                        "concept_name": "",
+                        "concept_description": "",
                         "set_urn": "",
                         "attribute_path": "",
                         "section_title": "",
@@ -3998,7 +4009,7 @@ class _Store:
                         "id": str(concept_urn),
                         "entity_type": "concept",
                         "lang": lang,
-                        "text": text,
+                        "document": text,
                         "dimension_id": "",
                         "dimension_label": "",
                         "code_id": "",
@@ -4013,6 +4024,8 @@ class _Store:
                         "concept_urn": str(concept_urn),
                         "scheme_urn": str(scheme_urn or ""),
                         "concept_id": str(concept_id or ""),
+                        "concept_name": name,
+                        "concept_description": desc,
                     }
                 )
         return items
@@ -4101,7 +4114,7 @@ class _Store:
                             # Lead with the section title so a section-name
                             # query ("data quality") matches on BM25 even
                             # when the body doesn't repeat the heading.
-                            "text": f"{section_title} | {chunk}",
+                            "document": f"{section_title} | {chunk}",
                             "dimension_id": "",
                             "dimension_label": "",
                             "code_id": "",
@@ -4113,6 +4126,8 @@ class _Store:
                             "concept_urn": "",
                             "scheme_urn": "",
                             "concept_id": "",
+                            "concept_name": "",
+                            "concept_description": "",
                             "set_urn": str(set_urn),
                             "attribute_path": str(attribute_path),
                             "section_title": section_title,
@@ -4137,7 +4152,7 @@ class _Store:
         if not refmeta_rows or self._embedding_model is None:
             return
         if embed_reference_metadata:
-            items = [(r["id"], r["entity_type"], r["lang"], r["text"]) for r in refmeta_rows]
+            items = [(r["id"], r["entity_type"], r["lang"], r["document"]) for r in refmeta_rows]
             encoded = self._batch_encode(items, progress=progress, reuse=reuse)
             for row, enc in zip(refmeta_rows, encoded, strict=True):
                 row["embedding"] = enc.get("embedding")
@@ -4164,7 +4179,7 @@ class _Store:
         if not concept_rows or self._embedding_model is None:
             return
         if embed_concepts:
-            items = [(r["id"], r["entity_type"], r["lang"], r["text"]) for r in concept_rows]
+            items = [(r["id"], r["entity_type"], r["lang"], r["document"]) for r in concept_rows]
             encoded = self._batch_encode(items, progress=progress, reuse=reuse)
             for row, enc in zip(concept_rows, encoded, strict=True):
                 row["embedding"] = enc.get("embedding")
@@ -4663,8 +4678,10 @@ class _Store:
             if include_alt_labels:
                 annotation_types.add(_ALT_LABEL_ANNOTATION_TYPE)
         types = sorted(annotation_types)
+        pairs = dict(self._c.execute("SELECT alternate_tag, primary_tag FROM language_alternate").fetchall())
         self._lance.add_bulk(
             dataset_rows + code_rows + concept_rows + refmeta_rows,
+            pairs=pairs,
             embedding_dim=embedding_dim,
             annotations={"types": types, "fingerprint": annotation_fingerprint(self._c, types)},
         )
@@ -4727,7 +4744,7 @@ class _Store:
                 "id": item[0],
                 "entity_type": item[1],
                 "lang": item[2],
-                "text": item[3],
+                "document": item[3],
                 "dimension_id": "",
                 "dimension_label": "",
                 "code_id": "",
@@ -4739,6 +4756,8 @@ class _Store:
                 "concept_urn": "",
                 "scheme_urn": "",
                 "concept_id": "",
+                "concept_name": "",
+                "concept_description": "",
                 "set_urn": "",
                 "attribute_path": "",
                 "section_title": "",
@@ -4775,7 +4794,7 @@ class _Store:
                     code_rows[i]["id"],
                     code_rows[i]["entity_type"],
                     code_rows[i]["lang"],
-                    code_rows[i]["text"],
+                    code_rows[i]["document"],
                 )
                 for i in encode_idx
             ]
@@ -4910,7 +4929,7 @@ class _Store:
                 "id": item[0],
                 "entity_type": item[1],
                 "lang": item[2],
-                "text": item[3],
+                "document": item[3],
                 "embedding": vec,
                 "text_sha256": h,
                 "dimension_id": "",
@@ -4924,6 +4943,8 @@ class _Store:
                 "concept_urn": "",
                 "scheme_urn": "",
                 "concept_id": "",
+                "concept_name": "",
+                "concept_description": "",
                 "set_urn": "",
                 "attribute_path": "",
                 "section_title": "",
@@ -6121,7 +6142,7 @@ class _Store:
                 a kind that ranks poorly overall still gets considered.
         """
         lang = sdmxlib.normalize_tag(lang)
-        if self._lance is None:
+        if self._search_index() is None:
             return SearchResult(items=[], total=0, offset=offset)
         # Each kind delegates to its typed scope's bm25 ranking; vector
         # evidence is opt-in per-scope (narrow to one kind, mode="hybrid").
@@ -6545,7 +6566,8 @@ class _Store:
         if lang is None:
             msg = "search needs lang, the tag whose table answers it"
             raise ValueError(msg)
-        if self._lance is None:
+        lance = self._search_index()
+        if lance is None:
             return _QueryResult(total=0, rows=[], scores={})
 
         id_filter: list[str] | None = None
@@ -6578,7 +6600,7 @@ class _Store:
             scores = {i: score for i, (score, _) in rrf_scores.items()}
             langs = {i: tag for i, (_, tag) in rrf_scores.items()}
         else:
-            bm25_hits = self._lance.bm25_search(
+            bm25_hits = lance.bm25_search(
                 text,
                 lang=lang,
                 limit=pool,

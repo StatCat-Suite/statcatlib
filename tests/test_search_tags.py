@@ -159,3 +159,93 @@ def test_a_code_row_exists_for_each_tag_its_label_holds(tmp_path: Path) -> None:
     [hit] = s.codes.find("Canada", lang="fr").items
     assert hit.payload.code_label == sc.LocalisedString("Canada (fr)", "fr")
     assert s.codes.find("Canada", lang="en").items == []
+
+
+def _paired_store(tmp_path: Path) -> ScratchStore:
+    s = open_scratch(tmp_path / "catalog")
+    s.add_language_alternates({"en": ["en-t-fr"]}, source="test")
+    s.put(
+        sc.OpenDataset(
+            identifier="ckan",
+            title=sc.InternationalString.of({"en-t-fr": "Population estimates", "fr": "Estimations de la population"}),
+            description=sc.InternationalString.of({"en": "Annual counts", "fr": "Comptes annuels"}),
+        )
+    )
+    s.build_index()
+    return s
+
+
+def test_an_alternate_tag_is_indexed_in_its_primary_table(tmp_path: Path) -> None:
+    s = _paired_store(tmp_path)
+    assert set(s.index_layout) == {"en", "fr"}
+    [hit] = s.datasets.find("population", lang="en").items
+    assert hit.lang == "en-t-fr"
+    [hit] = s.datasets.find("annual", lang="en").items
+    assert hit.lang == "en"
+    # An alternate reads its primary's table.
+    assert [h.lang for h in s.datasets.find("population", lang="en-t-fr").items] == ["en-t-fr"]
+
+
+def test_the_index_records_its_pairs(tmp_path: Path) -> None:
+    s = _paired_store(tmp_path)
+    index = s._store._lance
+    assert index is not None
+    assert index.language_pairs == {"en-t-fr": "en"}
+    assert index.version == 4
+
+
+def test_a_code_held_under_a_pair_gives_one_hit_per_dataset(tmp_path: Path) -> None:
+    geo = Codelist(
+        id="CL_GEO",
+        maintainer="TEST",
+        name=sc.InternationalString(en="Geography"),
+        codes=[Code(id="CA", name=sc.InternationalString.of({"en": "Canada", "en-t-fr": "Canada"}))],
+    )
+    dsd = DataStructure(
+        id="DSD",
+        maintainer="TEST",
+        name=sc.InternationalString(en="D"),
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=geo)],
+    )
+    registry = InMemoryRegistry()
+    for obj in (
+        geo,
+        dsd,
+        Dataflow(id="DF1", maintainer="TEST", name=sc.InternationalString(en="One"), structure=dsd),
+        Dataflow(id="DF2", maintainer="TEST", name=sc.InternationalString(en="Two"), structure=dsd),
+    ):
+        registry.add(obj)
+    s = open_scratch(tmp_path / "catalog")
+    s.add_language_alternates({"en": ["en-t-fr"]}, source="test")
+    sc.ingest_sdmx(s, registry)
+    s.build_index()
+    hits = s.codes.find("Canada", lang="en").items
+    assert sorted(h.payload.dataset_id for h in hits) == ["TEST:DF1(1.0)", "TEST:DF2(1.0)"]
+    # Each code has two rows in the table; a page of one is still full, and a
+    # page of two holds both datasets.
+    assert len(s.codes.find("Canada", lang="en", limit=1).items) == 1
+    page = s.codes.find("Canada", lang="en", limit=2).items
+    assert {h.payload.dataset_id for h in page} == {"TEST:DF1(1.0)", "TEST:DF2(1.0)"}
+
+
+def test_add_routes_an_alternate_to_its_primary_table(tmp_path: Path) -> None:
+    s = _paired_store(tmp_path)
+    index = s._store._lance
+    assert index is not None
+    row = {"id": "extra", "entity_type": "open", "lang": "en-t-fr", "document": "glacier melt"}
+    index.add([row])
+    assert set(index.describe()) == {"en", "fr"}
+    assert [i for i, _, tag in index.bm25_search("glacier", lang="en")] == ["extra"]
+
+
+def test_catalog_admin_reports_the_recorded_lifecycle(tmp_path: Path) -> None:
+    root = tmp_path / "cat"
+    with sc.Catalog.create(root) as cat:
+        wc = cat.product("f").working_copy(lifecycle="final")
+        wc.put(
+            sc.OpenDataset(identifier="d", title=sc.InternationalString(en="D"), description=sc.InternationalString())
+        )
+        wc.seal()
+    admin = sc.CatalogAdmin.open(root)
+    assert admin.lifecycle("f") == "final"
+    assert admin.lifecycle("nothing") is None

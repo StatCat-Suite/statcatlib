@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from sdmxlib import normalize_tag, tag_alias
 
+from statcatlib._errors import IncompatibleCatalogError
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -64,14 +66,19 @@ _TABLE_PREFIX = "search_"
 #: replaces this file in a single atomic move; until that lands, every query
 #: still reads the previous tables.
 _MANIFEST_FILE = "index.json"
-#: The manifest version this build writes and reads. Bump it only when an
-#: existing field changes meaning or shape. Version 2 changed each
-#: ``languages`` entry; version 3 names tables by edition id in place of a
-#: generation number (Phase 2a). A new field does not bump it, because older
-#: readers ignore fields they do not know. A reader refuses any other version
-#: (GH-40): an index of version 2 or lower exists only in a layout statcatlib
-#: 0.12 refuses, and a higher one needs a newer statcatlib.
-_MANIFEST_VERSION = 3
+#: The manifest version this build writes, and the only one it searches. Bump
+#: it only when an existing field changes meaning or shape. Version 2 changed
+#: each ``languages`` entry; version 3 names tables by edition id in place of a
+#: generation number (Phase 2a); version 4 indexes an alternate tag's text in
+#: its primary's table, records ``language_pairs``, and renames the ``text``
+#: column ``document`` beside the new concept columns
+#: (``docs/design/label-lookup.md``, LL-D9, LL-D15).
+_MANIFEST_VERSION = 4
+#: The manifest versions this build opens. Version 3 stays readable for
+#: everything but search, so an edition sealed by statcatlib 0.20 opens and
+#: re-indexes; a search over it raises (`LanceIndex.check_searchable`). A
+#: reader refuses any other version (GH-40).
+_READABLE_VERSIONS = frozenset({3, 4})
 
 #: Rows *carrying a vector* that a language's table needs before an ANN
 #: index is worth building. IVF-PQ needs this many to train at all, and
@@ -246,13 +253,16 @@ _EMBEDDING_COLUMN = "embedding"
 #: texts whose hash is missing. A row without a vector holds NULL here.
 _HASH_COLUMN = "text_sha256"
 
+#: The column holding a row's document, the full-text and embedding target.
+_DOCUMENT_COLUMN = "document"
+
 #: Columns every row carries, whatever entity kind it describes.
-#: ``text`` is the FTS target; ``lang`` is its BCP-47 language.
+#: ``document`` is the FTS target; ``lang`` is the stored tag of its text.
 _BASE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("id", "string"),
     ("entity_type", "string"),
     ("lang", "string"),
-    ("text", "string"),
+    (_DOCUMENT_COLUMN, "string"),
 )
 
 #: Entity-specific columns. Every row carries every one of these — the
@@ -272,6 +282,8 @@ _EXTENSION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("concept_urn", "string"),
     ("scheme_urn", "string"),
     ("concept_id", "string"),
+    ("concept_name", "string"),
+    ("concept_description", "string"),
     # reference-metadata rows
     ("set_urn", "string"),
     ("attribute_path", "string"),
@@ -331,6 +343,7 @@ class _Manifest(TypedDict):
     written_by: str
     edition_id: str
     languages: dict[str, LanguageLayout]
+    language_pairs: dict[str, str]
     annotations: NotRequired[IndexAnnotations]
 
 
@@ -358,7 +371,7 @@ class SearchRow(TypedDict):
     id: str
     entity_type: str
     lang: str
-    text: str
+    document: str
     # code rows
     dimension_id: NotRequired[str | None]
     dimension_label: NotRequired[str | None]
@@ -372,6 +385,8 @@ class SearchRow(TypedDict):
     concept_urn: NotRequired[str | None]
     scheme_urn: NotRequired[str | None]
     concept_id: NotRequired[str | None]
+    concept_name: NotRequired[str | None]
+    concept_description: NotRequired[str | None]
     # reference-metadata rows
     set_urn: NotRequired[str | None]
     attribute_path: NotRequired[str | None]
@@ -657,6 +672,30 @@ def _dedupe_by_id(
     return [(ident, *best[ident]) for ident in order]
 
 
+def _dedupe_entities[R: SearchRow](rows: Iterable[R]) -> list[R]:
+    """Keep each entity's best-ranked row, in rank order.
+
+    With language pairs one table holds a row per tag for an entity, and the
+    rows differ only in their tag and text. An entity is its row identity
+    without the tag: a code is ``(id, dimension_id, code_urn or code_id)``,
+    as one code row exists per dataset and dimension; a concept its
+    ``concept_urn``; a reference-metadata chunk its ``id``.
+    """
+    seen: set[tuple[object, ...]] = set()
+    out: list[R] = []
+    for row in rows:
+        key = (
+            row.get("id"),
+            row.get("dimension_id"),
+            row.get("code_urn") or row.get("code_id"),
+            row.get("concept_urn"),
+        )
+        if key not in seen:
+            seen.add(key)
+            out.append(row)
+    return out
+
+
 def _entity_type_clause(entity_type: str | Sequence[str] | None) -> str:
     """Build a SQL fragment constraining ``entity_type``, or empty string."""
     if entity_type is None:
@@ -724,7 +763,7 @@ def _build_match_query(
     cleaned = _strip_stopwords(text, lang)
     exact = MatchQuery(
         query=cleaned,
-        column="text",
+        column=_DOCUMENT_COLUMN,
         operator=fts_op,
         boost=1.0,
         fuzziness=0,
@@ -736,7 +775,7 @@ def _build_match_query(
         return exact
     fuzzy = MatchQuery(
         query=cleaned,
-        column="text",
+        column=_DOCUMENT_COLUMN,
         operator=fts_op,
         boost=1.0,
         fuzziness=fuzziness,
@@ -820,7 +859,7 @@ class _LanguageIndex:
         except Exception:  # noqa: BLE001
             return False
         return any(
-            i.index_type == "FTS" and list(i.columns) == ["text"] and not getattr(i, "num_unindexed_rows", 0)
+            i.index_type == "FTS" and list(i.columns) == [_DOCUMENT_COLUMN] and not getattr(i, "num_unindexed_rows", 0)
             for i in indices
         )
 
@@ -949,7 +988,7 @@ class _LanguageIndex:
         stemmer = _stemmer_for(self._lang)
         with contextlib.suppress(Exception):
             self._tbl.create_index(
-                "text",
+                _DOCUMENT_COLUMN,
                 replace=True,
                 config=FTS(
                     language=stemmer or "English",
@@ -1087,12 +1126,16 @@ class LanceIndex:
         self._edition_id = edition_id
         self._version: int | None = None
         self._annotations: IndexAnnotations | None = None
+        self._pairs: dict[str, str] = {}
 
         names = set(self._db.list_tables().tables)
         manifest = self._read_manifest()
         if manifest is not None:
             self._version = _as_int(manifest.get("version")) or None
             self._annotations = _as_annotations(manifest.get("annotations"))
+            pairs = manifest.get("language_pairs")
+            if isinstance(pairs, Mapping):
+                self._pairs = {str(alt): str(primary) for alt, primary in pairs.items()}
             languages = manifest.get("languages")
             entries = languages.items() if isinstance(languages, Mapping) else ()
             for lang, entry in entries:
@@ -1131,15 +1174,15 @@ class LanceIndex:
             path: The ``search/`` directory.
 
         Returns:
-            ``None`` when the manifest records `_MANIFEST_VERSION`, or there is
-            no readable manifest; otherwise the version it records and the
-            statcatlib that wrote it.
+            ``None`` when the manifest records a version in
+            `_READABLE_VERSIONS`, or there is no readable manifest; otherwise
+            the version it records and the statcatlib that wrote it.
         """
         manifest = _load_manifest(Path(path))
         if manifest is None:
             return None
         version = manifest.get("version")
-        if isinstance(version, int) and not isinstance(version, bool) and version == _MANIFEST_VERSION:
+        if isinstance(version, int) and not isinstance(version, bool) and version in _READABLE_VERSIONS:
             return None
         recorded = f"version {version}" if version is not None else "no version"
         written_by = manifest.get("written_by")
@@ -1147,8 +1190,35 @@ class LanceIndex:
 
     @property
     def version(self) -> int | None:
-        """The manifest version ``index.json`` records; ``None`` without a manifest."""
+        """The manifest version ``index.json`` records; ``None`` without a manifest.
+
+        Writing the manifest sets it to `_MANIFEST_VERSION`, so an index
+        rebuilt over a carried version 3 index reports 4.
+        """
         return self._version
+
+    @property
+    def language_pairs(self) -> dict[str, str]:
+        """Each alternate tag the index routes to its primary's table, ``{alternate: primary}``."""
+        return dict(self._pairs)
+
+    def check_searchable(self) -> None:
+        """Refuse a search over a version 3 index, naming the fix.
+
+        Version 3 opens for everything but search (LL-D15): its tables hold
+        the ``text`` column and no language pairs, so a search would read the
+        wrong columns.
+
+        Raises:
+            IncompatibleCatalogError: The index is version 3.
+        """
+        if self._version == 3:
+            msg = (
+                f"the search index in {self._path} is format 3, written by statcatlib 0.20 or earlier, and this "
+                f"build searches format {_MANIFEST_VERSION} only; re-index the product: open a working copy, "
+                "call build_index(), and seal it"
+            )
+            raise IncompatibleCatalogError(msg)
 
     def _read_manifest(self) -> dict[str, object] | None:
         """Return the parsed manifest, or ``None`` when absent or corrupt.
@@ -1178,6 +1248,7 @@ class LanceIndex:
             "version": _MANIFEST_VERSION,
             "written_by": _statcatlib_version(),
             "edition_id": self._writer(),
+            "language_pairs": dict(sorted(self._pairs.items())),
             "languages": {
                 lang: {
                     "table": index.name,
@@ -1202,17 +1273,28 @@ class LanceIndex:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         # Path.replace is os.replace: atomic on POSIX and Windows alike.
         tmp.replace(self._path / _MANIFEST_FILE)
+        self._version = _MANIFEST_VERSION
 
     # -- language routing ----------------------------------------------
 
     def _for(self, lang: str) -> _LanguageIndex | None:
         """Return the index serving *lang*, or ``None`` if nothing does.
 
+        An alternate tag routes to its primary's table (``language_pairs``).
         A malformed *lang* raises `sdmxlib.InvalidTagError`, and one that is
         not a ``str`` (a sequence of tags included) raises `TypeError`: a
-        search reads one table, with one stemmer.
+        search reads one table, with one stemmer. A version 3 index raises
+        `IncompatibleCatalogError` (`check_searchable`).
         """
-        return self._langs.get(tag_alias(lang))
+        self.check_searchable()
+        tag = normalize_tag(lang)
+        return self._langs.get(tag_alias(self._pairs.get(tag, tag)))
+
+    def _oversample(self, lang: str, limit: int) -> int:
+        """*limit* times one plus the number of alternates that share *lang*'s table."""
+        tag = normalize_tag(lang)
+        primary = self._pairs.get(tag, tag)
+        return limit * (1 + sum(1 for p in self._pairs.values() if p == primary))
 
     def _writer(self) -> str:
         """The edition this index writes tables for.
@@ -1239,7 +1321,7 @@ class LanceIndex:
         return sorted(self._langs)
 
     def table_for(self, lang: str) -> lancedb.table.Table | None:
-        """Return the Lance table serving *lang*, or ``None``.
+        """Return the Lance table serving *lang*, or ``None``; a version 3 index raises.
 
         The escape hatch for inspecting a single language's corpus
         directly — index introspection and tests. Callers doing ordinary
@@ -1310,30 +1392,36 @@ class LanceIndex:
     # -- writes --------------------------------------------------------
 
     @staticmethod
-    def _by_language(rows: list[SearchRow]) -> dict[str, tuple[str, list[SearchRow]]]:
+    def _by_language(rows: list[SearchRow], pairs: Mapping[str, str]) -> dict[str, tuple[str, list[SearchRow]]]:
         """Group *rows* by table: ``alias -> (tag, rows)``.
 
-        The alias keys `_langs` and ``index.json``; the tag names the table
-        (`_table_name`). A row's ``lang`` is normalised, so a malformed or
-        empty one raises `sdmxlib.InvalidTagError`.
+        A row goes to the table of its primary tag, ``pairs.get(lang, lang)``,
+        and keeps its own ``lang``. The alias keys `_langs` and ``index.json``;
+        the tag names the table (`_table_name`). A row's ``lang`` is
+        normalised, so a malformed or empty one raises
+        `sdmxlib.InvalidTagError`.
         """
         grouped: dict[str, tuple[str, list[SearchRow]]] = {}
         for row in rows:
             tag = normalize_tag(row.get("lang", "") or "")
-            grouped.setdefault(tag_alias(tag), (tag, []))[1].append(row)
+            primary = pairs.get(tag, tag)
+            grouped.setdefault(tag_alias(primary), (primary, []))[1].append(row)
         return grouped
 
     def add(self, rows: list[SearchRow], *, embedding_dim: int | None = None) -> None:
         """Upsert rows into their languages' tables, creating any that are new.
 
         Args:
-            rows: Row dicts, each carrying its own ``lang``.
+            rows: Row dicts, each carrying its own ``lang``. Every row of an
+                ``id`` comes in one call: a row replaces its ``id``'s rows in
+                its table. An alternate tag's rows go to its primary's table
+                (``language_pairs``).
             embedding_dim: See `add_bulk`.
         """
         if not rows:
             return
         added_language = False
-        for lang, (tag, lang_rows) in self._by_language(rows).items():
+        for lang, (tag, lang_rows) in self._by_language(rows, self._pairs).items():
             index = self._langs.get(lang)
             if index is None:
                 # A language seen for the first time needs a table *and* a
@@ -1351,6 +1439,7 @@ class LanceIndex:
         self,
         rows: list[SearchRow],
         *,
+        pairs: Mapping[str, str],
         embedding_dim: int | None = None,
         annotations: IndexAnnotations | None = None,
     ) -> None:
@@ -1365,6 +1454,9 @@ class LanceIndex:
 
         Args:
             rows: Row dicts to load, replacing the index's contents.
+            pairs: The language pairs, ``{alternate: primary}``, normalised:
+                an alternate tag's rows go to its primary's table, and
+                ``index.json`` records the pairs for routing.
             embedding_dim: Width of the embedding vectors, taken from the
                 embedding model. Supply it whenever a model is configured:
                 deriving the width from the rows cannot tell "no model" from
@@ -1377,7 +1469,9 @@ class LanceIndex:
             annotations: The annotations *rows* were built from. Recorded in
                 the same manifest write that commits the new tables, so
                 the two cannot disagree after a crash. With no *rows*, no
-                table is built and the manifest records them alone.
+                table is built and the manifest records them alone; over a
+                carried version 3 index the carried tables are dropped first,
+                so no version 4 manifest names a version 3 table.
 
         Raises:
             Exception: Whatever the underlying build raised. Every table
@@ -1385,10 +1479,12 @@ class LanceIndex:
                 exception propagates, so a failed rebuild leaves the previous
                 tables whole rather than a half-written set.
         """
+        self._pairs = dict(pairs)
         if not rows:
+            dropped = self._drop_version_3()
             # No tables to build, but the annotations are still recorded: an
             # edition with no rows seals with a fingerprint like any other.
-            if annotations is not None:
+            if annotations is not None or dropped:
                 self._annotations = annotations
                 self._write_manifest(self._langs)
             return
@@ -1396,7 +1492,7 @@ class LanceIndex:
         # Reclaim what an earlier rebuild left behind (GH-41), so the sealed
         # edition holds only the tables the manifest names.
         self.discard_orphans()
-        grouped = self._by_language(rows)
+        grouped = self._by_language(rows, self._pairs)
         names = {_table_name(tag, edition_id) for tag, _ in grouped.values()}
         # A rebuild in the same edition reuses its table names: the tables it
         # replaces are dropped first, so the new ones can take the names. An
@@ -1433,6 +1529,21 @@ class LanceIndex:
         for name in superseded:
             with contextlib.suppress(Exception):
                 self._db.drop_table(name)
+
+    def _drop_version_3(self) -> bool:
+        """Drop a carried version 3 index's tables, so the next manifest names none of them.
+
+        A manifest naming a version 3 table would be read as version 4.
+
+        Returns:
+            Whether the index was version 3.
+        """
+        if self._version != 3:
+            return False
+        for index in self._langs.values():
+            index.drop()
+        self._langs = {}
+        return True
 
     def drop_carried(self) -> bool:
         """Drop every table another edition wrote, so the index holds this edition's tables only.
@@ -1596,10 +1707,10 @@ class LanceIndex:
         index = self._for(lang)
         if index is None:
             return []
-        return index.bm25(
+        rows = index.bm25(
             text,
             columns=columns,
-            limit=limit,
+            limit=self._oversample(lang, limit),
             operator=operator,
             fuzziness=fuzziness,
             filters=[
@@ -1610,6 +1721,7 @@ class LanceIndex:
                 _in_clause("set_urn", set_urn_filter),
             ],
         )
+        return _dedupe_entities(rows)[:limit]
 
     # -- semantic (vector) search --------------------------------------
 
@@ -1687,10 +1799,10 @@ class LanceIndex:
         index = self._for(lang)
         if index is None:
             return []
-        return index.vector(
+        rows = index.vector(
             embedding,
             columns=columns,
-            limit=limit,
+            limit=self._oversample(lang, limit),
             filters=[
                 _entity_type_clause(entity_type),
                 _in_clause("id", id_filter),
@@ -1699,6 +1811,7 @@ class LanceIndex:
                 _in_clause("set_urn", set_urn_filter),
             ],
         )
+        return _dedupe_entities(rows)[:limit]
 
     # -- index management ----------------------------------------------
 
