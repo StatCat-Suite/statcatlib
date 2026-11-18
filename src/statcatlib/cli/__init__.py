@@ -408,11 +408,10 @@ def build_index(
     chosen model, prefixes, embedding dimensionality, and row counts, so
     that a query-side client can call
     `statcatlib.EditionView.check_index_compatible` to validate its encoder.
-    The working copy stays unsealed. `statcatlib.WorkingCopy.seal` rebuilds
-    the index with the arguments of the last ``build_index`` call made on
-    that working copy object, so a seal in a later process rebuilds with the
-    defaults: call ``wc.build_index(...)`` with these options before
-    ``wc.seal()`` to seal this index.
+    The working copy stays unsealed, and records these options in its
+    ``statcat._meta``. A later `statcatlib.WorkingCopy.seal` keeps this
+    index when no row has changed since, and otherwise rebuilds it with
+    these options and the encoder passed to ``working_copy(embedding_model=)``.
     """
     logging.basicConfig(
         level=logging.INFO,

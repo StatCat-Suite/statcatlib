@@ -749,9 +749,10 @@ def _settle_kind(
 ) -> Kind:
     """`WorkingCopy._start`'s fourth step: the working copy's kind, recorded in ``statcat._meta.product_kind``.
 
-    A new edition takes *wanted*, or ``data``, and drops the ``partial_of``
-    and ``fill_in_progress`` keys the copied ``metadata.duckdb`` carries from
-    the previous edition. A resumed one keeps the kind it was started with.
+    A new edition takes *wanted*, or ``data``, and drops the ``partial_of``,
+    ``fill_in_progress``, ``index_options`` and ``index_built_from`` keys the
+    copied ``metadata.duckdb`` carries from the previous edition. A resumed
+    one keeps the kind it was started with.
 
     Args:
         cursor: A cursor on the edition's ``statcat`` schema.
@@ -780,7 +781,9 @@ def _settle_kind(
             raise InventoryRuleError(msg, rule="kind", product=product_id, edition=edition_id)
         resolved = wanted or stored or "data"
     else:
-        cursor.execute("DELETE FROM _meta WHERE key IN ('partial_of', 'fill_in_progress')")
+        cursor.execute(
+            "DELETE FROM _meta WHERE key IN ('partial_of', 'fill_in_progress', 'index_options', 'index_built_from')"
+        )
     cursor.execute("INSERT OR REPLACE INTO _meta VALUES ('product_kind', $kind)", {"kind": resolved})
     return resolved
 
@@ -789,6 +792,10 @@ def _settle_kind(
 PARTIAL_OF_KEY = "partial_of"
 #: The ``statcat._meta`` key `WorkingCopy.fill_dataflows` holds while sdmxlib fills (D3).
 FILL_IN_PROGRESS_KEY = "fill_in_progress"
+#: The ``statcat._meta`` key holding the options of the last `WorkingCopy.build_index` call: JSON (GH-108).
+INDEX_OPTIONS_KEY = "index_options"
+#: The ``statcat._meta`` key holding `_tables_fingerprint` of the tables the last index was built from (GH-108).
+INDEX_BUILT_FROM_KEY = "index_built_from"
 
 
 def _meta_text(cursor: duckdb.DuckDBPyConnection, key: str) -> str | None:
@@ -804,6 +811,86 @@ def recorded_cuts(cursor: duckdb.DuckDBPyConnection) -> dict[str, str]:
         return {}
     loaded: dict[str, str] = json.loads(text)
     return loaded
+
+
+def _tables_fingerprint(cursor: duckdb.DuckDBPyConnection) -> str:
+    """The SHA-256 of every table in the edition's ``metadata.duckdb`` but ``statcat._meta``.
+
+    Each table contributes its row count and the sum of DuckDB's ``hash`` of
+    its rows, so the value changes when any row is added, removed or changed,
+    in any order. ``statcat._meta`` is left out: the working copy writes its
+    own state there, and the search index reads none of it.
+
+    Args:
+        cursor: A cursor on the edition's catalog.
+
+    Returns:
+        The hex digest.
+    """
+    tables = cursor.execute(
+        """
+        SELECT table_schema, table_name FROM information_schema.tables
+        WHERE table_catalog = current_database() AND table_type = 'BASE TABLE'
+        ORDER BY table_schema, table_name
+        """
+    ).fetchall()
+    digest = hashlib.sha256()
+    for schema, table in tables:
+        if (schema, table) == ("statcat", "_meta"):
+            continue
+        name = ".".join('"' + part.replace('"', '""') + '"' for part in (schema, table))
+        row = _catalog_schema.first_row(
+            cursor.execute(f"SELECT count(*), sum(hash(t)::HUGEINT) FROM {name} AS t").fetchall()  # noqa: S608
+        )
+        count, total = (0, None) if row is None else row
+        digest.update(f"{schema}.{table}\t{count}\t{total}\n".encode())
+    return digest.hexdigest()
+
+
+def _build_recorded(
+    store: _Store,
+    options: str,
+    embedding_model: EmbeddingModel | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """Build the index with *options*, and record them and `_tables_fingerprint` in ``statcat._meta``.
+
+    The fingerprint is removed before the build and written after it, so an
+    index whose build stopped part way is never taken as current.
+
+    Args:
+        store: The working copy's store.
+        options: The JSON object of options `WorkingCopy.build_index` was
+            given; ``{}`` for the defaults.
+        embedding_model: The encoder; the store's when ``None``.
+        progress: Called with ``(current, total)`` while texts are encoded.
+
+    Returns:
+        The number of datasets indexed.
+    """
+    from statcatlib.store.store import CodelistIndexPolicy, ReferenceMetadataBlend  # noqa: PLC0415
+
+    kwargs = json.loads(options)
+    kwargs["codelist_policies"] = [CodelistIndexPolicy(**p) for p in kwargs.get("codelist_policies", [])]
+    kwargs["reference_metadata_blends"] = [
+        ReferenceMetadataBlend(**b) for b in kwargs.get("reference_metadata_blends", [])
+    ]
+    for key in ("context_annotation_types", "exclude_annotation_types"):
+        # None takes the store's default annotation type.
+        if key in kwargs and kwargs[key] is None:
+            del kwargs[key]
+    cursor = store._cursor()
+    cursor.execute("DELETE FROM _meta WHERE key = $key", {"key": INDEX_BUILT_FROM_KEY})
+    n = store.build_index(embedding_model, progress, **kwargs)
+    with store.transaction():
+        cursor.execute(
+            "INSERT OR REPLACE INTO _meta VALUES ($key, $value)", {"key": INDEX_OPTIONS_KEY, "value": options}
+        )
+        cursor.execute(
+            "INSERT OR REPLACE INTO _meta VALUES ($key, $value)",
+            {"key": INDEX_BUILT_FROM_KEY, "value": _tables_fingerprint(cursor)},
+        )
+    return n
 
 
 def _held_partials(cursor: duckdb.DuckDBPyConnection) -> set[str]:
@@ -1392,8 +1479,12 @@ class WorkingCopy:
     ) -> int:
         """Build the search index now, so `view` can search before the seal.
 
-        `seal` rebuilds the index from the edition's rows with the arguments
-        of the last call here (the defaults when there was none), so the
+        The call records its options, all but *embedding_model* and
+        *progress*, in ``statcat._meta.index_options``, and a fingerprint of
+        the edition's tables in ``statcat._meta.index_built_from``, so a
+        `seal` in another process reads them. `seal` keeps the index when no
+        table has changed since, and otherwise rebuilds it from the edition's
+        rows with these options (the defaults when there was no call), so the
         sealed index always holds the sealed rows.
 
         With *model_name*, a text whose `text_sha256` (model name, document
@@ -1434,35 +1525,36 @@ class WorkingCopy:
             The number of datasets indexed.
         """
         store = self._live()
-        extra: dict[str, Sequence[str]] = {}
-        if context_annotation_types is not None:
-            extra["context_annotation_types"] = context_annotation_types
-        if exclude_annotation_types is not None:
-            extra["exclude_annotation_types"] = exclude_annotation_types
+        options: dict[str, object] = {
+            "include_codes": include_codes,
+            "embed_codes": embed_codes,
+            "max_codes_per_codelist": max_codes_per_codelist,
+            "codelist_urns": None if codelist_urns is None else list(codelist_urns),
+            "codelist_policies": [{"urns": list(p.urns), "mode": p.mode} for p in codelist_policies],
+            "include_alt_labels": include_alt_labels,
+            "carry_hierarchy_fields": carry_hierarchy_fields,
+            "reference_metadata_blends": [
+                {"attribute_path": b.attribute_path, "max_chars": b.max_chars} for b in reference_metadata_blends
+            ],
+            "context_annotation_types": None if context_annotation_types is None else list(context_annotation_types),
+            "exclude_annotation_types": None if exclude_annotation_types is None else list(exclude_annotation_types),
+            "include_concepts": include_concepts,
+            "embed_concepts": embed_concepts,
+            "concept_scheme_urns": None if concept_scheme_urns is None else list(concept_scheme_urns),
+            "include_reference_metadata": include_reference_metadata,
+            "embed_reference_metadata": embed_reference_metadata,
+            "reference_metadataflow_urns": (
+                None if reference_metadataflow_urns is None else list(reference_metadataflow_urns)
+            ),
+            "document_prefix": document_prefix,
+            "query_prefix": query_prefix,
+            "model_name": model_name,
+        }
+
+        recorded = json.dumps(options, sort_keys=True)
 
         def rebuild() -> int:
-            return store.build_index(
-                embedding_model,
-                progress,
-                include_codes=include_codes,
-                embed_codes=embed_codes,
-                max_codes_per_codelist=max_codes_per_codelist,
-                codelist_urns=codelist_urns,
-                codelist_policies=codelist_policies,
-                include_alt_labels=include_alt_labels,
-                carry_hierarchy_fields=carry_hierarchy_fields,
-                reference_metadata_blends=reference_metadata_blends,
-                include_concepts=include_concepts,
-                embed_concepts=embed_concepts,
-                concept_scheme_urns=concept_scheme_urns,
-                include_reference_metadata=include_reference_metadata,
-                embed_reference_metadata=embed_reference_metadata,
-                reference_metadataflow_urns=reference_metadataflow_urns,
-                document_prefix=document_prefix,
-                query_prefix=query_prefix,
-                model_name=model_name,
-                **extra,
-            )
+            return _build_recorded(store, recorded, embedding_model, progress)
 
         n = rebuild()
         self._rebuild_index = rebuild
@@ -1495,18 +1587,35 @@ class WorkingCopy:
         _edition.discard(edition_dir)
 
     def _search(self, store: _Store) -> None:
-        """Seal step 3: rebuild the BM25 tables from this edition's rows, and drop the carried ones."""
+        """Seal step 3: bring the search index up to this edition's rows, and drop the carried tables.
+
+        The index `build_index` built is kept when ``statcat._meta`` records
+        the fingerprint the tables still have. Otherwise the index is rebuilt:
+        with the last `build_index` call on this object, with the options
+        ``statcat._meta`` records (the call was made in another process, and
+        the encoder is the working copy's), or with the defaults.
+        """
+        search_dir = store._search_dir
         if importlib.util.find_spec("lancedb") is None:
             # Without lancedb nothing can rebuild the index, so a carried one
             # would describe the previous edition's rows: it is removed.
-            search_dir = store._search_dir
             if search_dir is not None and search_dir.is_dir():
                 shutil.rmtree(search_dir)
             return
-        if self._rebuild_index is not None:
+        cursor = store._cursor()
+        built_from = _meta_text(cursor, INDEX_BUILT_FROM_KEY)
+        current = (
+            built_from is not None
+            and search_dir is not None
+            and (search_dir / "index.json").is_file()
+            and built_from == _tables_fingerprint(cursor)
+        )
+        if current:
+            log.info("the search index of %s was built from its current rows; the seal keeps it", self._edition_id)
+        elif self._rebuild_index is not None:
             self._rebuild_index()
         else:
-            store.build_index()
+            _build_recorded(store, _meta_text(cursor, INDEX_OPTIONS_KEY) or "{}")
         if store._lance is not None:
             store._lance.drop_carried()
 

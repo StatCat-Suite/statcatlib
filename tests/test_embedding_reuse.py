@@ -169,6 +169,8 @@ class TestReencode:
             wc = cat.product("p").working_copy(embedding_model=model)
             wc.put([_dataset("d1", "Labour force")])
             wc.build_index()
+            # The write makes the seal rebuild, and the rebuild encodes d1 again.
+            wc.put([_dataset("d2", "Consumer prices")])
             wc.seal()
-            assert len(model.encoded) == 2
-            assert [h for h, _ in _vectors(cat).values()] == [None]
+            assert len(model.encoded) == 3
+            assert [h for h, _ in _vectors(cat).values()] == [None, None]
