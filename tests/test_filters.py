@@ -357,77 +357,77 @@ def map_store() -> ScratchStore:
 
 class TestHasSpatial:
     def test_spatial_exact_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada", lang="en")).execute()
         assert result.total == 2
         ids = {ds.identifier for ds in result.items}
         assert ids == {"MAP-DS1", "MAP-DS2"}
 
     def test_spatial_specific_region(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Ontario")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Ontario", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
     def test_spatial_no_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Australia")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Australia", lang="en")).execute()
         assert result.total == 0
 
     def test_spatial_no_coverage(self, map_store: ScratchStore) -> None:
         """Dataset without spatial coverage should not match."""
-        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada", lang="en")).execute()
         ids = {ds.identifier for ds in result.items}
         assert "MAP-DS3" not in ids
 
 
 class TestHasKeyword:
     def test_keyword_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.has_keyword("economy")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.has_keyword("economy", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
     def test_keyword_shared(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.has_keyword("employment")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.has_keyword("employment", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
     def test_keyword_no_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.has_keyword("finance")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.has_keyword("finance", lang="en")).execute()
         assert result.total == 0
 
 
 class TestTitleContains:
     def test_title_contains_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.title_contains("GDP")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.title_contains("GDP", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
     def test_title_contains_case_insensitive(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.title_contains("gdp")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.title_contains("gdp", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
     def test_title_contains_partial(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.title_contains("Survey")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.title_contains("Survey", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
     def test_title_contains_no_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.title_contains("inflation")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.title_contains("inflation", lang="en")).execute()
         assert result.total == 0
 
 
 class TestDescriptionContains:
     def test_description_contains_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.description_contains("Canadian")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.description_contains("Canadian", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 
     def test_description_contains_case_insensitive(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.description_contains("labour")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.description_contains("labour", lang="en")).execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
     def test_description_contains_no_match(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.description_contains("nonexistent")).execute()
+        result = map_store.query(sc.BaseDataset).filter(q.description_contains("nonexistent", lang="en")).execute()
         assert result.total == 0
 
 
@@ -456,35 +456,38 @@ class TestMapFilterAccentInsensitive:
 
     def test_title_contains_unaccented_query_matches_accented(self) -> None:
         s = self._store()
-        result = s.query(sc.BaseDataset).filter(q.title_contains("Montreal")).execute()
+        result = s.query(sc.BaseDataset).filter(q.title_contains("Montreal", lang="en")).execute()
         assert {ds.identifier for ds in result.items} == {"ACC1"}
 
     def test_title_contains_accented_query_still_matches(self) -> None:
         s = self._store()
-        result = s.query(sc.BaseDataset).filter(q.title_contains("montréal")).execute()
+        result = s.query(sc.BaseDataset).filter(q.title_contains("montréal", lang="en")).execute()
         assert {ds.identifier for ds in result.items} == {"ACC1"}
 
     def test_description_contains_folds_accents(self) -> None:
         s = self._store()
-        result = s.query(sc.BaseDataset).filter(q.description_contains("quebec")).execute()
+        result = s.query(sc.BaseDataset).filter(q.description_contains("quebec", lang="en")).execute()
         assert {ds.identifier for ds in result.items} == {"ACC1"}
 
     def test_title_contains_folds_punctuation(self) -> None:
         # space query → hyphenated title (and accent-folded "Rivieres")
         s = self._store()
-        result = s.query(sc.BaseDataset).filter(q.title_contains("Trois Rivieres")).execute()
+        result = s.query(sc.BaseDataset).filter(q.title_contains("Trois Rivieres", lang="en")).execute()
         assert {ds.identifier for ds in result.items} == {"ACC2"}
 
     def test_title_contains_hyphen_query_still_matches(self) -> None:
         s = self._store()
-        result = s.query(sc.BaseDataset).filter(q.title_contains("trois-rivieres")).execute()
+        result = s.query(sc.BaseDataset).filter(q.title_contains("trois-rivieres", lang="en")).execute()
         assert {ds.identifier for ds in result.items} == {"ACC2"}
 
 
 class TestMapFilterCombined:
     def test_spatial_and_keyword(self, map_store: ScratchStore) -> None:
         result = (
-            map_store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).filter(q.has_keyword("economy")).execute()
+            map_store.query(sc.BaseDataset)
+            .filter(q.has_spatial("Canada", lang="en"))
+            .filter(q.has_keyword("economy", lang="en"))
+            .execute()
         )
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
@@ -492,15 +495,15 @@ class TestMapFilterCombined:
     def test_title_and_spatial(self, map_store: ScratchStore) -> None:
         result = (
             map_store.query(sc.BaseDataset)
-            .filter(q.title_contains("Employment"))
-            .filter(q.has_spatial("Canada"))
+            .filter(q.title_contains("Employment", lang="en"))
+            .filter(q.has_spatial("Canada", lang="en"))
             .execute()
         )
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS2"
 
     def test_map_filter_with_kwarg(self, map_store: ScratchStore) -> None:
-        result = map_store.query(sc.BaseDataset).filter(q.title_contains("GDP"), publisher="SC").execute()
+        result = map_store.query(sc.BaseDataset).filter(q.title_contains("GDP", lang="en"), publisher="SC").execute()
         assert result.total == 1
         assert result.items[0].identifier == "MAP-DS1"
 

@@ -36,7 +36,7 @@ from sdmxlib import InternationalString, LocalisedString
 from sdmxlib.model.registry import artefact_urn
 
 from statcatlib._lang_sql import pick_map, spatial_key_sql
-from statcatlib.labels import Gap, Labels, Langs, _as_langs
+from statcatlib.labels import Gap, Labels, Langs, RowList, ValueList, _as_langs
 from statcatlib.model.agents import Agent, ContactPoint
 from statcatlib.model.classification import Standard
 from statcatlib.model.dataset import (
@@ -1239,7 +1239,7 @@ class _SortSpec:
     field: str
     desc: bool = False
     nulls: str | None = None
-    lang: str | None = None
+    lang: tuple[str, ...] | None = None
 
 
 #: What a hit from `EditionView.search` can carry. The cross-kind search fans out
@@ -1903,7 +1903,7 @@ class QueryBuilder[T]:
         offset: int = 0,
         facet_fields: list[str] | None = None,
         select_cols: tuple[str, ...] | None = None,
-        select_lang: str | None = None,
+        select_lang: tuple[str, ...] | None = None,
         scalar_col: str | None = None,
         include_rels: frozenset[str] | None = None,
     ) -> None:
@@ -2016,17 +2016,17 @@ class QueryBuilder[T]:
         *,
         desc: bool = False,
         nulls: str | None = None,
-        lang: str | None = None,
+        lang: Langs | None = None,
     ) -> QueryBuilder[T]:
         """Add a sort criterion.
 
-        For MAP columns like ``title``, pass ``lang`` to specify the
-        language key (e.g. ``lang="en"``).  Raises ``ValueError`` if
-        ``lang`` is omitted for a MAP column.
+        For MAP columns like ``title``, pass ``lang``, a tag or tags in order
+        of preference: rows sort on the first held tag's text, so one order
+        can mix languages. Raises ``ValueError`` if ``lang`` is omitted for a
+        MAP column.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
-        new_sorts = [*self._sort_fields, _SortSpec(field=field, desc=desc, nulls=nulls, lang=lang)]
+        langs = None if lang is None else _as_langs(lang)
+        new_sorts = [*self._sort_fields, _SortSpec(field=field, desc=desc, nulls=nulls, lang=langs)]
         return self._clone(sort_fields=new_sorts)
 
     def limit(self, n: int) -> QueryBuilder[T]:
@@ -2079,40 +2079,43 @@ class QueryBuilder[T]:
 
     # -- projection modifiers (SA2-style) --
 
-    def select(self, *columns: str, lang: str | None = None) -> QueryBuilder[T]:
+    def select(self, *columns: str, lang: Langs | None = None) -> QueryBuilder[T]:
         """Set dict projection mode. Terminals return dicts instead of objects.
 
-        ``lang`` is required when selecting MAP columns (``title``,
-        ``description``).  Raises ``ValueError`` for unknown column names.
+        ``lang``, a tag or tags in order of preference, is required when
+        selecting MAP columns (``title``, ``description``). Each MAP column
+        gives two `Row` keys: ``title``, the first held tag's text or
+        ``None``, and ``title__lang``, that tag. Raises ``ValueError`` for
+        unknown column names.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
+        langs = None if lang is None else _as_langs(lang)
         all_allowed = _SELECTABLE_COLUMNS | _MAP_SELECTABLE_COLUMNS
         for col in columns:
             if col not in all_allowed:
                 msg = f"Invalid select column: {col!r}. Allowed: {sorted(all_allowed)}"
                 raise ValueError(msg)
         map_cols = _MAP_SELECTABLE_COLUMNS & set(columns)
-        if map_cols and lang is None:
+        if map_cols and langs is None:
             msg = f"lang is required when selecting MAP columns: {sorted(map_cols)}"
             raise ValueError(msg)
-        return self._clone(select_cols=columns, select_lang=lang)
+        return self._clone(select_cols=columns, select_lang=langs)
 
-    def scalars(self, column: str, *, lang: str | None = None) -> QueryBuilder[T]:
+    def scalars(self, column: str, *, lang: Langs | None = None) -> QueryBuilder[T]:
         """Set single-column flat projection mode.
 
-        Terminals return bare values instead of objects or dicts.
+        Terminals return bare values instead of objects or dicts. A MAP
+        column (``title``, ``description``) needs ``lang``, a tag or tags in
+        order of preference, and yields `sdmxlib.LocalisedString` or ``None``.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
+        langs = None if lang is None else _as_langs(lang)
         all_allowed = _SELECTABLE_COLUMNS | _MAP_SELECTABLE_COLUMNS
         if column not in all_allowed:
             msg = f"Invalid scalar column: {column!r}. Allowed: {sorted(all_allowed)}"
             raise ValueError(msg)
-        if column in _MAP_SELECTABLE_COLUMNS and lang is None:
+        if column in _MAP_SELECTABLE_COLUMNS and langs is None:
             msg = f"lang is required when selecting MAP column {column!r}"
             raise ValueError(msg)
-        return self._clone(scalar_col=column, select_lang=lang)
+        return self._clone(scalar_col=column, select_lang=langs)
 
     # -- projection guards --
 
@@ -2229,12 +2232,12 @@ class QueryBuilder[T]:
 
     # -- row projection terminals --
 
-    def rows(self) -> list[Row]:
-        """Execute and return ``Row`` objects (requires ``.select()``)."""
+    def rows(self) -> RowList:
+        """Execute and return ``Row`` objects (requires ``.select()``), with the page's gaps."""
         select_cols = self._require_select_cols("rows")
         ranked_ids = self._resolve_search_ids()
         if ranked_ids is not None and not ranked_ids:
-            return []
+            return RowList()
         return self._store._execute_projection(
             self._cls,
             select_cols,
@@ -2249,22 +2252,22 @@ class QueryBuilder[T]:
         )
 
     def row(self) -> Row | None:
-        """Execute with limit=1 and return the first ``Row`` or None."""
+        """Execute with limit=1 and return the first ``Row`` or None; use `rows` to read gaps."""
         items = self.limit(1).rows()
         return items[0] if items else None
 
     # -- scalar projection terminals --
 
-    def values(self) -> list[object]:
-        """Execute and return flat scalar values (requires ``.scalars()``)."""
+    def values(self) -> ValueList:
+        """Execute and return flat scalar values (requires ``.scalars()``), with the page's gaps."""
         scalar_col = self._require_scalar_col("values")
         ranked_ids = self._resolve_search_ids()
         if ranked_ids is not None:
             if not ranked_ids:
-                return []
+                return ValueList()
             # Fast path: scalar("identifier") returns ranked IDs directly
             if scalar_col == "identifier":
-                return [*ranked_ids]
+                return ValueList(ranked_ids)
         return self._store._execute_scalar_projection(
             self._cls,
             scalar_col,
@@ -2279,7 +2282,11 @@ class QueryBuilder[T]:
         )
 
     def value(self) -> object | None:
-        """Execute with limit=1 and return the first scalar value or None."""
+        """Execute with limit=1 and return the first scalar value or None.
+
+        ``None`` means no row or no text in the requested tags; `values` tells
+        them apart through its gaps.
+        """
         items = self.limit(1).values()
         return items[0] if items else None
 
@@ -6627,8 +6634,9 @@ class _Store:
                     if spec.lang is None:
                         msg = f"lang is required when sorting by MAP column {spec.field!r}"
                         raise ValueError(msg)
-                    col_expr = f"d.{spec.field}[?]"
-                    order_params.append(spec.lang)
+                    pick = pick_map(f"d.{spec.field}", spec.lang)
+                    col_expr = pick.text
+                    order_params.extend(pick.text_params)
                 else:
                     col_expr = f"d.{spec.field}"
                 clause = f"{col_expr} {'DESC' if spec.desc else 'ASC'}"
@@ -6679,7 +6687,7 @@ class _Store:
         self,
         cls: type,
         select_cols: tuple[str, ...],
-        select_lang: str | None,
+        select_lang: tuple[str, ...] | None,
         filters: dict[str, object],
         exists_filters: list[PositionalFilter],
         map_filters: list[MapFilter],
@@ -6687,7 +6695,7 @@ class _Store:
         sort_fields: list[_SortSpec],
         limit: int | None,
         offset: int,
-    ) -> list[Row]:
+    ) -> RowList:
         """Lightweight Row projection — single SQL, no store.get()."""
         fsql = self._build_filter_sql(cls, filters)
         for ef in exists_filters:
@@ -6697,19 +6705,25 @@ class _Store:
             mf_sql, mf_params = mf.to_sql(fsql)
             fsql.add_where(mf_sql, *mf_params)
         if from_ids is not None and not from_ids:
-            return []
+            return RowList()
         if from_ids is not None:
             placeholders = ", ".join("?" * len(from_ids))
             fsql.add_where(f"d.identifier IN ({placeholders})", *from_ids)
 
+        # The identifier comes last, for the gaps; it is not a Row key unless selected.
+        keys: list[str] = []
         col_exprs: list[str] = []
         col_params: list[object] = []
         for col in select_cols:
-            if col in _MAP_SELECTABLE_COLUMNS:
-                col_exprs.append(f"d.{col}[?] AS {col}")
-                col_params.append(select_lang)
+            if col in _MAP_SELECTABLE_COLUMNS and select_lang is not None:
+                pick = pick_map(f"d.{col}", select_lang)
+                col_exprs.extend([pick.text, pick.lang])
+                col_params.extend([*pick.text_params, *pick.lang_params])
+                keys.extend([col, f"{col}__lang"])
             else:
                 col_exprs.append(f"d.{col}")
+                keys.append(col)
+        col_exprs.append("d.identifier")
 
         order_clause, order_params = self._build_order_clause(sort_fields, from_ids)
 
@@ -6726,13 +6740,20 @@ class _Store:
             all_params = [*all_params, *order_params]
 
         rows = self._c.execute(sql, all_params).fetchall()
-        return [Row({col: row[i] for i, col in enumerate(select_cols)}) for row in rows]
+        out = [Row(zip(keys, row, strict=False)) for row in rows]
+        gaps = [
+            Gap(key=row[-1], entity=row[-1], field=col, langs=select_lang)
+            for row, item in zip(rows, out, strict=True)
+            for col in select_cols
+            if col in _MAP_SELECTABLE_COLUMNS and select_lang is not None and item[col] is None
+        ]
+        return RowList(out, gaps)
 
     def _execute_scalar_projection(
         self,
         cls: type,
         scalar_col: str,
-        select_lang: str | None,
+        select_lang: tuple[str, ...] | None,
         filters: dict[str, object],
         exists_filters: list[PositionalFilter],
         map_filters: list[MapFilter],
@@ -6740,7 +6761,7 @@ class _Store:
         sort_fields: list[_SortSpec],
         limit: int | None,
         offset: int,
-    ) -> list[object]:
+    ) -> ValueList:
         """Single-column flat projection — returns list of bare values."""
         fsql = self._build_filter_sql(cls, filters)
         for ef in exists_filters:
@@ -6750,15 +6771,17 @@ class _Store:
             mf_sql, mf_params = mf.to_sql(fsql)
             fsql.add_where(mf_sql, *mf_params)
         if from_ids is not None and not from_ids:
-            return []
+            return ValueList()
         if from_ids is not None:
             placeholders = ", ".join("?" * len(from_ids))
             fsql.add_where(f"d.identifier IN ({placeholders})", *from_ids)
 
         col_params: list[object] = []
-        if scalar_col in _MAP_SELECTABLE_COLUMNS:
-            col_expr = f"d.{scalar_col}[?]"
-            col_params.append(select_lang)
+        is_map = scalar_col in _MAP_SELECTABLE_COLUMNS and select_lang is not None
+        if is_map and select_lang is not None:
+            pick = pick_map(f"d.{scalar_col}", select_lang)
+            col_expr = f"{pick.text}, {pick.lang}, d.identifier"
+            col_params.extend([*pick.text_params, *pick.lang_params])
         else:
             col_expr = f"d.{scalar_col}"
 
@@ -6777,7 +6800,12 @@ class _Store:
             all_params = [*all_params, *order_params]
 
         rows = self._c.execute(sql, all_params).fetchall()
-        return [r[0] for r in rows]
+        if not is_map or select_lang is None:
+            return ValueList(r[0] for r in rows)
+        return ValueList(
+            (None if r[0] is None else LocalisedString(r[0], r[1]) for r in rows),
+            (Gap(key=r[2], entity=r[2], field=scalar_col, langs=select_lang) for r in rows if r[0] is None),
+        )
 
     def _execute_exists(
         self,

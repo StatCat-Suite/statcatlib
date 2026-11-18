@@ -432,7 +432,7 @@ def test_search_scalars_title(tmp_path):
     titles = store.query(sc.OpenDataset).search("alpha").scalars("title", lang="en").values()
     assert isinstance(titles, list)
     assert len(titles) > 0
-    assert "Alpha Dataset" in titles
+    assert sc.LocalisedString("Alpha Dataset", "en") in titles
 
 
 @pytest.mark.unit

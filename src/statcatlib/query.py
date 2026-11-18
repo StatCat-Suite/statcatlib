@@ -39,7 +39,8 @@ from typing import override
 import sdmxlib as sl
 from attrs import define, field
 
-from statcatlib._lang_sql import spatial_key_sql
+from statcatlib._lang_sql import pick_map, spatial_key_sql
+from statcatlib.labels import Langs, _as_langs
 
 #: What a caller may pass as ``hierarchy=``. Spelled out rather than left as
 #: `Any`: `str | Any` collapses to `Any`, so the union it looked like it was
@@ -134,11 +135,12 @@ class MapCondition:
 
     Used inside ``ExistsFilter.conditions`` when the bridge-table column
     is a DuckDB MAP rather than a scalar.  ``element_at(col, key)`` is
-    emitted in the SQL instead of a plain ``col = ?``. *key* is a language
-    tag, normalised by `sdmxlib.normalize_tag`, so ``"EN"`` matches ``"en"``.
+    emitted in the SQL instead of a plain ``col = ?``. *key* is a tag or tags
+    in order of preference, normalised by `sdmxlib.normalize_tag`, so
+    ``"EN"`` matches ``"en"``; the first held tag's text is compared.
     """
 
-    key: str = field(converter=sl.normalize_tag)  # language key, e.g. "en"
+    key: tuple[str, ...] = field(converter=_as_langs)  # language tags, e.g. ("en",)
     value: str  # value to match
 
 
@@ -162,11 +164,12 @@ class MapFilter:
 
     Unlike ``ExistsFilter`` (which targets bridge tables via a subquery),
     ``MapFilter`` adds a direct WHERE clause against ``d.<column>``. *key*
-    is a language tag, normalised by `sdmxlib.normalize_tag`.
+    is a tag or tags in order of preference, normalised by
+    `sdmxlib.normalize_tag`; the first held tag's text is matched.
     """
 
     column: str  # "title", "description"
-    key: str = field(converter=sl.normalize_tag)  # language key, e.g. "en"
+    key: tuple[str, ...] = field(converter=_as_langs)  # language tags, e.g. ("en",)
     value: str  # raw search text (ilike) or exact value (eq)
     op: str = "eq"  # "eq" | "ilike"
 
@@ -178,10 +181,12 @@ class MapFilter:
             # collapse punctuation/whitespace on both sides, so "Trois Rivieres"
             # matches "Trois-Rivières" and "Montreal" matches "Montréal".
             # ``value`` is the raw search text. (eq stays exact for identity.)
-            col = label_norm_sql(f"d.{self.column}[?]")
+            pick = pick_map(f"d.{self.column}", self.key)
+            col = label_norm_sql(pick.text)
             val = label_norm_sql("?")
-            return f"{col} ILIKE '%' || {val} || '%'", [self.key, self.value]
-        return f"d.{self.column}[?] = ?", [self.key, self.value]
+            return f"{col} ILIKE '%' || {val} || '%'", [*pick.text_params, self.value]
+        pick = pick_map(f"d.{self.column}", self.key)
+        return f"{pick.text} = ?", [*pick.text_params, self.value]
 
 
 @define
@@ -228,8 +233,9 @@ class ExistsFilter:
 
         for col, val in self.conditions.items():
             if isinstance(val, MapCondition):
-                col_clauses.append(f"{table_alias}.{col}[?] = ?")
-                params.extend([val.key, val.value])
+                pick = pick_map(f"{table_alias}.{col}", val.key)
+                col_clauses.append(f"{pick.text} = ?")
+                params.extend([*pick.text_params, val.value])
             elif val is None:
                 col_clauses.append(f"{table_alias}.{col} IS NULL")
             elif isinstance(val, (list, tuple)):
@@ -922,17 +928,19 @@ class _SpatialFilter(ExistsFilter):
     """
 
     table: str = "dataset_spatial"
-    lang: str = "en"
+    langs: tuple[str, ...] = ()
     label: str = ""
 
     @override
     def to_sql(self, ctx: CompileContext) -> tuple[str, list[object]]:
         alias = ctx.next_alias("ef")
+        own = pick_map(f"{alias}_t.label", self.langs)
+        concept = pick_map(f"{alias}_c.label", self.langs)
         sql = f"""EXISTS (SELECT 1 FROM dataset_spatial {alias}_t
             LEFT JOIN concept {alias}_c ON {alias}_c.uri = {alias}_t.uri
             WHERE {alias}_t.dataset_id = d.identifier
-                AND ({alias}_t.label[?] = ? OR {alias}_c.label[?] = ?))"""
-        return sql, [self.lang, self.label, self.lang, self.label]
+                AND ({own.text} = ? OR {concept.text} = ?))"""
+        return sql, [*own.text_params, self.label, *concept.text_params, self.label]
 
 
 @define
@@ -950,7 +958,7 @@ class _SpatialKeyFilter(ExistsFilter):
         return sql, [self.key]
 
 
-def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
+def has_spatial(label: str, *, lang: Langs) -> ExistsFilter:
     """Filter datasets that have a spatial coverage matching *label*.
 
     The label is matched against the coverage's own label and, for a region
@@ -963,15 +971,16 @@ def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
 
     Args:
         label: The spatial coverage label, matched exactly.
-        lang: The language of *label*.
+        lang: A tag, or tags in order of preference; the first held tag's
+            label of the coverage, and of its concept, is compared.
 
     Returns:
         An EXISTS filter over the dataset's spatial coverage.
 
     Example:
-        store.query(sc.BaseDataset).filter(q.has_spatial("Canada")).execute()
+        store.query(sc.BaseDataset).filter(q.has_spatial("Canada", lang="en")).execute()
     """
-    return _SpatialFilter(lang=sl.normalize_tag(lang), label=label)
+    return _SpatialFilter(langs=_as_langs(lang), label=label)
 
 
 def has_spatial_key(key: str) -> ExistsFilter:
@@ -995,18 +1004,19 @@ def has_spatial_key(key: str) -> ExistsFilter:
     return _SpatialKeyFilter(key=key)
 
 
-def has_keyword(keyword: str, *, lang: str = "en") -> ExistsFilter:
+def has_keyword(keyword: str, *, lang: Langs) -> ExistsFilter:
     """Filter datasets that have a keyword matching *keyword*.
 
     Args:
         keyword: The keyword, matched exactly.
-        lang: The language of *keyword*.
+        lang: A tag, or tags in order of preference; the first held tag's
+            keyword is compared.
 
     Returns:
         An EXISTS filter over the dataset's keywords.
 
     Example:
-        store.query(sc.BaseDataset).filter(q.has_keyword("employment")).execute()
+        store.query(sc.BaseDataset).filter(q.has_keyword("employment", lang="en")).execute()
     """
     return ExistsFilter(
         table="dataset_keyword",
@@ -1014,33 +1024,35 @@ def has_keyword(keyword: str, *, lang: str = "en") -> ExistsFilter:
     )
 
 
-def title_contains(text: str, *, lang: str = "en") -> MapFilter:
+def title_contains(text: str, *, lang: Langs) -> MapFilter:
     """Filter datasets whose title contains *text* (case-insensitive).
 
     Args:
         text: The text to find, anywhere in the title.
-        lang: Which language's title to search.
+        lang: A tag, or tags in order of preference; the first held tag's
+            title is searched.
 
     Returns:
         A filter on the dataset's title in *lang*.
 
     Example:
-        store.query(sc.BaseDataset).filter(q.title_contains("GDP")).execute()
+        store.query(sc.BaseDataset).filter(q.title_contains("GDP", lang="en")).execute()
     """
     return MapFilter(column="title", key=lang, value=text, op="ilike")
 
 
-def description_contains(text: str, *, lang: str = "en") -> MapFilter:
+def description_contains(text: str, *, lang: Langs) -> MapFilter:
     """Filter datasets whose description contains *text* (case-insensitive).
 
     Args:
         text: The text to find, anywhere in the description.
-        lang: Which language's description to search.
+        lang: A tag, or tags in order of preference; the first held tag's
+            description is searched.
 
     Returns:
         A filter on the dataset's description in *lang*.
 
     Example:
-        store.query(sc.BaseDataset).filter(q.description_contains("exchange")).execute()
+        store.query(sc.BaseDataset).filter(q.description_contains("exchange", lang="en")).execute()
     """
     return MapFilter(column="description", key=lang, value=text, op="ilike")
