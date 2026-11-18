@@ -54,7 +54,7 @@ Ingest all artefacts from an sdmxlib registry into a working copy:
    the structural index for `has_code()` / `has_dimensions()` filters.
 
 Returns the list of `AggregateDataset` objects created. The search index sees
-them after `wc.build_index()`, and the seal rebuilds it from the edition's rows.
+them after `wc.build_index()`. The seal builds the index again when a row changed after that build, or when there was none.
 
 **Example:**
 

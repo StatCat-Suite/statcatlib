@@ -633,10 +633,11 @@ for example `annual_de.lazy().sort("TIME_PERIOD")`.
 
 ## 14. Seal the edition and read it back
 
-`wc.seal()` turns the working copy into an immutable edition. It rebuilds the
-search index from the edition's rows, with the arguments of the last
-`wc.build_index()` call, or the defaults when there was none, and records the
-edition as the product's live edition. `seal()` returns the `Edition`, and the
+`wc.seal()` turns the working copy into an immutable edition. It keeps the
+search index the last `wc.build_index()` call built when no row has changed
+since, and otherwise rebuilds it from the edition's rows with that call's
+options, or the defaults when there was none. It then records the edition as
+the product's live edition. `seal()` returns the `Edition`, and the
 working copy and its views are closed afterwards.
 
 ```python

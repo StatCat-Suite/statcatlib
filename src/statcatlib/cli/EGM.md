@@ -156,11 +156,10 @@ Private helpers that tests and later commands rely on:
 - `build-index` indexes a working copy, the product's unsealed edition, and
   leaves it unsealed. A sealed edition is never written (see the "Edition
   contract" paragraph of [`CLAUDE.md`](../../../CLAUDE.md)).
-- `WorkingCopy.seal` rebuilds the index with the arguments of the last
-  `build_index` call on the same `WorkingCopy` object. The CLI's call ends
-  with its process, so a seal from a working copy resumed later rebuilds with
-  the default arguments and the encoder passed to
-  `working_copy(embedding_model=)`.
+- `build_index` records its options in the working copy's
+  `statcat._meta` (GH-108). A seal from a working copy resumed later keeps
+  the index when no row changed since, and otherwise rebuilds it with those
+  options and the encoder passed to `working_copy(embedding_model=)`.
 - `build-index` resumes with `--lifecycle` (`revisable` by default). A
   product recorded with another lifecycle exits 1, naming the option.
 - `build-index` passes `model_name` to `WorkingCopy.build_index` on every

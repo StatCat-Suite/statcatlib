@@ -151,6 +151,13 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   (`"fill_in_progress"`) name the `statcat._meta` keys of
   `fill_dataflows`; `recorded_cuts(cursor)` reads the first as a dict, and
   `unvouched_partials(cursor, registry, previous)` is the data pre-check.
+- `INDEX_OPTIONS_KEY` (`"index_options"`) and `INDEX_BUILT_FROM_KEY`
+  (`"index_built_from"`) name the `statcat._meta` keys of `build_index`
+  (GH-108): its options as JSON, all but `embedding_model` and `progress`,
+  and `_tables_fingerprint(cursor)`, the SHA-256 of each table's row count
+  and sum of DuckDB row hashes, over every base table of the edition's
+  catalog but `statcat._meta`. `_build_recorded(store, options, ...)`
+  deletes the fingerprint, builds, then writes both keys in one transaction.
 - Errors: `WorkingCopyExistsError`, `WorkingCopyClosedError`
   (`RuntimeError`), `SealCheckError` (with `findings`), `EditionCheckError`
   (with `findings`, `product`, `edition`), `JournalError`.
@@ -385,8 +392,9 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `WorkingCopyExistsError` without `resume`, and `resume` with none raises
   `FileNotFoundError`. A new edition whose store fails to open is discarded.
   It then writes `statcat._meta.product_kind`: a new edition takes the
-  leaf's kind, the caller's, or `"data"`, and drops the `partial_of` and
-  `fill_in_progress` keys carried from the previous edition; a resumed one
+  leaf's kind, the caller's, or `"data"`, and drops the `partial_of`,
+  `fill_in_progress`, `index_options` and `index_built_from` keys carried
+  from the previous edition; a resumed one
   keeps the stored kind and refuses another (`rule="kind"`), after closing
   the registry.
 - `WorkingCopy.seal` runs these steps: settle the journal; run each check
@@ -425,10 +433,14 @@ Imports only sdmxlib, so `inventory.py` can import it.
   `_recorded()` and `_unrecorded(exc)` (clear the journal entry; the second
   also logs the WARNING, for an `InventoryRuleError` or an
   `EditionCheckError`).
-- The seal's index rebuild reuses the arguments of the last
-  `WorkingCopy.build_index` call on that object, or the defaults when there
-  was none. Without lancedb installed it deletes `search/`, so a carried
-  index never describes the previous edition's rows.
+- Seal step 3 (`_search`) keeps the index when `_meta.index_built_from`
+  equals `_tables_fingerprint` and `search/index.json` exists: the index was
+  built, in this process or another, from the rows the edition seals. Otherwise it
+  rebuilds with the last `WorkingCopy.build_index` call on that object
+  (its encoder and progress callback), or with the options
+  `_meta.index_options` records and the working copy's encoder, or with the
+  defaults when neither exists (GH-108). Without lancedb installed it deletes
+  `search/`, so a carried index never describes the previous edition's rows.
 - Embedding reuse (S2b): each embedded search row records `text_sha256`,
   `lance.text_sha256(model, prefix, text)`. `_Store.build_index` reads
   `LanceIndex.carried_vectors()` before `add_bulk` replaces the tables, and

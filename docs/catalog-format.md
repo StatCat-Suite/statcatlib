@@ -199,8 +199,9 @@ to string.
 - `statcat._meta` also records `product_kind`, `"data"` or `"structure"`,
   which `Product.working_copy` writes on each new edition and reads on a
   resume, so a resumed working copy keeps the kind it was started with. A
-  new edition also drops the `partial_of` and `fill_in_progress` keys the
-  previous edition's `metadata.duckdb` carries. Readers take the kind from
+  new edition also drops the `partial_of`, `fill_in_progress`,
+  `index_options` and `index_built_from` keys the previous edition's
+  `metadata.duckdb` carries. Readers take the kind from
   the manifest's `statcat` section (§3); the `_meta` keys are the writer's.
 - `statcat._meta.partial_of` is a JSON object from a codelist URN to the
   fingerprint of the full codelist `WorkingCopy.fill_dataflows` cut it from,
@@ -213,6 +214,12 @@ to string.
   started, and that call deletes it in the transaction that writes
   `partial_of`. A working copy holding it refuses its seal, since its map
   may miss a cut.
+- `statcat._meta.index_options` holds the options of the working copy's last
+  `build_index` call as a JSON object, and `statcat._meta.index_built_from`
+  the SHA-256 fingerprint of the edition's other tables when that index was
+  built. The seal keeps the index when the fingerprint still matches, and
+  otherwise rebuilds it with the recorded options. Both keys stay in the
+  sealed `metadata.duckdb`; no reader reads them.
 - `statcat.language_alternate` records the language tags a source declares as
   alternates of a primary tag, such as `en-t-fr` for `en`, with the source,
   each tag lowercase as `sdmxlib.normalize_tag` spells it. Each alternate has

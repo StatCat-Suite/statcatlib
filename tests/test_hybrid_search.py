@@ -2205,15 +2205,14 @@ class TestAsymmetricPrefixWarnings:
     def test_the_loss_it_warns_about_is_real(self, tmp_path: Path):
         """The warning is not theoretical: a view of the sealed edition restores neither prefix.
 
-        The seal rebuilds the index with the same arguments, so it warns again.
+        No row changes after `build_index`, so the seal keeps that index (GH-108).
         """
         path = tmp_path / "catalog"
         store = scratch_store(path, embedding_model=_StubModel(), document_prefix="passage: ", query_prefix="query: ")
         with store as s:
             with pytest.warns(UserWarning, match="no embeddings.json is written"):
                 s.build_index()
-            with pytest.warns(UserWarning, match="no embeddings.json is written"):
-                s.seal()
+            s.seal()
         with sc.Catalog.open(path) as cat:
             reopened = cat.product("p").view(embedding_model=_StubModel())
             assert reopened.document_prefix == ""

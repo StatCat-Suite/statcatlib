@@ -199,11 +199,13 @@ A dataset added afterwards is not searchable on `wc.view()` until the next
 build. A rebuild writes a complete new set of tables, then switches to them in
 one step, so a failed rebuild leaves the previous index serving.
 
-`wc.seal()` rebuilds the index from the edition's rows, with the arguments of
-the last `wc.build_index()` call, or the defaults when there was none, so a
-sealed edition's index holds exactly the sealed rows. `statcat build-index
-CATALOG PRODUCT` builds the index of a product's working copy from the command
-line and leaves the working copy unsealed.
+`wc.build_index()` records its options in the working copy. `wc.seal()` keeps
+the index when no row has changed since the last build, and otherwise rebuilds
+it from the edition's rows with the recorded options, or the defaults when
+there was no build, so a sealed edition's index holds exactly the sealed rows.
+`statcat build-index CATALOG PRODUCT` builds the index of a product's working
+copy from the command line and leaves the working copy unsealed; a seal in a
+later process keeps that index, or rebuilds with the same options.
 
 `build_index()` also records the annotations it read (`statcat:searchExclude`,
 `statcat:searchContext`, `skos:altLabel`). When an overlay changes them in a

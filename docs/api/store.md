@@ -157,9 +157,9 @@ wc.previous -> str | None
 it is made.
 
 `seal` turns the working copy into an immutable edition. It runs `checks`
-against the working copy's view, rebuilds the search index from the edition's
-rows with the arguments of the last `build_index` call (the defaults when
-there was none), and records the edition as the product's live edition. A
+against the working copy's view, brings the search index up to the edition's
+rows (see [`build_index`](#build_index)), and
+records the edition as the product's live edition. A
 check that finds a problem raises `SealCheckError` and leaves the working copy
 open. `statcatlib.checks.conf_status()` refuses observations whose
 confidentiality status is not public:
@@ -639,17 +639,24 @@ with sc.Catalog.create("my_catalog", exist_ok=True) as cat:
         wc.seal()
 ```
 
-`wc.seal()` rebuilds the index from the edition's rows with the arguments of
-the last `build_index` call, or the defaults when there was none, so a sealed
-edition's index holds exactly its rows.
+`build_index` records its options in the working copy's
+`statcat._meta.index_options`, all but `embedding_model` and `progress`, and
+a fingerprint of the edition's tables in `statcat._meta.index_built_from`.
+`wc.seal()` keeps the index when the tables still have that fingerprint, in
+the same process or a later one, such as a seal after `statcat build-index`.
+Otherwise it rebuilds the index from the edition's rows: with the last
+`build_index` call on the same object, with the recorded options and the
+encoder given to `working_copy(embedding_model=)` in another process, or with
+the defaults when there was no call. A sealed edition's index holds exactly
+its rows. A new working copy starts with neither key.
 
 Each embedded row records `text_sha256`, the SHA-256 of the model name, the
 document prefix and the text. When `build_index` is called with `model_name`,
 it reads the stored vectors before the rebuild replaces the tables and gives
 each text whose hash matches its stored vector; only the other texts reach
-the model. The seal repeats the last `build_index` call, so a working copy
-that calls `wc.build_index(model_name=...)` and changes no text calls
-`encode` zero times, and one with edits encodes only the edited texts. A
+the model. A seal that rebuilds repeats the last `build_index` call, so a
+working copy that calls `wc.build_index(model_name=...)` and changes no text
+calls `encode` zero times, and one with edits encodes only the edited texts. A
 change of model name or document prefix re-encodes every text.
 
 Without `model_name`, `build_index` reuses nothing and encodes every text,
