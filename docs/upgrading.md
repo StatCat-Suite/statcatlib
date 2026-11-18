@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: sdmxlib 0.89, and the seal keeps the index `build_index` built
+## 0.20.0: sdmxlib 0.89, and the seal keeps the index `build_index` built
 
 statcatlib requires `sdmxlib>=0.89,<0.90`. No catalog is rebuilt, and no statcatlib
 call changes. statcatlib calls none of the functions sdmxlib 0.89 changed, so a catalog

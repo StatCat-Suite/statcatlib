@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.0] - 2026-11-18
+
+### Breaking Changes
+
+- **deps**: Require sdmxlib>=0.89,<0.90. No statcatlib call changes and no catalog
+  is rebuilt. Code that calls sdmxlib directly meets sdmxlib 0.89's change to the
+  availability builders' time dimension (StatCat-Suite/sdmxlib#392). The
+  [upgrading guide](https://statcat-suite.github.io/statcatlib/upgrading/#0200-sdmxlib-089-and-the-seal-keeps-the-index-build_index-built)
+  describes both.
+
+### Bug Fixes
+
+- **seal**: Keep the index options of build-index across processes (GH-108).
+  `build_index` records its options in `statcat._meta.index_options`. A seal with
+  no row changed since `build_index` keeps the index without encoding any text
+  again, in the same process or a later one. When a row changed, a seal in a later
+  process rebuilds the index with the recorded options and the encoder passed to
+  `working_copy(embedding_model=)`; before, it rebuilt with the default options.
+
 ## [0.19.0] - 2026-11-13
 
 ### Documentation
