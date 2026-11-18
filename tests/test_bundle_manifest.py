@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -286,3 +287,21 @@ class TestOverlayAffectsSearch:
     def test_types_of_an_index_built_otherwise(self) -> None:
         assert overlay_affects_search(_overlay("CUSTOM_CONTEXT"), types=["CUSTOM_CONTEXT"])
         assert not overlay_affects_search(_overlay(sc.SEARCH_EXCLUDE_ANNOTATION_TYPE), types=["CUSTOM_CONTEXT"])
+
+
+class TestRegionTagTables:
+    """``check_catalog`` reads each table under its ``index.json`` key, a `sdmxlib.tag_alias` such as ``fr_ca``."""
+
+    def test_an_edition_holding_region_and_alternate_tags_passes(self, tmp_path: Path) -> None:
+        pytest.importorskip("lancedb", reason="the seal builds the index with statcatlib[search]")
+        root = tmp_path / "catalog"
+        title = sc.InternationalString.of({"en": "Rain", "fr-CA": "Pluie", "en-t-fr": "Rainfall"})
+        with sc.Catalog.create(root) as cat:
+            wc = cat.product("p").working_copy()
+            wc.put(sc.OpenDataset(identifier="r", title=title, description=title))
+            edition = wc.seal()
+        edition_dir = _edition_dir(root, edition)
+        manifest = read_manifest(edition_dir)
+        index = json.loads((edition_dir / "search" / "index.json").read_text())
+        assert set(index["languages"]) == {"en", "fr_ca", "en_t_fr"}
+        assert _check(edition_dir, manifest) == []

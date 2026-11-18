@@ -40,7 +40,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
-from sdmxlib import InvalidTagError, tag_alias
+from sdmxlib import InvalidTagError, normalize_tag, tag_alias
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -209,14 +209,15 @@ def _statcatlib_version() -> str:
 def _table_name(lang: str, edition_id: str) -> str:
     """The table holding *lang*'s rows in the index edition *edition_id* wrote.
 
-    The language part is `sdmxlib.tag_alias` (``"fr-CA"`` → ``"fr_ca"``); an
-    alias given here is kept as it is. Region subtags are kept: ``fr-CA`` and
-    ``fr-FR`` are different corpora with different vocabularies, even though
-    they stem alike, and collapsing them would re-pool the document
-    frequencies that separate tables keep apart.
+    *lang* is a tag; the language part of the name is its `sdmxlib.tag_alias`
+    (``"fr-CA"`` → ``"fr_ca"``), taken here and nowhere else. Region subtags
+    are kept: ``fr-CA`` and ``fr-FR`` are different corpora with different
+    vocabularies, even though they stem alike, and collapsing them would
+    re-pool the document frequencies that separate tables keep apart. A
+    malformed *lang*, an alias such as ``fr_ca`` included, raises
+    `sdmxlib.InvalidTagError`.
     """
-    alias = lang.strip().lower().replace("-", "_")
-    return f"{_TABLE_PREFIX}{alias}{_edition_suffix(edition_id)}"
+    return f"{_TABLE_PREFIX}{tag_alias(lang)}{_edition_suffix(edition_id)}"
 
 
 def _edition_suffix(edition_id: str) -> str:
@@ -1245,6 +1246,21 @@ class LanceIndex:
         index = self._for(lang)
         return None if index is None else index.table
 
+    def table_for_key(self, key: str) -> lancedb.table.Table | None:
+        """Return the Lance table ``index.json`` names under *key*, or ``None``.
+
+        *key* is a ``languages`` key as stored, a `sdmxlib.tag_alias` such as
+        ``fr_ca``; checks that walk the manifest use it.
+
+        Args:
+            key: A key of ``index.json``'s ``languages``.
+
+        Returns:
+            The table, or ``None`` when the manifest names none under *key*.
+        """
+        index = self._langs.get(key)
+        return None if index is None else index.table
+
     def describe(self) -> dict[str, LanguageLayout]:
         """Return ``{lang: {table, rows, stemmer}}`` for the live index.
 
@@ -1291,10 +1307,17 @@ class LanceIndex:
     # -- writes --------------------------------------------------------
 
     @staticmethod
-    def _by_language(rows: list[SearchRow]) -> dict[str, list[SearchRow]]:
-        grouped: dict[str, list[SearchRow]] = {}
+    def _by_language(rows: list[SearchRow]) -> dict[str, tuple[str, list[SearchRow]]]:
+        """Group *rows* by table: ``alias -> (tag, rows)``.
+
+        The alias keys `_langs` and ``index.json``; the tag names the table
+        (`_table_name`). A row's ``lang`` is normalised, so a malformed or
+        empty one raises `sdmxlib.InvalidTagError`.
+        """
+        grouped: dict[str, tuple[str, list[SearchRow]]] = {}
         for row in rows:
-            grouped.setdefault(tag_alias(row.get("lang", "") or ""), []).append(row)
+            tag = normalize_tag(row.get("lang", "") or "")
+            grouped.setdefault(tag_alias(tag), (tag, []))[1].append(row)
         return grouped
 
     def add(self, rows: list[SearchRow], *, embedding_dim: int | None = None) -> None:
@@ -1307,14 +1330,14 @@ class LanceIndex:
         if not rows:
             return
         added_language = False
-        for lang, lang_rows in self._by_language(rows).items():
+        for lang, (tag, lang_rows) in self._by_language(rows).items():
             index = self._langs.get(lang)
             if index is None:
                 # A language seen for the first time needs a table *and* a
                 # manifest entry — an unreferenced table is invisible on
                 # the next open, so writing one without the other would
                 # silently lose these rows.
-                index = _LanguageIndex(self._db, lang, _table_name(lang, self._writer()))
+                index = _LanguageIndex(self._db, lang, _table_name(tag, self._writer()))
                 self._langs[lang] = index
                 added_language = True
             index.upsert(lang_rows, embedding_dim)
@@ -1371,7 +1394,7 @@ class LanceIndex:
         # edition holds only the tables the manifest names.
         self.discard_orphans()
         grouped = self._by_language(rows)
-        names = {_table_name(lang, edition_id) for lang in grouped}
+        names = {_table_name(tag, edition_id) for tag, _ in grouped.values()}
         # A rebuild in the same edition reuses its table names: the tables it
         # replaces are dropped first, so the new ones can take the names. An
         # unsealed edition is read by no one else, so it needs no old index
@@ -1388,8 +1411,8 @@ class LanceIndex:
         # the edition suffix is what lets new tables sit beside them.
         built: dict[str, _LanguageIndex] = {}
         try:
-            for lang, lang_rows in grouped.items():
-                index = _LanguageIndex(self._db, lang, _table_name(lang, edition_id))
+            for lang, (tag, lang_rows) in grouped.items():
+                index = _LanguageIndex(self._db, lang, _table_name(tag, edition_id))
                 index.create(lang_rows, embedding_dim)
                 built[lang] = index
         except Exception:
