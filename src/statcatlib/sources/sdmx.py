@@ -124,6 +124,24 @@ def _build_urn(flow: Dataflow) -> str:
     )
 
 
+def _name_or_code(name: InternationalString | None, code: str) -> InternationalString:
+    """*name* without its empty or whitespace texts, else *code* under ``zxx``.
+
+    An empty text is no name: ``{en: "", fr: "X"}`` keeps ``fr`` only, and a
+    name with no text left labels the entity by its ID as a code, as an
+    absent name does (``docs/design/label-lookup.md``, LL-D13).
+
+    Args:
+        name: The name ingest read, or ``None``.
+        code: The entity's ID.
+
+    Returns:
+        The name to store.
+    """
+    kept = {tag: text for tag, text in (name.as_dict() if name is not None else {}).items() if text.strip()}
+    return InternationalString.of(kept) if kept else InternationalString.of({_NO_LANGUAGE: code})
+
+
 def dataset_from_dataflow(
     flow: Dataflow,
     dsd: DataStructure,
@@ -150,23 +168,18 @@ def dataset_from_dataflow(
 
     if publisher is None:
         # An agency with no name is labelled by its ID as a code (GH-94).
-        name = agency.name or InternationalString.of({_NO_LANGUAGE: agency.id})
-        publisher = Agent(id=agency.id, name=name)
+        publisher = Agent(id=agency.id, name=_name_or_code(agency.name, agency.id))
 
     dimension_names: list[InternationalString] = []
 
     for dim in dsd.dimensions:
         # Use the concept name if resolved; fall back to dimension ID.
         concept_ref = dim.concept
+        name: InternationalString | None = None
         if concept_ref is not None and concept_ref.resolved:
             resolved_concept = concept_ref()
-            if hasattr(resolved_concept, "name"):
-                label = resolved_concept.name
-            else:
-                label = InternationalString.of({_NO_LANGUAGE: dim.id})
-        else:
-            label = InternationalString.of({_NO_LANGUAGE: dim.id})
-        dimension_names.append(label)
+            name = getattr(resolved_concept, "name", None)
+        dimension_names.append(_name_or_code(name, dim.id))
 
     return AggregateDataset(
         identifier=identifier,

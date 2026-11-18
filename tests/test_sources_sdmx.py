@@ -22,6 +22,7 @@ from sdmxlib.model.urn import SdmxUrn
 
 import statcatlib as sc
 import statcatlib.query as q
+from statcatlib.sources.sdmx import _name_or_code
 from tests.conftest import ScratchStore, concept_of, cursor_of, open_scratch, scratch_store, seal_and_view, untyped
 
 pytestmark = pytest.mark.integration
@@ -1049,3 +1050,17 @@ class TestDimensionLabels:
         store, ds = self._store(with_concepts=False)
         labels = {d.id: d.label for d in store.dimensions(ds).collect()}
         assert labels == {"GEO": InternationalString(zxx="GEO"), "FREQ": InternationalString(zxx="FREQ")}
+
+
+class TestEmptyNames:
+    """An empty or whitespace text is no name (``docs/design/label-lookup.md``, LL-D13)."""
+
+    def test_an_agency_named_with_empty_text_is_labelled_by_its_id(self):
+        assert _name_or_code(InternationalString.of({"en": ""}), "TEST") == InternationalString(zxx="TEST")
+
+    def test_a_mixed_name_keeps_only_its_texts(self):
+        assert _name_or_code(InternationalString.of({"en": " ", "fr": "Pays"}), "GEO") == InternationalString(fr="Pays")
+
+    def test_an_absent_or_empty_dimension_name_is_the_id_as_a_code(self):
+        assert _name_or_code(None, "GEO") == InternationalString(zxx="GEO")
+        assert _name_or_code(InternationalString(), "GEO") == InternationalString(zxx="GEO")
