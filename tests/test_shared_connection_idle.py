@@ -59,7 +59,7 @@ _OPERATIONS: dict[str, Callable[[sc.EditionView], object]] = {
     "codelist_for": lambda view: view.codelist_for(_dataset(view).identifier, "DIM_1"),
     "dimension_collect": lambda view: view.dimensions(_dataset(view))["DIM_1"].collect(),
     "codelists_len": lambda view: len(view.codelists),
-    "codelist_label": lambda view: view.codelists[_CODELIST].label("en"),
+    "codelist_label": lambda view: view.codelists[_CODELIST].label(lang="en"),
     "code_dataset_count": lambda view: view.codelists[_CODELIST]["D1_0"].dataset_count(),
     "themes_len": lambda view: len(view.themes),
 }

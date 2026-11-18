@@ -1,8 +1,8 @@
 """Request language tags go through `sdmxlib.normalize_tag` on entry, so lookups compare exactly.
 
 sdmxlib 0.79 stores every tag lowercase. A caller may still write ``fr-CA`` or
-``FR``: each public ``lang`` parameter and ``.lang()`` setter normalises it
-once, and a malformed tag raises `sdmxlib.InvalidTagError`.
+``FR``: each public ``lang`` parameter normalises it once, and a malformed
+tag raises `sdmxlib.InvalidTagError`.
 """
 
 import pytest
@@ -57,11 +57,11 @@ def test_a_malformed_tag_raises(store: ScratchStore) -> None:
     with pytest.raises(sdmxlib.InvalidTagError):
         q.title_contains("x", lang="fr_CA!")
     with pytest.raises(sdmxlib.InvalidTagError):
-        store.codelist(_GEO).lang("fr_CA!")
+        store.codelist(_GEO).batch_labels(["CA"], lang="fr_CA!")
 
 
-def test_the_lang_setter_normalises_as_the_parameter_does(store: ScratchStore) -> None:
-    by_setter = store.codelist(_GEO).lang("EN").batch_labels(["CA"])
-    by_parameter = store.codelist(_GEO).batch_labels(["CA"], lang="en")
-    assert by_setter == by_parameter == {"CA": "Canada"}
-    assert store.codelist(_GEO).lang("FR").batch_labels(["CA"]) == {"CA": "Canada (fr)"}
+def test_batch_labels_normalise_the_tag(store: ScratchStore) -> None:
+    assert dict(store.codelist(_GEO).batch_labels(["CA"], lang="EN")) == {"CA": sdmxlib.LocalisedString("Canada", "en")}
+    assert dict(store.codelist(_GEO).batch_labels(["CA"], lang="FR")) == {
+        "CA": sdmxlib.LocalisedString("Canada (fr)", "fr")
+    }

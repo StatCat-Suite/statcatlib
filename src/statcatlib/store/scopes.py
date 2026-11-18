@@ -40,11 +40,12 @@ if TYPE_CHECKING:
 
 import attrs
 import duckdb
-import sdmxlib
 from attrs import define, field
-from sdmxlib import InternationalString
+from sdmxlib import InternationalString, LocalisedString
 from sdmxlib.model.collections import ItemList
 
+from statcatlib._lang_sql import localized_map, pick_map
+from statcatlib.labels import Gap, Labels, Langs, MissingTranslationError, RowList, UnknownCodeError, _as_langs
 from statcatlib.model.skos import Concept, ConceptRef, ConceptScheme
 from statcatlib.query import ExistsFilter, label_norm_sql
 from statcatlib.store.row import Row
@@ -322,6 +323,34 @@ def _compile_enrich_sql(
     raise NotImplementedError(msg)
 
 
+def _column_key(col_expr: str) -> str:
+    """The `Row` key of a SELECT expression: ``t.id`` → ``id``, ``… AS label`` → ``label``."""
+    if " AS " in col_expr.upper():
+        return col_expr.rsplit(" ", 1)[-1].strip()
+    return col_expr.rsplit(".", 1)[-1].strip()
+
+
+def _label_rows(rows: list[Row], *, key: str, entity: str | None, field_name: str, langs: tuple[str, ...]) -> RowList:
+    """Wrap label-joined rows, with a `Gap` for each row whose ``label`` is ``None``.
+
+    Args:
+        rows: Rows holding ``label``, ``label__lang`` and the *key* column.
+        key: The column holding each row's key.
+        entity: The entity every gap names, or ``None`` to use the key.
+        field_name: The label field the gaps name.
+        langs: The tags asked for.
+
+    Returns:
+        The rows and their gaps.
+    """
+    gaps = [
+        Gap(key=r[key], entity=entity if entity is not None else str(r[key]), field=field_name, langs=langs)
+        for r in rows
+        if r["label"] is None
+    ]
+    return RowList(rows, gaps)
+
+
 def _compile_enriched_query(
     scope_type: str,
     entity_sql: str,
@@ -354,9 +383,17 @@ def _compile_enriched_query(
     Returns:
         One `Row` per entity, carrying the entity columns plus one column
         per aliased expression.
+
+    Raises:
+        ValueError: An alias names an entity column, which it would replace.
     """
     entity_params = entity_params or []
     where_params = where_params or []
+    entity_keys = {_column_key(c) for c in entity_select_cols}
+    for ae in exprs:
+        if ae.name in entity_keys:
+            msg = f"enrich alias {ae.name!r} would replace the entity column of that name; choose another alias"
+            raise ValueError(msg)
 
     select_cols = list(entity_select_cols)
     joins: list[str] = []
@@ -390,13 +427,7 @@ def _compile_enriched_query(
     for row in rows:
         item = Row()
         for i, col_expr in enumerate(entity_select_cols):
-            # Derive key from "t.id" → "id", "t.label" → "label",
-            # "COALESCE(...) AS label" → "label"
-            if " AS " in col_expr.upper():
-                key = col_expr.rsplit(" ", 1)[-1].strip()
-            else:
-                key = col_expr.rsplit(".", 1)[-1].strip()
-            item[key] = row[i]
+            item[_column_key(col_expr)] = row[i]
         for i, ae in enumerate(exprs):
             item[ae.name] = row[n_base + i]
         results.append(item)
@@ -520,22 +551,44 @@ class SchemeScope:
             for r in rows
         ]
 
-    def rows(self) -> list[Row]:
-        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``)."""
+    def rows(self, *, lang: Langs) -> RowList:
+        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``).
+
+        Each row holds ``uri``, ``notation``, ``label`` (the concept's label
+        in the first of *lang* it holds, or ``None``) and ``label__lang``
+        (that tag), then one column per enrich alias.
+
+        Args:
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The rows, with a `Gap` for each concept whose label holds none of
+            the tags.
+
+        Raises:
+            ValueError: No ``.enrich()`` was called.
+        """
+        langs = _as_langs(lang)
         if not self._exprs:
             msg = ".rows() requires .enrich() — call .enrich(...) first, or use .collect() for domain objects"
             raise ValueError(msg)
-        return _compile_enriched_query(
+        pick = pick_map("t.label", langs)
+        rows = _compile_enriched_query(
             scope_type="concept",
             entity_sql="FROM statcat.concept t",
             entity_id_col="t.uri",
-            entity_select_cols=["t.uri", "t.notation", "t.label"],
+            entity_select_cols=["t.uri", "t.notation", f"{pick.text} AS label", f"{pick.lang} AS label__lang"],
             scope_filter={},
             exprs=self._exprs,
             conn=self._store._cursor(),
+            entity_params=[*pick.text_params, *pick.lang_params],
             where_sql="t.in_scheme = ?",
             where_params=[self.scheme],
         )
+        gaps = [
+            Gap(key=r["notation"], entity=str(r["uri"]), field="label", langs=langs) for r in rows if r["label"] is None
+        ]
+        return RowList(rows, gaps)
 
     def resolve(self) -> ConceptScheme | None:
         """Terminal: fully hydrate the scheme including all its concepts."""
@@ -554,18 +607,31 @@ class SchemeScope:
         row = first_row(rows)
         return row[0] if row else 0
 
-    def labels(self, lang: str = "en") -> dict[str, str]:
-        """Return ``{notation: display_label}`` for concepts in this scheme."""
-        lang = sdmxlib.normalize_tag(lang)
+    def labels(self, *, lang: Langs) -> Labels[str]:
+        """Each concept's label in the first of *lang* it holds, by notation.
+
+        Args:
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            Every concept of the scheme, ordered by notation; a concept whose
+            label holds none of the tags maps to ``None`` and is a gap.
+        """
+        langs = _as_langs(lang)
+        pick = pick_map("label", langs)
         rows = (
             self._store._cursor()
             .execute(
-                "SELECT notation, label[?] FROM statcat.concept WHERE in_scheme = ? AND label[?] IS NOT NULL",
-                [lang, self.scheme, lang],
+                f"SELECT notation, uri, {pick.text}, {pick.lang} FROM statcat.concept"
+                " WHERE in_scheme = ? ORDER BY notation",
+                [*pick.text_params, *pick.lang_params, self.scheme],
             )
             .fetchall()
         )
-        return {r[0]: r[1] for r in rows}
+        return Labels(
+            ((r[0], None if r[2] is None else LocalisedString(r[2], r[3])) for r in rows),
+            (Gap(key=r[0], entity=r[1], field="label", langs=langs) for r in rows if r[2] is None),
+        )
 
     @property
     def datasets(self) -> QueryBuilder[BaseDataset]:
@@ -673,6 +739,47 @@ class ConceptScope:
 # ---------------------------------------------------------------------------
 
 
+def _codelist_rows(
+    store: _Store,
+    langs: tuple[str, ...],
+    exprs: tuple[AliasedExpr, ...],
+    where_sql: str,
+    where_params: list[object],
+) -> RowList:
+    """Enriched codelist rows: ``urn``, ``label`` and ``label__lang``, then each alias.
+
+    Args:
+        store: The store to query.
+        langs: The tags asked for, normalised.
+        exprs: The enrich expressions.
+        where_sql: The WHERE clause over ``t`` (``sdmx.artefact``) and ``nm``
+            (the codelist's names as a MAP).
+        where_params: Its parameters.
+
+    Returns:
+        The rows, with a `Gap` for each codelist whose name holds none of the
+        tags; empty without an ``sdmx`` schema.
+    """
+    sub, sub_params = localized_map("name")
+    pick = pick_map("nm.m", langs)
+    try:
+        rows = _compile_enriched_query(
+            scope_type="codelist",
+            entity_sql=f"FROM sdmx.artefact t LEFT JOIN {sub} nm ON nm.owner_urn = t.urn",
+            entity_id_col="t.urn",
+            entity_select_cols=["t.urn", f"{pick.text} AS label", f"{pick.lang} AS label__lang"],
+            scope_filter={},
+            exprs=exprs,
+            conn=store._cursor(),
+            entity_params=[*pick.text_params, *pick.lang_params, *sub_params],
+            where_sql=where_sql,
+            where_params=where_params,
+        )
+    except duckdb.CatalogException:
+        return RowList()
+    return _label_rows(rows, key="urn", entity=None, field_name="name", langs=langs)
+
+
 @define(frozen=True)
 class CodelistsScope:
     """Scope over all codelists in the shared structural tables.
@@ -682,25 +789,33 @@ class CodelistsScope:
 
     _store: _Store = field(alias="store", repr=False)
     _exprs: tuple[AliasedExpr, ...] = field(default=(), repr=False)
-    _lang: str = field(default="en", repr=False)
     _filter_text: str | None = field(default=None, repr=False)
+    _filter_langs: tuple[str, ...] = field(default=(), repr=False)
 
     def __getitem__(self, urn: str) -> CodelistScope:
         return CodelistScope(urn=urn, store=self._store)
 
-    def lang(self, lang: str) -> CodelistsScope:
-        """Set language for label resolution. Returns new scope (lazy)."""
-        lang = sdmxlib.normalize_tag(lang)
-        return attrs.evolve(self, lang=lang)
+    def filter(self, *, text_contains: str, lang: Langs) -> CodelistsScope:
+        """Keep codelists whose name or URN contains *text_contains*. Returns new scope (lazy).
 
-    def filter(self, *, text_contains: str) -> CodelistsScope:
-        """Filter codelists by label text (case-insensitive). Returns new scope (lazy)."""
-        return attrs.evolve(self, filter_text=text_contains)
+        The name is the first of *lang* it holds, matched accent-,
+        punctuation- and case-insensitively; the URN as a plain
+        case-insensitive substring.
+
+        Args:
+            text_contains: The text to find.
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The filtered scope.
+        """
+        return attrs.evolve(self, filter_text=text_contains, filter_langs=_as_langs(lang))
 
     def collect(self) -> list[CodelistScope]:
         """Terminal: all codelists as scope handles.
 
         Use ``.rows()`` for enriched tabular results after ``.enrich()``.
+        A ``.filter()`` applies only to ``.rows()``.
         """
         if self._exprs:
             msg = ".collect() cannot be used when .enrich() is active — use .rows() instead"
@@ -715,93 +830,85 @@ class CodelistsScope:
             return []
         return [CodelistScope(urn=r[0], store=self._store) for r in rows]
 
-    def rows(self) -> list[Row]:
-        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``)."""
+    def rows(self, *, lang: Langs) -> RowList:
+        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``).
+
+        Each row holds ``urn``, ``label`` (the codelist's name in the first
+        of *lang* it holds, or ``None``) and ``label__lang`` (that tag), then
+        one column per enrich alias.
+
+        Args:
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The rows, with a `Gap` for each codelist whose name holds none of
+            the tags; empty without an ``sdmx`` schema.
+
+        Raises:
+            ValueError: No ``.enrich()`` was called.
+        """
+        langs = _as_langs(lang)
         if not self._exprs:
             msg = ".rows() requires .enrich() — call .enrich(...) first, or use .collect() for domain objects"
             raise ValueError(msg)
-        entity_sql = (
-            "FROM sdmx.artefact t"
-            " LEFT JOIN sdmx.localized_text lt"
-            " ON lt.owner_urn = t.urn AND lt.field = 'name' AND lt.lang = ?"
-        )
-        entity_params = [self._lang]
-        entity_select_cols = ["t.urn", "COALESCE(lt.text, t.urn) AS label"]
-
         where_parts: list[str] = ["t.artefact_type = 'Codelist'"]
         where_params: list[object] = []
         if self._filter_text is not None:
             # Codelist name text is matched accent- AND punctuation-insensitively
             # (Montréal ~ Montreal, Trois-Rivières ~ Trois Rivieres); the URN is
             # an ASCII identifier, left as a plain ILIKE.
+            fpick = pick_map("nm.m", self._filter_langs)
             where_parts.append(
-                f"({label_norm_sql('lt.text')} ILIKE '%' || {label_norm_sql('?')} || '%' OR t.urn ILIKE ?)"
+                f"({label_norm_sql(fpick.text)} ILIKE '%' || {label_norm_sql('?')} || '%' OR t.urn ILIKE ?)"
             )
-            where_params.extend([self._filter_text, f"%{self._filter_text}%"])
+            where_params.extend([*fpick.text_params, self._filter_text, f"%{self._filter_text}%"])
+        return _codelist_rows(self._store, langs, self._exprs, " AND ".join(where_parts), where_params)
 
-        return _compile_enriched_query(
-            scope_type="codelist",
-            entity_sql=entity_sql,
-            entity_id_col="t.urn",
-            entity_select_cols=entity_select_cols,
-            scope_filter={},
-            exprs=self._exprs,
-            conn=self._store._cursor(),
-            entity_params=entity_params,
-            where_sql=" AND ".join(where_parts),
-            where_params=where_params,
-        )
-
-    def batch_labels(
-        self,
-        pairs: list[tuple[str, str]],
-        lang: str | None = None,
-    ) -> dict[tuple[str, str], str]:
+    def batch_labels(self, pairs: list[tuple[str, str]], *, lang: Langs) -> Labels[tuple[str, str]]:
         """Terminal: resolve labels for ``(codelist_urn, code_id)`` pairs in one query.
 
-        Returns a dict mapping ``(urn, code_id) → label``.  Falls back to the
-        code ID itself when the requested language has no entry.
-
         Args:
-            pairs: Sequence of ``(codelist_urn, code_id)`` tuples to resolve.
-            lang: Language code; defaults to the scope's ``.lang()`` setting.
+            pairs: The ``(codelist_urn, code_id)`` pairs to resolve.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            ``{(codelist_urn, code_id): label}`` for every pair that resolved.
-            A pair with no label in *lang* falls back to its code id.
+            Each pair's name in the first of *lang* it holds, in request
+            order with duplicates collapsed; a code whose name holds none of
+            the tags maps to ``None`` and is a gap.
+
+        Raises:
+            UnknownCodeError: A pair names a code its codelist does not hold,
+                or there is no ``sdmx`` schema.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
-        if not pairs:
-            return {}
-        resolved_lang = lang if lang is not None else self._lang
-        # Build a VALUES table and JOIN against sdmx.code.
-        # resolved_lang is the first ? (MAP subscript); VALUES pairs follow.
-        values_rows = ", ".join("(?, ?)" for _ in pairs)
-        flat_params: list[object] = [resolved_lang]
-        for urn, cid in pairs:
-            flat_params.extend([urn, cid])
+        langs = _as_langs(lang)
+        wanted = list(dict.fromkeys(pairs))
+        if not wanted:
+            return Labels()
+        pick = pick_map("c.name", langs)
+        values_rows = ", ".join("(?, ?)" for _ in wanted)
         try:
             rows = (
                 self._store._cursor()
                 .execute(
                     f"""
-                SELECT c.codelist_urn, c.code_id, COALESCE(c.name[?], c.code_id) AS label
+                SELECT c.codelist_urn, c.code_id, {pick.text}, {pick.lang}
                 FROM sdmx.code c
                 JOIN (VALUES {values_rows}) AS v(cl_urn, cd_id)
                   ON c.codelist_urn = v.cl_urn AND c.code_id = v.cd_id
                 """,
-                    flat_params,
+                    [*pick.text_params, *pick.lang_params, *(x for pair in wanted for x in pair)],
                 )
                 .fetchall()
             )
         except duckdb.CatalogException:
-            return {pair: pair[1] for pair in pairs}
-        result: dict[tuple[str, str], str] = {(r[0], r[1]): r[2] for r in rows}
-        # Fill any pairs not found in the table with the code ID itself
-        for pair in pairs:
-            result.setdefault(pair, pair[1])
-        return result
+            raise UnknownCodeError(wanted) from None
+        found = {(r[0], r[1]): None if r[2] is None else LocalisedString(r[2], r[3]) for r in rows}
+        if missing := [pair for pair in wanted if pair not in found]:
+            raise UnknownCodeError(missing)
+        return Labels(
+            ((pair, found[pair]) for pair in wanted),
+            (Gap(key=pair, entity=pair[0], field="name", langs=langs) for pair in wanted if found[pair] is None),
+        )
 
     def enrich(self, *exprs: AliasedExpr, **kwargs: Expr) -> CodelistsScope:
         """Add computed fields. Returns new scope (lazy)."""
@@ -835,15 +942,9 @@ class CodelistScope:
     urn: str
     _store: _Store = field(alias="store", repr=False)
     _exprs: tuple[AliasedExpr, ...] = field(default=(), repr=False)
-    _lang: str = field(default="en", repr=False)
 
     def __getitem__(self, code_id: str) -> CodeScope:
         return CodeScope(codelist_urn=self.urn, code_id=code_id, store=self._store)
-
-    def lang(self, lang: str) -> CodelistScope:
-        """Set language for code label resolution. Returns new scope (lazy)."""
-        lang = sdmxlib.normalize_tag(lang)
-        return attrs.evolve(self, lang=lang)
 
     def collect(self) -> ItemList[Code]:
         """Terminal: resolve codelist and return all codes.
@@ -855,97 +956,137 @@ class CodelistScope:
             raise ValueError(msg)
         return self._store._resolve_codelist(self.urn).codes
 
-    def rows(self) -> list[Row]:
-        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``)."""
+    def rows(self, *, lang: Langs) -> RowList:
+        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``).
+
+        Each row holds ``code_id``, ``label`` (the code's name in the first
+        of *lang* it holds, or ``None``) and ``label__lang`` (that tag), then
+        one column per enrich alias.
+
+        Args:
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The rows, with a `Gap` for each code whose name holds none of the
+            tags; empty without an ``sdmx`` schema.
+
+        Raises:
+            ValueError: No ``.enrich()`` was called.
+        """
+        langs = _as_langs(lang)
         if not self._exprs:
             msg = ".rows() requires .enrich() — call .enrich(...) first, or use .collect() for domain objects"
             raise ValueError(msg)
-        return _compile_enriched_query(
-            scope_type="code",
-            entity_sql="FROM sdmx.code t",
-            entity_id_col="t.code_id",
-            entity_select_cols=[
-                "t.code_id",
-                "COALESCE(t.name[?], t.code_id) AS label",
-            ],
-            scope_filter={"codelist_urn": self.urn},
-            exprs=self._exprs,
-            conn=self._store._cursor(),
-            entity_params=[self._lang],
-            where_sql="t.codelist_urn = ?",
-            where_params=[self.urn],
-        )
+        pick = pick_map("t.name", langs)
+        try:
+            rows = _compile_enriched_query(
+                scope_type="code",
+                entity_sql="FROM sdmx.code t",
+                entity_id_col="t.code_id",
+                entity_select_cols=["t.code_id", f"{pick.text} AS label", f"{pick.lang} AS label__lang"],
+                scope_filter={"codelist_urn": self.urn},
+                exprs=self._exprs,
+                conn=self._store._cursor(),
+                entity_params=[*pick.text_params, *pick.lang_params],
+                where_sql="t.codelist_urn = ?",
+                where_params=[self.urn],
+            )
+        except duckdb.CatalogException:
+            return RowList()
+        return _label_rows(rows, key="code_id", entity=self.urn, field_name="name", langs=langs)
 
     def count(self) -> int:
         """Terminal: number of codes in this codelist."""
         cl = self._store._resolve_codelist(self.urn)
         return len(cl.codes)
 
-    def label(self, lang: str = "en") -> str | None:
-        """Terminal: human-readable label for this codelist in *lang*.
+    def label(self, *, lang: Langs) -> LocalisedString | None:
+        """Terminal: this codelist's name in the first of *lang* it holds.
 
-        Resolves via the sdmxlib localized_text table.
+        Resolves via the sdmxlib ``localized_text`` table.
+
+        Args:
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The name with the tag that answered; ``None`` when no codelist
+            has this URN or there is no ``sdmx`` schema.
+
+        Raises:
+            MissingTranslationError: The codelist exists and its name holds
+                none of the tags.
         """
-        lang = sdmxlib.normalize_tag(lang)
+        langs = _as_langs(lang)
+        sub, sub_params = localized_map("name")
+        pick = pick_map("nm.m", langs)
         try:
-            rows = (
+            row = first_row(
                 self._store._cursor()
                 .execute(
-                    """
-                SELECT lt.text FROM sdmx.localized_text lt
-                WHERE lt.owner_urn = ? AND lt.field = 'name' AND lt.lang = ?
+                    f"""
+                SELECT {pick.text}, {pick.lang}, map_keys(nm.m)
+                FROM sdmx.artefact a
+                LEFT JOIN {sub} nm ON nm.owner_urn = a.urn
+                WHERE a.urn = ? AND a.artefact_type = 'Codelist'
                 LIMIT 1
                 """,
-                    [self.urn, lang],
+                    [*pick.text_params, *pick.lang_params, *sub_params, self.urn],
                 )
                 .fetchall()
             )
-            row = first_row(rows)
         except duckdb.CatalogException:
             return None
-        return row[0] if row else None
+        if row is None:
+            return None
+        if row[0] is None:
+            raise MissingTranslationError(self.urn, "name", langs, sorted(row[2] or ()))
+        return LocalisedString(row[0], row[1])
 
-    def batch_labels(self, code_ids: list[str], lang: str | None = None) -> dict[str, str]:
-        """Terminal: resolve labels for *code_ids* in a single SQL query.
-
-        Returns a dict mapping ``code_id → label``.  Falls back to the
-        code ID itself when the requested language has no entry.
+    def batch_labels(self, code_ids: list[str], *, lang: Langs) -> Labels[str]:
+        """Terminal: resolve the names of *code_ids* in a single SQL query.
 
         Args:
             code_ids: Code IDs to resolve (e.g. ``["ON", "QC", "BC"]``).
-            lang: Language code; defaults to the scope's ``.lang()`` setting.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            ``{code_id: label}`` for every id that resolved. An id with no
-            label in *lang* falls back to the id itself.
+            Each code's name in the first of *lang* it holds, in request
+            order with duplicates collapsed; a code whose name holds none of
+            the tags maps to ``None`` and is a gap.
+
+        Raises:
+            UnknownCodeError: A code ID the codelist does not hold, or no
+                ``sdmx`` schema.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
-        if not code_ids:
-            return {}
-        resolved_lang = lang if lang is not None else self._lang
-        placeholders = ", ".join("?" * len(code_ids))
+        langs = _as_langs(lang)
+        wanted = list(dict.fromkeys(code_ids))
+        if not wanted:
+            return Labels()
+        pick = pick_map("name", langs)
+        placeholders = ", ".join("?" * len(wanted))
         try:
             rows = (
                 self._store._cursor()
                 .execute(
                     f"""
-                SELECT code_id, COALESCE(name[?], code_id) AS label
+                SELECT code_id, {pick.text}, {pick.lang}
                 FROM sdmx.code
                 WHERE codelist_urn = ?
                   AND code_id IN ({placeholders})
                 """,
-                    [resolved_lang, self.urn, *code_ids],
+                    [*pick.text_params, *pick.lang_params, self.urn, *wanted],
                 )
                 .fetchall()
             )
         except duckdb.CatalogException:
-            return {cid: cid for cid in code_ids}
-        result = {r[0]: r[1] for r in rows}
-        # Fill any code_ids not found in the table with the ID itself
-        for cid in code_ids:
-            result.setdefault(cid, cid)
-        return result
+            raise UnknownCodeError([(self.urn, cid) for cid in wanted]) from None
+        found = {r[0]: None if r[1] is None else LocalisedString(r[1], r[2]) for r in rows}
+        if missing := [cid for cid in wanted if cid not in found]:
+            raise UnknownCodeError([(self.urn, cid) for cid in missing])
+        return Labels(
+            ((cid, found[cid]) for cid in wanted),
+            (Gap(key=cid, entity=self.urn, field="name", langs=langs) for cid in wanted if found[cid] is None),
+        )
 
     def enrich(self, *exprs: AliasedExpr, **kwargs: Expr) -> CodelistScope:
         """Add computed fields to per-code results. Returns new scope (lazy)."""
@@ -1411,15 +1552,9 @@ class _FilteredCodelistsScope:
     _store: _Store = field(alias="store", repr=False)
     codelist_urns: list[str] = field(factory=list)
     _exprs: tuple[AliasedExpr, ...] = field(default=(), repr=False)
-    _lang: str = field(default="en", repr=False)
 
     def __getitem__(self, urn: str) -> CodelistScope:
         return CodelistScope(urn=urn, store=self._store)
-
-    def lang(self, lang: str) -> _FilteredCodelistsScope:
-        """Set language for label resolution. Returns new scope (lazy)."""
-        lang = sdmxlib.normalize_tag(lang)
-        return attrs.evolve(self, lang=lang)
 
     def collect(self) -> list[CodelistScope]:
         """Terminal: materialize codelists as scope handles.
@@ -1433,33 +1568,33 @@ class _FilteredCodelistsScope:
             return []
         return [CodelistScope(urn=urn, store=self._store) for urn in self.codelist_urns]
 
-    def rows(self) -> list[Row]:
-        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``)."""
+    def rows(self, *, lang: Langs) -> RowList:
+        """Terminal: return enriched results as ``Row`` objects (requires ``.enrich()``).
+
+        As `CodelistsScope.rows`, over these codelists.
+
+        Args:
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The rows and their gaps.
+
+        Raises:
+            ValueError: No ``.enrich()`` was called.
+        """
+        langs = _as_langs(lang)
         if not self._exprs:
             msg = ".rows() requires .enrich() — call .enrich(...) first, or use .collect() for domain objects"
             raise ValueError(msg)
         if not self.codelist_urns:
-            return []
+            return RowList()
         placeholders = ", ".join("?" * len(self.codelist_urns))
-        entity_sql = (
-            "FROM sdmx.artefact t"
-            " LEFT JOIN sdmx.localized_text lt"
-            " ON lt.owner_urn = t.urn AND lt.field = 'name' AND lt.lang = ?"
-        )
-        entity_params = [self._lang]
-        entity_select_cols = ["t.urn", "COALESCE(lt.text, t.urn) AS label"]
-
-        return _compile_enriched_query(
-            scope_type="codelist",
-            entity_sql=entity_sql,
-            entity_id_col="t.urn",
-            entity_select_cols=entity_select_cols,
-            scope_filter={},
-            exprs=self._exprs,
-            conn=self._store._cursor(),
-            entity_params=entity_params,
-            where_sql=f"t.artefact_type = 'Codelist' AND t.urn IN ({placeholders})",
-            where_params=self.codelist_urns,
+        return _codelist_rows(
+            self._store,
+            langs,
+            self._exprs,
+            f"t.artefact_type = 'Codelist' AND t.urn IN ({placeholders})",
+            list(self.codelist_urns),
         )
 
     def enrich(self, *exprs: AliasedExpr, **kwargs: Expr) -> _FilteredCodelistsScope:

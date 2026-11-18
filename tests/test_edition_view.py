@@ -102,10 +102,14 @@ class TestNameResolution:
 
     def test_a_scope_resolves_to_each_edition(self, two: tuple[sc.EditionView, sc.EditionView]) -> None:
         north, south = two
-        assert north.codelists[_CODELIST].label("en") == "Geography"
-        assert north.codelists[_CODELIST].batch_labels(["X"], lang="en") == {"X": "Nord"}
-        assert south.codelists[_CODELIST].batch_labels(["X"], lang="en") == {"X": "Sud"}
-        assert north.codelists.batch_labels([(_CODELIST, "X")], lang="en") == {(_CODELIST, "X"): "Nord"}
+        assert north.codelists[_CODELIST].label(lang="en") == sc.LocalisedString("Geography", "en")
+        assert dict(north.codelists[_CODELIST].batch_labels(["X"], lang="en")) == {
+            "X": sc.LocalisedString("Nord", "en")
+        }
+        assert dict(south.codelists[_CODELIST].batch_labels(["X"], lang="en")) == {"X": sc.LocalisedString("Sud", "en")}
+        assert dict(north.codelists.batch_labels([(_CODELIST, "X")], lang="en")) == {
+            (_CODELIST, "X"): sc.LocalisedString("Nord", "en")
+        }
 
     def test_code_map_resolves_to_each_edition(self, two: tuple[sc.EditionView, sc.EditionView]) -> None:
         north, south = two

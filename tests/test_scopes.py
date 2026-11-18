@@ -107,10 +107,19 @@ class TestSchemeScope:
         assert n > 0
 
     def test_labels(self, scheme_store):
-        labels = scheme_store.themes[_SCHEME_URI].labels()
-        assert isinstance(labels, dict)
+        labels = scheme_store.themes[_SCHEME_URI].labels(lang="en")
+        assert isinstance(labels, sc.Labels)
         assert len(labels) > 0
         assert "Economy" in labels
+        label = labels["Economy"]
+        assert label is not None
+        assert label.lang == "en"
+
+    def test_labels_list_every_concept_and_its_gap(self, scheme_store):
+        labels = scheme_store.themes[_SCHEME_URI].labels(lang="de")
+        assert set(labels.values()) == {None}
+        assert {g.key for g in labels.gaps} == set(labels)
+        assert all(g.field == "label" and g.langs == ("de",) for g in labels.gaps)
 
     def test_uri_property(self, scheme_store):
         scope = scheme_store.themes[_SCHEME_URI]
@@ -139,7 +148,7 @@ class TestSchemeScopeEnrich:
             .enrich(
                 n=sc.each("datasets").count(),
             )
-            .rows()
+            .rows(lang="en")
         )
         assert isinstance(results, list)
         assert len(results) > 0
@@ -152,7 +161,7 @@ class TestSchemeScopeEnrich:
             .enrich(
                 sc.each("datasets").count().alias("total"),
             )
-            .rows()
+            .rows(lang="en")
         )
         assert "total" in results[0]
 
@@ -163,7 +172,7 @@ class TestSchemeScopeEnrich:
                 sc.each("datasets").count().alias("total"),
                 has_data=sc.each("datasets").exists(),
             )
-            .rows()
+            .rows(lang="en")
         )
         assert "total" in results[0]
         assert "has_data" in results[0]
@@ -174,10 +183,15 @@ class TestSchemeScopeEnrich:
             .enrich(
                 n=sc.each("datasets").count(),
             )
-            .rows()
+            .rows(lang="en")
         )
         economy = next(r for r in results if r["notation"] == "Economy")
         assert economy["n"] >= 1
+        assert economy["label__lang"] == "en"
+
+    def test_an_alias_naming_an_entity_column_is_refused(self, scheme_store):
+        with pytest.raises(ValueError, match="'label'"):
+            scheme_store.themes[_SCHEME_URI].enrich(label=sc.each("datasets").count()).rows(lang="en")
 
 
 # ---------------------------------------------------------------------------
@@ -515,14 +529,14 @@ class TestCodelistsScopeEnrich:
 
     def test_enrich_rows_returns_dicts(self):
         store = _make_sdmx_store()
-        results = store.codelists.enrich(n=sc.each("datasets").count()).rows()
+        results = store.codelists.enrich(n=sc.each("datasets").count()).rows(lang="en")
         assert isinstance(results, list)
         assert len(results) == 3
         assert all("urn" in r and "n" in r for r in results)
 
     def test_enrich_includes_label(self):
         store = _make_sdmx_store()
-        results = store.codelists.enrich(n=sc.each("datasets").count()).rows()
+        results = store.codelists.enrich(n=sc.each("datasets").count()).rows(lang="en")
         assert all("label" in r for r in results)
         by_urn = {r["urn"]: r for r in results}
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
@@ -530,23 +544,33 @@ class TestCodelistsScopeEnrich:
 
     def test_enrich_lang(self):
         store = _make_sdmx_store()
-        # No French labels in fixture → should fall back to URN
-        results = store.codelists.lang("fr").enrich(n=sc.each("datasets").count()).rows()
-        assert all("label" in r for r in results)
-        # With no French text, label falls back to URN
-        for r in results:
-            assert r["label"] is not None
+        # No French names in the fixture: each label is None and a gap.
+        results = store.codelists.enrich(n=sc.each("datasets").count()).rows(lang="fr")
+        assert all(r["label"] is None and r["label__lang"] is None for r in results)
+        assert {g.key for g in results.gaps} == {r["urn"] for r in results}
+
+    def test_enrich_lang_tuple_falls_back_in_order(self):
+        store = _make_sdmx_store()
+        results = store.codelists.enrich(n=sc.each("datasets").count()).rows(lang=("fr", "en"))
+        assert all(r["label__lang"] == "en" for r in results)
+        assert results.gaps == ()
 
     def test_enrich_filter_text_contains(self):
         store = _make_sdmx_store()
-        results = store.codelists.filter(text_contains="Geo").enrich(n=sc.each("datasets").count()).rows()
+        results = (
+            store.codelists.filter(text_contains="Geo", lang="en").enrich(n=sc.each("datasets").count()).rows(lang="en")
+        )
         assert len(results) >= 1
         labels = [r["label"] for r in results]
         assert any("Geography" in str(lbl or "") for lbl in labels)
 
     def test_enrich_filter_text_excludes(self):
         store = _make_sdmx_store()
-        results = store.codelists.filter(text_contains="ZZZZZ").enrich(n=sc.each("datasets").count()).rows()
+        results = (
+            store.codelists.filter(text_contains="ZZZZZ", lang="en")
+            .enrich(n=sc.each("datasets").count())
+            .rows(lang="en")
+        )
         assert len(results) == 0
 
     def test_enrich_filter_text_accent_insensitive(self):
@@ -565,7 +589,11 @@ class TestCodelistsScopeEnrich:
             registry.add(obj)
         store = open_scratch()
         sc.ingest_sdmx(store, registry)
-        results = store.codelists.filter(text_contains="Geographie").enrich(n=sc.each("datasets").count()).rows()
+        results = (
+            store.codelists.filter(text_contains="Geographie", lang="en")
+            .enrich(n=sc.each("datasets").count())
+            .rows(lang="en")
+        )
         assert any("Géographie" in str(r["label"] or "") for r in results)
 
     def test_enrich_filter_text_punctuation_insensitive(self):
@@ -584,12 +612,16 @@ class TestCodelistsScopeEnrich:
             registry.add(obj)
         store = open_scratch()
         sc.ingest_sdmx(store, registry)
-        results = store.codelists.filter(text_contains="Sub area").enrich(n=sc.each("datasets").count()).rows()
+        results = (
+            store.codelists.filter(text_contains="Sub area", lang="en")
+            .enrich(n=sc.each("datasets").count())
+            .rows(lang="en")
+        )
         assert any("Sub-area" in str(r["label"] or "") for r in results)
 
     def test_enrich_count_values(self):
         store = _make_sdmx_store()
-        results = store.codelists.enrich(n=sc.each("datasets").count()).rows()
+        results = store.codelists.enrich(n=sc.each("datasets").count()).rows(lang="en")
         by_urn = {r["urn"]: r for r in results}
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
         freq_a_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_FREQ_A(1.0)"
@@ -600,34 +632,44 @@ class TestCodelistsScopeEnrich:
 
     def test_enrich_exists(self):
         store = _make_sdmx_store()
-        results = store.codelists.enrich(has_data=sc.each("datasets").exists()).rows()
+        results = store.codelists.enrich(has_data=sc.each("datasets").exists()).rows(lang="en")
         assert all(r["has_data"] for r in results)
 
 
 class TestCodelistScopeLabel:
-    def test_label_returns_string(self):
+    def test_label_returns_a_localised_string(self):
         store = _make_sdmx_store()
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
-        label = store.codelist(geo_urn).label("en")
-        assert label == "Geography"
+        label = store.codelist(geo_urn).label(lang="en")
+        assert label == sc.LocalisedString("Geography", "en")
 
-    def test_label_missing_lang_returns_none(self):
+    def test_label_takes_the_first_held_tag(self):
         store = _make_sdmx_store()
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
-        label = store.codelist(geo_urn).label("de")
-        assert label is None
+        assert store.codelist(geo_urn).label(lang=("de", "en")) == sc.LocalisedString("Geography", "en")
+
+    def test_label_missing_lang_raises(self):
+        store = _make_sdmx_store()
+        geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
+        with pytest.raises(sc.MissingTranslationError) as caught:
+            store.codelist(geo_urn).label(lang="de")
+        assert caught.value.entity == geo_urn
+        assert caught.value.langs == ("de",)
+        assert caught.value.held == ("en",)
 
     def test_label_nonexistent_returns_none(self):
         store = _make_sdmx_store()
-        label = store.codelist("urn:nonexistent").label("en")
-        assert label is None
+        assert store.codelist("urn:nonexistent").label(lang="en") is None
+
+    def test_label_without_an_sdmx_schema_returns_none(self):
+        assert open_scratch().codelist("urn:nonexistent").label(lang="en") is None
 
 
 class TestCodelistScopeEnrich:
     def test_enrich_per_code_returns_dicts(self):
         store = _make_sdmx_store()
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
-        results = store.codelist(geo_urn).enrich(n=sc.each("datasets").count()).rows()
+        results = store.codelist(geo_urn).enrich(n=sc.each("datasets").count()).rows(lang="en")
         assert isinstance(results, list)
         assert len(results) == 2  # CA, US
         assert all("code_id" in r and "n" in r for r in results)
@@ -635,7 +677,7 @@ class TestCodelistScopeEnrich:
     def test_enrich_per_code_includes_label(self):
         store = _make_sdmx_store()
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
-        results = store.codelist(geo_urn).enrich(n=sc.each("datasets").count()).rows()
+        results = store.codelist(geo_urn).enrich(n=sc.each("datasets").count()).rows(lang="en")
         by_code = {r["code_id"]: r for r in results}
         assert by_code["CA"]["label"] == "Canada"
         assert by_code["US"]["label"] == "United States"
@@ -643,16 +685,16 @@ class TestCodelistScopeEnrich:
     def test_enrich_per_code_lang(self):
         store = _make_sdmx_store()
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
-        # No French labels → falls back to code_id
-        results = store.codelist(geo_urn).lang("fr").enrich(n=sc.each("datasets").count()).rows()
+        # No French names: each label is None and a gap naming the codelist.
+        results = store.codelist(geo_urn).enrich(n=sc.each("datasets").count()).rows(lang="fr")
         by_code = {r["code_id"]: r for r in results}
-        # With no French name, COALESCE falls back to code_id
-        assert by_code["CA"]["label"] == "CA"
+        assert by_code["CA"]["label"] is None
+        assert sc.Gap(key="CA", entity=geo_urn, field="name", langs=("fr",)) in results.gaps
 
     def test_enrich_per_code_count_values(self):
         store = _make_sdmx_store()
         geo_urn = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=TEST:CL_GEO(1.0)"
-        results = store.codelist(geo_urn).enrich(n=sc.each("datasets").count()).rows()
+        results = store.codelist(geo_urn).enrich(n=sc.each("datasets").count()).rows(lang="en")
         by_code = {r["code_id"]: r for r in results}
         # Both CA and US are in the codelist, but dataset_code links depend on
         # what ingest_sdmx writes — the codes may have 0 dataset_code rows
@@ -680,80 +722,74 @@ class TestBatchLabels:
 
     def test_codelist_scope_batch_labels_basic(self):
         store = _make_sdmx_store()
-        labels = store.codelist(self.GEO_URN).batch_labels(["CA", "US"])
-        assert labels == {"CA": "Canada", "US": "United States"}
+        labels = store.codelist(self.GEO_URN).batch_labels(["CA", "US"], lang="en")
+        assert dict(labels) == {
+            "CA": sc.LocalisedString("Canada", "en"),
+            "US": sc.LocalisedString("United States", "en"),
+        }
+        assert labels.gaps == ()
 
-    def test_codelist_scope_batch_labels_single(self):
+    def test_codelist_scope_batch_labels_keeps_request_order_and_collapses_duplicates(self):
         store = _make_sdmx_store()
-        labels = store.codelist(self.GEO_URN).batch_labels(["CA"])
-        assert labels["CA"] == "Canada"
+        labels = store.codelist(self.GEO_URN).batch_labels(["US", "CA", "US"], lang="en")
+        assert list(labels) == ["US", "CA"]
 
     def test_codelist_scope_batch_labels_empty_input(self):
         store = _make_sdmx_store()
-        labels = store.codelist(self.GEO_URN).batch_labels([])
-        assert labels == {}
+        assert dict(store.codelist(self.GEO_URN).batch_labels([], lang="en")) == {}
 
-    def test_codelist_scope_batch_labels_missing_code_falls_back(self):
+    def test_codelist_scope_batch_labels_unknown_code_raises(self):
         store = _make_sdmx_store()
-        labels = store.codelist(self.GEO_URN).batch_labels(["CA", "XX"])
-        assert labels["CA"] == "Canada"
-        assert labels["XX"] == "XX"  # fallback to code_id
+        with pytest.raises(sc.UnknownCodeError) as caught:
+            store.codelist(self.GEO_URN).batch_labels(["CA", "XX"], lang="en")
+        assert caught.value.missing == ((self.GEO_URN, "XX"),)
 
-    def test_codelist_scope_batch_labels_lang_override(self):
+    def test_codelist_scope_batch_labels_untranslated_code_is_a_gap(self):
         store = _make_sdmx_store()
-        # No French labels exist → fallback to code_id
-        labels = store.codelist(self.GEO_URN).lang("fr").batch_labels(["CA"])
-        assert labels["CA"] == "CA"
+        labels = store.codelist(self.GEO_URN).batch_labels(["CA"], lang="fr")
+        assert labels["CA"] is None
+        assert labels.gaps == (sc.Gap(key="CA", entity=self.GEO_URN, field="name", langs=("fr",)),)
 
-    def test_codelist_scope_batch_labels_lang_arg_overrides_scope(self):
+    def test_codelist_scope_batch_labels_tuple_falls_back(self):
         store = _make_sdmx_store()
-        # Scope says "fr" but arg says "en" → English labels win
-        labels = store.codelist(self.GEO_URN).lang("fr").batch_labels(["CA"], lang="en")
-        assert labels["CA"] == "Canada"
+        labels = store.codelist(self.GEO_URN).batch_labels(["CA"], lang=("fr", "en"))
+        assert labels["CA"] == sc.LocalisedString("Canada", "en")
 
     def test_codelist_scope_batch_labels_empty_store(self):
         store = open_scratch()
-        labels = store.codelist(self.GEO_URN).batch_labels(["CA"])
-        assert labels == {"CA": "CA"}  # fallback on CatalogException
+        with pytest.raises(sc.UnknownCodeError):
+            store.codelist(self.GEO_URN).batch_labels(["CA"], lang="en")
 
     # --- CodelistsScope.batch_labels ---
 
     def test_codelists_scope_batch_labels_basic(self):
         store = _make_sdmx_store()
         pairs = [(self.GEO_URN, "CA"), (self.GEO_URN, "US"), (self.FREQ_A_URN, "A")]
-        labels = store.codelists.batch_labels(pairs)
-        assert labels[(self.GEO_URN, "CA")] == "Canada"
-        assert labels[(self.GEO_URN, "US")] == "United States"
-        assert labels[(self.FREQ_A_URN, "A")] == "Annual"
+        labels = store.codelists.batch_labels(pairs, lang="en")
+        assert labels[(self.GEO_URN, "CA")] == sc.LocalisedString("Canada", "en")
+        assert labels[(self.GEO_URN, "US")] == sc.LocalisedString("United States", "en")
+        assert labels[(self.FREQ_A_URN, "A")] == sc.LocalisedString("Annual", "en")
 
     def test_codelists_scope_batch_labels_empty_input(self):
         store = _make_sdmx_store()
-        assert store.codelists.batch_labels([]) == {}
+        assert dict(store.codelists.batch_labels([], lang="en")) == {}
 
-    def test_codelists_scope_batch_labels_missing_pair_falls_back(self):
+    def test_codelists_scope_batch_labels_unknown_pairs_raise(self):
         store = _make_sdmx_store()
-        pairs = [(self.GEO_URN, "XX")]
-        labels = store.codelists.batch_labels(pairs)
-        assert labels[(self.GEO_URN, "XX")] == "XX"
+        with pytest.raises(sc.UnknownCodeError) as caught:
+            store.codelists.batch_labels([(self.GEO_URN, "XX"), (self.FREQ_A_URN, "YY")], lang="en")
+        assert caught.value.missing == ((self.GEO_URN, "XX"), (self.FREQ_A_URN, "YY"))
 
-    def test_codelists_scope_batch_labels_lang_override(self):
+    def test_codelists_scope_batch_labels_untranslated_pair_is_a_gap(self):
         store = _make_sdmx_store()
-        pairs = [(self.GEO_URN, "CA")]
-        # French not available → fallback
-        labels = store.codelists.lang("fr").batch_labels(pairs)
-        assert labels[(self.GEO_URN, "CA")] == "CA"
-
-    def test_codelists_scope_batch_labels_lang_arg(self):
-        store = _make_sdmx_store()
-        pairs = [(self.GEO_URN, "CA")]
-        labels = store.codelists.batch_labels(pairs, lang="en")
-        assert labels[(self.GEO_URN, "CA")] == "Canada"
+        labels = store.codelists.batch_labels([(self.GEO_URN, "CA")], lang="fr")
+        assert labels[(self.GEO_URN, "CA")] is None
+        assert [g.key for g in labels.gaps] == [(self.GEO_URN, "CA")]
 
     def test_codelists_scope_batch_labels_empty_store(self):
         store = open_scratch()
-        pairs = [(self.GEO_URN, "CA")]
-        labels = store.codelists.batch_labels(pairs)
-        assert labels[(self.GEO_URN, "CA")] == "CA"
+        with pytest.raises(sc.UnknownCodeError):
+            store.codelists.batch_labels([(self.GEO_URN, "CA")], lang="en")
 
 
 class TestSdmxEdgeUnsupportedReduction:
@@ -772,10 +808,10 @@ class TestSdmxEdgeUnsupportedReduction:
     def test_bare_traversal_on_a_codelist_scope_names_the_reduction(self):
         store = _make_sdmx_store()
         with pytest.raises(NotImplementedError, match="Unsupported reduction: none"):
-            store.codelists.enrich(n=sc.each("datasets")).rows()
+            store.codelists.enrich(n=sc.each("datasets")).rows(lang="en")
 
     def test_count_on_a_codelist_scope_still_works(self):
         store = _make_sdmx_store()
-        rows = store.codelists.enrich(n=sc.each("datasets").count()).rows()
+        rows = store.codelists.enrich(n=sc.each("datasets").count()).rows(lang="en")
         assert rows
         assert all("n" in row for row in rows)
