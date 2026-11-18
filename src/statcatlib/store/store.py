@@ -3161,24 +3161,24 @@ class _Store:
 
     @property
     def codes(self) -> CodesScope:
-        """Typed search and lookup over SDMX codes — ``cat.codes.find("Toronto")``."""
+        """Typed search and lookup over SDMX codes — ``cat.codes.find("Toronto", lang="en")``."""
         return CodesScope(store=self)
 
     @property
     def concepts(self) -> ConceptsScope:
-        """Typed search and lookup over SDMX Concepts — ``cat.concepts.find("Gini")``."""
+        """Typed search and lookup over SDMX Concepts — ``cat.concepts.find("Gini", lang="en")``."""
         return ConceptsScope(store=self)
 
     @property
     def datasets(self) -> DatasetsScope:
-        """Typed dataset search — ``cat.datasets.find(q, mode="hybrid")``."""
+        """Typed dataset search — ``cat.datasets.find(q, mode="hybrid", lang="en")``."""
         return DatasetsScope(store=self)
 
     @property
     def reference_metadata(self) -> ReferenceMetadataScope:
         """Typed search over indexed SDMX reference-metadata sections.
 
-        ``cat.reference_metadata.find("data quality for income")`` — the
+        ``cat.reference_metadata.find("data quality for income", lang="en")`` — the
         semantic-search counterpart to `metadata_for` (which resolves
         by target URN). Requires the index to have been built with
         ``include_reference_metadata=True``.
@@ -6104,10 +6104,10 @@ class _Store:
 
         For type-narrowed search restrict to one kind:
 
-        - `datasets` — ``cat.datasets.find(text, mode=...)``
-        - `concepts` — ``cat.concepts.find(text, mode=...)``
-        - `codes`    — ``cat.codes.find(text, mode=...)``
-        - `reference_metadata` — ``cat.reference_metadata.find(text, ...)``
+        - `datasets` — ``cat.datasets.find(text, lang=..., mode=...)``
+        - `concepts` — ``cat.concepts.find(text, lang=..., mode=...)``
+        - `codes`    — ``cat.codes.find(text, lang=..., mode=...)``
+        - `reference_metadata` — ``cat.reference_metadata.find(text, lang=..., ...)``
 
         ``kinds`` defaults to dataset/concept/code; pass
         ``"reference_metadata"`` explicitly to fold methodology-document
@@ -7397,17 +7397,17 @@ class EditionView:
 
     @property
     def codes(self) -> CodesScope:
-        """Typed search and lookup over SDMX codes: ``view.codes.find("Toronto")``."""
+        """Typed search and lookup over SDMX codes: ``view.codes.find("Toronto", lang="en")``."""
         return self._s().codes
 
     @property
     def concepts(self) -> ConceptsScope:
-        """Typed search and lookup over SDMX concepts: ``view.concepts.find("Gini")``."""
+        """Typed search and lookup over SDMX concepts: ``view.concepts.find("Gini", lang="en")``."""
         return self._s().concepts
 
     @property
     def datasets(self) -> DatasetsScope:
-        """Typed dataset search: ``view.datasets.find(q, mode="hybrid")``."""
+        """Typed dataset search: ``view.datasets.find(q, mode="hybrid", lang="en")``."""
         return self._s().datasets
 
     @property

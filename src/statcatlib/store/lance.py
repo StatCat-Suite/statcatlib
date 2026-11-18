@@ -1693,7 +1693,7 @@ class LanceIndex:
             id_filter: Optional whitelist of ``id`` values to restrict matches to — used to scope code-level
                 search to a specific dataset set.
             codelist_urn_filter: Restrict matches to rows whose ``codelist_urn`` is in this set — the
-                primitive that lets ``cat.codes.find(..., codelist_urn=GEO)`` scope a code search to one
+                primitive that lets ``cat.codes.find(..., lang=..., codelist_urn=GEO)`` scope a code search to one
                 codelist.
             scheme_urn_filter: Restrict matches to rows whose ``scheme_urn`` is in this set — the concept-
                 row analogue of ``codelist_urn_filter``.

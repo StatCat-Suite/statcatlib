@@ -12,11 +12,11 @@ Usage:
 
     store.themes["https://example.com/themes"].enrich(
         n=sc.each("datasets").count(),
-    ).rows()
+    ).rows(lang="en")
 
     store.codelists.enrich(
         n=sc.each("datasets").count(),
-    ).rows()
+    ).rows(lang="en")
 
     # DatasetScope — Gremlin-inspired graph navigation
     store.dataset("housing-stats").codelists  # CodelistsScope
