@@ -110,6 +110,9 @@ dev = [
     "lancedb>=0.39",
     "mkdocs-material>=9.7.6",
     "mkdocstrings[python]>=1.0.3",
+    # The JSON-order test of a LocalisedString label imports it; at runtime
+    # msgspec arrives through sdmxlib (docs/design/label-lookup.md, LL-D10).
+    "msgspec>=0.22",
     "obstore>=0.12,<0.13",
     "polars>=1.39.3",
     # The checkers are capped, as sdmxlib's are: uv.lock is gitignored, so an
