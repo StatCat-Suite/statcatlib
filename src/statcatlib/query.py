@@ -39,6 +39,8 @@ from typing import override
 import sdmxlib as sl
 from attrs import define, field
 
+from statcatlib._lang_sql import spatial_key_sql
+
 #: What a caller may pass as ``hierarchy=``. Spelled out rather than left as
 #: `Any`: `str | Any` collapses to `Any`, so the union it looked like it was
 #: documenting was never checked. `SupportsUrn` is sdmxlib's protocol for
@@ -65,7 +67,7 @@ __all__ = [
     "has_keyword",
     "has_service",
     "has_spatial",
-    "has_spatial_uri",
+    "has_spatial_key",
     "publishes",
     "serves",
     "title_contains",
@@ -933,6 +935,21 @@ class _SpatialFilter(ExistsFilter):
         return sql, [self.lang, self.label, self.lang, self.label]
 
 
+@define
+class _SpatialKeyFilter(ExistsFilter):
+    """EXISTS filter on a spatial coverage's facet key (`has_spatial_key`)."""
+
+    table: str = "dataset_spatial"
+    key: str = ""
+
+    @override
+    def to_sql(self, ctx: CompileContext) -> tuple[str, list[object]]:
+        alias = ctx.next_alias("ef")
+        sql = f"""EXISTS (SELECT 1 FROM dataset_spatial {alias}
+            WHERE {alias}.dataset_id = d.identifier AND {spatial_key_sql(alias)} = ?)"""
+        return sql, [self.key]
+
+
 def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
     """Filter datasets that have a spatial coverage matching *label*.
 
@@ -942,7 +959,7 @@ def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
     dataset that carries the region code ``10``. CKAN region text that is
     not a code carries no language and is stored under ``und``, so it
     matches with ``lang="und"``. To filter on a spatial facet key that is a
-    URI, use `has_spatial_uri`.
+    URI or a hash, use `has_spatial_key`.
 
     Args:
         label: The spatial coverage label, matched exactly.
@@ -957,25 +974,25 @@ def has_spatial(label: str, *, lang: str = "en") -> ExistsFilter:
     return _SpatialFilter(lang=sl.normalize_tag(lang), label=label)
 
 
-def has_spatial_uri(uri: str) -> ExistsFilter:
-    """Filter datasets that have a spatial coverage identified by *uri*.
+def has_spatial_key(key: str) -> ExistsFilter:
+    """Filter datasets that have a spatial coverage under the facet key *key*.
 
-    A spatial facet key is a region's URI when it has one (`Catalog.facets`),
-    so a key from ``facets("spatial")`` filters back to the datasets it
-    counts.
+    A spatial facet key is a region's URI when it has one, else ``sha256:``
+    and a hash of its whole label map (`EditionView.facets`), so a key from
+    ``facets("spatial")`` filters back to the datasets it counts. A
+    ``sha256:`` key hashes every coverage row of the query.
 
     Args:
-        uri: The region's URI, such as a CKAN ``geographic_region`` concept
-            URI (GH-83), matched exactly.
+        key: A key from ``facets("spatial")``.
 
     Returns:
         An EXISTS filter over the dataset's spatial coverage.
 
     Example:
-        key = next(iter(store.facets("spatial")["spatial"]))
-        store.query(sc.BaseDataset).filter(q.has_spatial_uri(key)).execute()
+        key = next(iter(view.facets("spatial")["spatial"]))
+        view.query(sc.BaseDataset).filter(q.has_spatial_key(key)).execute()
     """
-    return ExistsFilter(table="dataset_spatial", conditions={"uri": uri})
+    return _SpatialKeyFilter(key=key)
 
 
 def has_keyword(keyword: str, *, lang: str = "en") -> ExistsFilter:

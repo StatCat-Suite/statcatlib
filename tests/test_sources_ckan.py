@@ -16,6 +16,7 @@ from sdmxlib import InternationalString
 
 import statcatlib as sc
 import statcatlib.query as q
+from statcatlib._lang_sql import spatial_key as _spatial_key
 from statcatlib.sources.ckan import (
     CkanClient,
     _ckan_package_to_dataset,
@@ -29,6 +30,14 @@ from statcatlib.sources.ckan import (
 from tests.conftest import ScratchStore, open_scratch, scratch_store, untyped
 
 pytestmark = pytest.mark.unit
+
+
+def _key(label: dict[str, str]) -> str:
+    """The spatial facet key of a coverage labelled *label* with no URI."""
+    key = _spatial_key(label)
+    assert key is not None
+    return key
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -822,7 +831,7 @@ class TestIngestRegionCodes:
         ("lang", "label"), [("en", "Newfoundland and Labrador"), ("fr", "Terre-Neuve-et-Labrador")]
     )
     def test_spatial_labels_come_from_the_concepts(self, store: ScratchStore, lang: str, label: str):
-        assert store.spatial_labels(lang)[f"{_REGION_SCHEME}/10"] == label
+        assert store.spatial_labels(lang=lang)[f"{_REGION_SCHEME}/10"] == sc.LocalisedString(label, lang)
 
     def test_has_spatial_matches_a_concept_label(self, store: ScratchStore):
         found = store.query(sc.OpenDataset).filter(q.has_spatial("Québec", lang="fr")).collect()
@@ -834,10 +843,10 @@ class TestIngestRegionCodes:
 
     def test_a_facet_key_filters_back_to_its_datasets(self, store: ScratchStore):
         key = f"{_REGION_SCHEME}/24"
-        found = store.query(sc.OpenDataset).filter(q.has_spatial_uri(key)).collect()
+        found = store.query(sc.OpenDataset).filter(q.has_spatial_key(key)).collect()
         assert [ds.identifier for ds in found] == ["qc"]
 
-    def test_free_text_regions_are_counted_under_their_text(self, httpx_mock: HTTPXMock):
+    def test_free_text_regions_are_counted_under_the_hash_of_their_label(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(
             url=f"{_SEARCH_URL}?q=%2A%3A%2A&rows=5&start=0",
             json=_make_search_response([{**_PKG, "geographic_region": ["10", "Nunavik"]}], count=1),
@@ -845,8 +854,11 @@ class TestIngestRegionCodes:
         _mock_schema(httpx_mock, fields=[_REGION_FIELD])
         store = open_scratch()
         sc.ingest_ckan(store, _CKAN_BASE, limit=5)
-        assert store.facets("spatial")["spatial"] == {f"{_REGION_SCHEME}/10": 1, "Nunavik": 1}
-        assert store.spatial_labels("fr")["Nunavik"] == "Nunavik"
+        nunavik = _key({"und": "Nunavik"})
+        assert store.facets("spatial")["spatial"] == {f"{_REGION_SCHEME}/10": 1, nunavik: 1}
+        assert store.spatial_labels(lang=("fr", "und"))[nunavik] == sc.LocalisedString("Nunavik", "und")
+        found = store.query(sc.OpenDataset).filter(q.has_spatial_key(nunavik)).collect()
+        assert [ds.identifier for ds in found] == ["abc-123"]
         found = store.query(sc.OpenDataset).filter(q.has_spatial("Nunavik", lang="und")).collect()
         assert [ds.identifier for ds in found] == ["abc-123"]
 

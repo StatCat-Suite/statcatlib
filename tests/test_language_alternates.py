@@ -113,3 +113,26 @@ def test_pairs_persist_and_a_sealed_edition_refuses_new_ones():
     assert _pairs(view) == [("en", "en-t-fr", _PORTAL)]
     with pytest.raises(RuntimeError, match="sealed"):
         store.add_language_alternates({"fr": ["fr-t-en"]}, source=_PORTAL)
+
+
+def test_preference_orders_a_tag_and_its_partners(store: ScratchStore):
+    store.add_language_alternates({"en": ["en-t-fr", "en-t-de"], "fr": ["fr-t-en"]}, source="test")
+    assert store.preference(lang="EN") == ("en", "en-t-de", "en-t-fr")
+    assert store.preference(lang="en-t-fr") == ("en-t-fr", "en", "en-t-de")
+    assert store.preference(lang="de") == ("de",)
+
+
+def test_language_counts_count_texts_per_column_and_tag(store: ScratchStore):
+    store.put(
+        sc.OpenDataset(
+            identifier="d1",
+            title=sc.InternationalString.of({"en": "Population", "fr": "Population"}),
+            description=sc.InternationalString(en="People"),
+            extras={"not": "a tag"},
+        )
+    )
+    rows = {(r.table, r.column, r.lang): r.texts for r in store.language_counts()}
+    assert rows[("statcat.dataset", "title", "en")] == 1
+    assert rows[("statcat.dataset", "title", "fr")] == 1
+    assert rows[("statcat.dataset", "description", "en")] == 1
+    assert not any(column == "extras" for _, column, _ in rows)

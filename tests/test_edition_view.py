@@ -113,8 +113,8 @@ class TestNameResolution:
 
     def test_code_map_resolves_to_each_edition(self, two: tuple[sc.EditionView, sc.EditionView]) -> None:
         north, south = two
-        assert north.code_map(_DATASET) == {"GEO": {"X": "Nord"}}
-        assert south.code_map(_DATASET) == {"GEO": {"X": "Sud"}}
+        assert dict(north.code_map(_DATASET, lang="en")["GEO"]) == {"X": sc.LocalisedString("Nord", "en")}
+        assert dict(south.code_map(_DATASET, lang="en")["GEO"]) == {"X": sc.LocalisedString("Sud", "en")}
 
     def test_annotation_fingerprint_resolves_to_each_edition(self, two: tuple[sc.EditionView, sc.EditionView]) -> None:
         north, south = two
@@ -142,7 +142,7 @@ class TestReadPath:
                 view = cat.product(product).view()
                 view.query(sc.BaseDataset).collect()
                 view.facets("publisher")
-                view.code_map(_DATASET)
+                view.code_map(_DATASET, lang="en")
                 if view.index_layout:
                     view.search("north")
                 cat.product(product).editions()

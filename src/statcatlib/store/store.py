@@ -32,9 +32,11 @@ import sdmxlib
 import sdmxlib.model.codelist
 import sdmxlib.model.datastructure
 from attrs import Factory, define, field
-from sdmxlib import InternationalString
+from sdmxlib import InternationalString, LocalisedString
 from sdmxlib.model.registry import artefact_urn
 
+from statcatlib._lang_sql import pick_map, spatial_key_sql
+from statcatlib.labels import Gap, Labels, Langs, _as_langs
 from statcatlib.model.agents import Agent, ContactPoint
 from statcatlib.model.classification import Standard
 from statcatlib.model.dataset import (
@@ -1054,7 +1056,7 @@ _AGENT_SPEC = _EntitySpec(
     table="agent",
     row_type=AgentRow,
     reconstruct=_reconstruct_agent,
-    filter_cols={"id": "id", "type": "type", "homepage": "homepage", "name": "name['en']"},
+    filter_cols={"id": "id", "type": "type", "homepage": "homepage"},
 )
 _DATA_SERVICE_SPEC = _EntitySpec(
     table="data_service",
@@ -1199,11 +1201,19 @@ _SORTABLE_COLUMNS: frozenset[str] = frozenset(
 _MAP_SORTABLE_COLUMNS: frozenset[str] = frozenset({"title"})
 
 #: The spatial facet key of a ``dataset_spatial ds`` row: its region
-#: identifier, such as a CKAN ``geographic_region`` concept URI (GH-83). A row
-#: with no identifier is keyed by its English label until English stops being
-#: a key (``docs/design/language-tags.md``, decision 9), else by its label in
-#: no declared language, ``und``, which CKAN free text is stored under.
-_SPATIAL_FACET_KEY = "COALESCE(ds.uri, ds.label['en'], ds.label['und'])"
+#: identifier, such as a CKAN ``geographic_region`` concept URI (GH-83), else
+#: a hash of its whole label map, so no language is a key
+#: (``docs/design/label-lookup.md``, LL-D5).
+_SPATIAL_FACET_KEY = spatial_key_sql("ds")
+
+#: The text columns of the ``sdmx`` schema `EditionView.language_counts`
+#: counts. A constant, because that schema also holds MAP columns whose keys
+#: are not tags, such as ``dimension_column_map``.
+_SDMX_TEXT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("sdmx.code", "name"),
+    ("sdmx.concept", "description"),
+    ("sdmx.concept", "name"),
+)
 
 # Columns allowed in .select() / .scalars() lightweight projections
 _SELECTABLE_COLUMNS: frozenset[str] = frozenset(
@@ -6168,73 +6178,128 @@ class _Store:
             return {}
         return {row[0]: row[1] for row in rows}
 
-    def agent_labels(self, lang: str = "en") -> dict[str, str]:
-        """Return ``{agent_id: display_name}`` for the publisher facet sidebar."""
-        lang = sdmxlib.normalize_tag(lang)
-        rows = self._c.execute(
-            "SELECT id, name[?] FROM agent WHERE name[?] IS NOT NULL",
-            [lang, lang],
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
+    def _id_labels(self, sql: str, params: list[object], langs: tuple[str, ...], field_name: str) -> Labels[str]:
+        """A `Labels` from rows of (key, text, tag), each key its own entity."""
+        rows = self._c.execute(sql, params).fetchall()
+        return Labels(
+            ((r[0], None if r[1] is None else LocalisedString(r[1], r[2])) for r in rows),
+            (Gap(key=r[0], entity=r[0], field=field_name, langs=langs) for r in rows if r[1] is None),
+        )
 
-    def concept_labels(self, lang: str = "en", *, scheme_uri: str | None = None) -> dict[str, str]:
-        """Return ``{concept_uri: display_label}`` for the theme/subject facet sidebar."""
-        lang = sdmxlib.normalize_tag(lang)
-        if scheme_uri is not None:
-            rows = self._c.execute(
-                "SELECT uri, label[?] FROM concept WHERE label[?] IS NOT NULL AND in_scheme = ?",
-                [lang, lang, scheme_uri],
-            ).fetchall()
-        else:
-            rows = self._c.execute(
-                "SELECT uri, label[?] FROM concept WHERE label[?] IS NOT NULL",
-                [lang, lang],
-            ).fetchall()
-        return {row[0]: row[1] for row in rows}
+    def agent_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each agent's name in the first of *lang* it holds, by agent id, for the publisher facet."""
+        langs = _as_langs(lang)
+        pick = pick_map("name", langs)
+        return self._id_labels(
+            f"SELECT id, {pick.text}, {pick.lang} FROM agent ORDER BY id",
+            [*pick.text_params, *pick.lang_params],
+            langs,
+            "name",
+        )
 
-    def spatial_labels(self, lang: str = "en") -> dict[str, str]:
-        """Return ``{facet_key: display_label}`` for the spatial facet sidebar.
+    def concept_labels(self, *, lang: Langs, scheme_uri: str | None = None) -> Labels[str]:
+        """Each concept's label in the first of *lang* it holds, by URI, for the theme facet."""
+        langs = _as_langs(lang)
+        pick = pick_map("label", langs)
+        where = "" if scheme_uri is None else " WHERE in_scheme = ?"
+        return self._id_labels(
+            f"SELECT uri, {pick.text}, {pick.lang} FROM concept{where} ORDER BY uri",
+            [*pick.text_params, *pick.lang_params, *([] if scheme_uri is None else [scheme_uri])],
+            langs,
+            "label",
+        )
 
-        A spatial facet key is the region's ``uri`` when it has one, else its
-        English label, else its ``und`` label (`facets`). A ``uri`` key is
-        labelled from the concept with that URI, such as a CKAN
-        ``geographic_region`` code (GH-83), then from the stored label; it is
-        left out when neither has *lang*. A label key is labelled in *lang*,
-        falling back to the key, and only for a language other than English,
-        where an English key already reads as its label. A key whose rows
-        carry different labels gets the least, so the result is the same on
-        every call.
+    def spatial_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each spatial facet key's label in the first of *lang* any of its sources holds.
+
+        A key is a region's ``uri``, else a hash of its label map (`facets`).
+        Its sources are the concept whose URI is the key, then every coverage
+        under the key. The first requested tag any source holds answers;
+        within that tag the concept wins over a coverage, then the least text.
         """
-        lang = sdmxlib.normalize_tag(lang)
-        # The inner SELECT names the COALESCE results so the outer GROUP BY
-        # aggregates plain columns: DuckDB rejects a COALESCE built from
-        # grouped MAP-indexed expressions.
+        langs = _as_langs(lang)
         rows = self._c.execute(
-            """SELECT key, min(label) FROM (
-                SELECT ds.uri AS key, COALESCE(c.label[?], ds.label[?]) AS label
+            f"""WITH keyed AS (
+                SELECT {_SPATIAL_FACET_KEY} AS key, ds.uri, ds.label
                 FROM dataset_spatial ds
-                LEFT JOIN concept c ON c.uri = ds.uri
-                WHERE ds.uri IS NOT NULL
+                WHERE {_SPATIAL_FACET_KEY} IS NOT NULL
+            ),
+            cand AS (
+                SELECT k.key, 0 AS source, e.key AS lang, e.value AS text
+                FROM (SELECT DISTINCT key, uri FROM keyed WHERE uri IS NOT NULL) k
+                JOIN concept c ON c.uri = k.uri,
+                LATERAL (SELECT unnest(map_entries(c.label)) AS e)
+                UNION ALL
+                SELECT k.key, 1 AS source, e.key AS lang, e.value AS text
+                FROM keyed k, LATERAL (SELECT unnest(map_entries(k.label)) AS e)
             )
-            WHERE label IS NOT NULL
-            GROUP BY key""",
-            [lang, lang],
+            SELECT k.key,
+                first({{'text': cand.text, 'lang': cand.lang}}
+                      ORDER BY list_position($langs, cand.lang), cand.source, cand.text)
+                    FILTER (WHERE cand.text IS NOT NULL AND list_contains($langs, cand.lang))
+            FROM (SELECT DISTINCT key FROM keyed) k
+            LEFT JOIN cand ON cand.key = k.key
+            GROUP BY k.key
+            ORDER BY k.key""",
+            {"langs": list(langs)},
         ).fetchall()
-        labels: dict[str, str] = {row[0]: row[1] for row in rows}
-        if lang != "en":
-            rows = self._c.execute(
-                """SELECT key, min(label) FROM (
-                    SELECT COALESCE(label['en'], label['und']) AS key,
-                        COALESCE(label[?], label['en'], label['und']) AS label
-                    FROM dataset_spatial
-                    WHERE uri IS NULL
-                )
-                WHERE key IS NOT NULL
-                GROUP BY key""",
-                [lang],
-            ).fetchall()
-            labels.update({row[0]: row[1] for row in rows})
-        return labels
+        return Labels(
+            ((r[0], None if r[1] is None else LocalisedString(r[1]["text"], r[1]["lang"])) for r in rows),
+            (Gap(key=r[0], entity=r[0], field="label", langs=langs) for r in rows if r[1] is None),
+        )
+
+    def preference(self, *, lang: str) -> tuple[str, ...]:
+        """*lang*, then the tags recorded as its pair partners.
+
+        For a primary tag: the tag, then its alternates in tag order. For an
+        alternate: the tag, its primary, then the primary's other alternates.
+        For a tag in no pair: the tag alone.
+
+        Args:
+            lang: A tag.
+
+        Returns:
+            The tags, normalised, in that order.
+        """
+        tag = sdmxlib.normalize_tag(lang)
+        pairs = self._c.execute("SELECT alternate_tag, primary_tag FROM language_alternate").fetchall()
+        primary = next((p for a, p in pairs if a == tag), tag)
+        others = sorted(a for a, p in pairs if p == primary and a != tag)
+        return (tag, *([primary] if primary != tag else []), *others)
+
+    def language_counts(self) -> list[Row]:
+        """How many texts each tag holds, per multilingual column.
+
+        Returns:
+            One `Row` per ``table``, ``column`` and ``lang`` with ``texts``,
+            the number of non-NULL texts under that tag, ordered by table,
+            column and tag. The columns are every ``MAP(VARCHAR, VARCHAR)``
+            column of the ``statcat`` schema except ``dataset.extras``, then
+            `_SDMX_TEXT_COLUMNS`, then ``sdmx.localized_text`` by ``field``.
+        """
+        cols = self._c.execute(
+            """SELECT table_name, column_name FROM information_schema.columns
+            WHERE table_catalog = current_database() AND table_schema = 'statcat'
+              AND data_type = 'MAP(VARCHAR, VARCHAR)'
+              AND NOT (table_name = 'dataset' AND column_name = 'extras')
+            ORDER BY table_name, column_name"""
+        ).fetchall()
+        targets = [(f"statcat.{t}", c) for t, c in cols] + list(_SDMX_TEXT_COLUMNS)
+        parts = [
+            f"""SELECT '{table}' AS tbl, '{column}' AS col, e.key AS lang, count(*) AS texts
+            FROM (SELECT unnest(map_entries({column})) AS e FROM {table})
+            WHERE e.value IS NOT NULL GROUP BY e.key"""
+            for table, column in targets
+        ]
+        parts.append(
+            """SELECT 'sdmx.localized_text', field, lang, count(*) FROM sdmx.localized_text
+            WHERE text IS NOT NULL GROUP BY field, lang"""
+        )
+        try:
+            rows = self._c.execute(" UNION ALL ".join(parts) + " ORDER BY 1, 2, 3").fetchall()
+        except duckdb.CatalogException:
+            rows = self._c.execute(" UNION ALL ".join(parts[: len(cols)]) + " ORDER BY 1, 2, 3").fetchall()
+        return [Row(table=t, column=c, lang=lang, texts=n) for t, c, lang, n in rows]
 
     # ------------------------------------------------------------------
     # Internal query execution
@@ -6345,9 +6410,11 @@ class _Store:
         params: list[object] = []
         for key, val in filters.items():
             col = spec.filter_cols.get(key)
-            if col:
-                wheres.append(f"{col} = ?")
-                params.append(val)
+            if col is None:
+                msg = f"{cls.__name__} has no filter {key!r}; the filters are {sorted(spec.filter_cols)}"
+                raise ValueError(msg)
+            wheres.append(f"{col} = ?")
+            params.append(val)
 
         # Entity queries (Agent, DataService, Distribution) don't bind to
         # the ``d.identifier`` outer alias that exists_filters expect. We
@@ -6880,17 +6947,19 @@ class _Store:
             return None
         return row[0] if row else None
 
-    def code_map(self, dataset_id: str, lang: str = "en") -> dict[str, dict[str, str]]:
-        """Return ``{dimension_id: {code_id: label}}`` for a dataset.
+    def code_map(self, dataset_id: str, *, lang: Langs) -> dict[str, Labels[str]]:
+        """Return each dimension's code names for a dataset, by dimension and code ID.
 
         Joins catalog ``dataset`` -> ``sdmx.dataflow`` -> ``sdmx.dsd_component`` ->
-        ``sdmx.code`` entirely in SQL.
+        ``sdmx.code`` entirely in SQL. Each dimension's `Labels` holds its
+        codes in codelist order and its own gaps.
         """
-        lang = sdmxlib.normalize_tag(lang)
+        langs = _as_langs(lang)
+        pick = pick_map("c.name", langs)
         try:
             rows = self._c.execute(
-                """
-                SELECT dc.component_id, c.code_id, c.name[?]
+                f"""
+                SELECT dc.component_id, c.code_id, {pick.text}, {pick.lang}, dc.codelist_urn
                 FROM statcat.dataset d
                 JOIN sdmx.dataflow df ON df.urn = d.sdmx_dataflow_urn
                 JOIN sdmx.dsd_component dc ON dc.dsd_urn = df.dsd_urn
@@ -6899,14 +6968,25 @@ class _Store:
                   AND dc.component_type = 'Dimension'
                 ORDER BY dc.position, c.position
                 """,
-                [lang, dataset_id],
+                [*pick.text_params, *pick.lang_params, dataset_id],
             ).fetchall()
         except duckdb.CatalogException:
             return {}
-        result: dict[str, dict[str, str]] = {}
-        for dim_id, code_id, label in rows:
-            result.setdefault(dim_id, {})[code_id] = label or code_id
-        return result
+        # The tag is NULL exactly when the text is.
+        by_dim: dict[str, list[tuple[str, str | None, str, str]]] = {}
+        for dim_id, code_id, text, tag, cl_urn in rows:
+            by_dim.setdefault(dim_id, []).append((code_id, text, tag, cl_urn))
+        return {
+            dim_id: Labels(
+                ((code_id, None if text is None else LocalisedString(text, tag)) for code_id, text, tag, _ in codes),
+                (
+                    Gap(key=code_id, entity=cl_urn, field="name", langs=langs)
+                    for code_id, text, _, cl_urn in codes
+                    if text is None
+                ),
+            )
+            for dim_id, codes in by_dim.items()
+        }
 
     def codelist_for(self, dataset_id: str, dimension: str) -> sdmxlib.model.codelist.Codelist | None:
         """Return the Codelist for a specific dimension of a dataset.
@@ -7346,39 +7426,65 @@ class EditionView:
         """
         return self._s().facets(*fields)
 
-    def agent_labels(self, lang: str = "en") -> dict[str, str]:
-        """Each agent's name in *lang*, by agent id.
+    def agent_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each agent's name in the first of *lang* it holds, by agent id.
 
         Args:
-            lang: The language tag.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            The labels, by agent id.
+            Every agent, ordered by id; an agent whose name holds none of the
+            tags maps to ``None`` and is a gap.
         """
-        return self._s().agent_labels(lang)
+        return self._s().agent_labels(lang=lang)
 
-    def concept_labels(self, lang: str = "en", *, scheme_uri: str | None = None) -> dict[str, str]:
-        """Each concept's label in *lang*, by concept URI.
+    def concept_labels(self, *, lang: Langs, scheme_uri: str | None = None) -> Labels[str]:
+        """Each concept's label in the first of *lang* it holds, by concept URI.
 
         Args:
-            lang: The language tag.
+            lang: A tag, or tags in order of preference.
             scheme_uri: Restrict to one concept scheme.
 
         Returns:
-            The labels, by concept URI.
+            Every concept, ordered by URI, with its gaps.
         """
-        return self._s().concept_labels(lang, scheme_uri=scheme_uri)
+        return self._s().concept_labels(lang=lang, scheme_uri=scheme_uri)
 
-    def spatial_labels(self, lang: str = "en") -> dict[str, str]:
-        """Each spatial facet key's label in *lang*.
+    def spatial_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each spatial facet key's label in the first of *lang* its sources hold.
 
         Args:
-            lang: The language tag.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            The labels, by facet key.
+            Every key of ``facets("spatial")``, ordered by key, with its gaps.
         """
-        return self._s().spatial_labels(lang)
+        return self._s().spatial_labels(lang=lang)
+
+    def preference(self, *, lang: str) -> tuple[str, ...]:
+        """*lang*, then the tags its recorded language pairs join it with.
+
+        Pass the result as ``lang=`` to a label call, adding ``"und"`` and
+        ``"zxx"`` last to show untagged text and code labels too.
+
+        Args:
+            lang: A tag.
+
+        Returns:
+            For a primary tag, the tag and its alternates in tag order; for an
+            alternate, the tag, its primary and the primary's other
+            alternates; for a tag in no pair, the tag alone.
+        """
+        return self._s().preference(lang=lang)
+
+    def language_counts(self) -> list[Row]:
+        """How many texts each tag holds, per multilingual column.
+
+        Returns:
+            One `Row` per ``table``, ``column`` and ``lang``, with ``texts``,
+            ordered by table, column and tag.
+        """
+        return self._s().language_counts()
 
     def get_concept_scheme(self, uri: str) -> ConceptScheme | None:
         """A concept scheme with its concepts, or ``None``.
@@ -7402,17 +7508,18 @@ class EditionView:
         """
         return self._s().get_concept(uri)
 
-    def code_map(self, dataset_id: str, lang: str = "en") -> dict[str, dict[str, str]]:
-        """``{dimension_id: {code_id: label}}`` for a dataset.
+    def code_map(self, dataset_id: str, *, lang: Langs) -> dict[str, Labels[str]]:
+        """Each dimension's code names for a dataset, by dimension and code ID.
 
         Args:
             dataset_id: The dataset's identifier.
-            lang: The language of the labels.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            The labels, by dimension and code.
+            One `Labels` per dimension, holding its codes in codelist order and
+            its gaps.
         """
-        return self._s().code_map(dataset_id, lang)
+        return self._s().code_map(dataset_id, lang=lang)
 
     def codelist_for(self, dataset_id: str, dimension: str) -> sdmxlib.model.codelist.Codelist | None:
         """The codelist of one dimension of a dataset, or ``None``.

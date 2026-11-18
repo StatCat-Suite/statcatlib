@@ -294,10 +294,10 @@ class TestThemeSchemeIsolation:
 
     def test_concept_labels_per_scheme(self) -> None:
         s = self._build_store()
-        statcan_labels = s.concept_labels(scheme_uri=self._STATCAN)
-        assert statcan_labels == {f"{self._STATCAN}/13": "Labour"}
-        eurovoc_labels = s.concept_labels(scheme_uri=self._EUROVOC)
-        assert eurovoc_labels == {f"{self._EUROVOC}/13": "Energy"}
+        statcan_labels = s.concept_labels(lang="en", scheme_uri=self._STATCAN)
+        assert dict(statcan_labels) == {f"{self._STATCAN}/13": sc.LocalisedString("Labour", "en")}
+        eurovoc_labels = s.concept_labels(lang="en", scheme_uri=self._EUROVOC)
+        assert dict(eurovoc_labels) == {f"{self._EUROVOC}/13": sc.LocalisedString("Energy", "en")}
 
     def test_facets_with_different_schemes(self) -> None:
         """Themes from different schemes appear in facets as distinct URIs."""

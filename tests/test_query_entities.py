@@ -94,10 +94,10 @@ class TestAgentQuery:
         assert result.total == 1
         assert result.items[0].id == "ECB"
 
-    def test_query_agent_by_name(self, entity_store: ScratchStore) -> None:
-        result = entity_store.query(sc.Agent).filter(name="Eurostat").execute()
-        assert result.total == 1
-        assert result.items[0].id == "ESTAT"
+    def test_query_agent_by_name_is_refused(self, entity_store: ScratchStore) -> None:
+        """An agent is identified by its id; a name is text in some language (LL-D6)."""
+        with pytest.raises(ValueError, match=r"'name'.*'homepage', 'id', 'type'"):
+            entity_store.query(sc.Agent).filter(name="Eurostat").execute()
 
     def test_query_agent_no_match(self, entity_store: ScratchStore) -> None:
         result = entity_store.query(sc.Agent).filter(id="NONEXISTENT").execute()

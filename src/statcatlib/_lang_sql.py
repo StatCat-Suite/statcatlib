@@ -11,6 +11,9 @@ A leaf module: it imports attrs and the standard library only, so
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Mapping
+
 from attrs import frozen
 
 
@@ -69,3 +72,50 @@ def localized_map(field: str) -> tuple[str, tuple[str, ...]]:
         " FROM sdmx.localized_text WHERE field = ? GROUP BY owner_urn)"
     )
     return sql, (field,)
+
+
+#: The prefix of a spatial facet key derived from a label map.
+SPATIAL_KEY_PREFIX = "sha256:"
+
+
+def spatial_key(label: Mapping[str, str | None] | None) -> str | None:
+    """The spatial facet key of a coverage with no ``uri``: the reference for `spatial_key_sql`.
+
+    The key bytes are the map's entries whose text is not ``None``, in
+    ascending order of tag, each written ``<tag>=<n>:<text>`` with ``<n>`` the
+    text's length in UTF-8 bytes, concatenated and encoded as UTF-8. The key
+    is ``sha256:`` and the bytes' lowercase hex SHA-256
+    (``docs/design/label-lookup.md``, LL-D5).
+
+    Args:
+        label: The coverage's label map.
+
+    Returns:
+        The key, or ``None`` for ``None``, an empty map or a map whose texts
+        are all ``None``.
+    """
+    if not label:
+        return None
+    body = "".join(f"{tag}={len(text.encode())}:{text}" for tag, text in sorted(label.items()) if text is not None)
+    if not body:
+        return None
+    return SPATIAL_KEY_PREFIX + hashlib.sha256(body.encode()).hexdigest()
+
+
+def spatial_key_sql(alias: str) -> str:
+    """The SQL of a spatial facet key over a ``dataset_spatial`` row aliased *alias*.
+
+    The coverage's ``uri`` when it has one, else the key `spatial_key`
+    computes from its ``label``, else ``NULL``. DuckDB's ``strlen`` counts
+    UTF-8 bytes.
+
+    Args:
+        alias: The table alias, such as ``ds``.
+
+    Returns:
+        A SQL expression of type ``VARCHAR``.
+    """
+    entries = f"list_filter(list_sort(map_entries({alias}.label), 'ASC'), lambda e: e.value IS NOT NULL)"
+    entry = "e.key || '=' || strlen(e.value)::VARCHAR || ':' || e.value"
+    body = f"array_to_string(list_transform({entries}, lambda e: {entry}), '')"
+    return f"COALESCE({alias}.uri, '{SPATIAL_KEY_PREFIX}' || sha256(NULLIF({body}, '')))"
