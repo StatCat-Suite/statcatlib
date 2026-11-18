@@ -5,6 +5,36 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## Next release: sdmxlib 0.89, and the seal keeps the index `build_index` built
+
+statcatlib requires `sdmxlib>=0.89,<0.90`. No catalog is rebuilt, and no statcatlib
+call changes. statcatlib calls none of the functions sdmxlib 0.89 changed, so a catalog
+built or sealed with this release holds the same rows as before.
+
+Code that calls sdmxlib beside statcatlib meets sdmxlib 0.89's breaking change
+([GH-392](https://github.com/StatCat-Suite/sdmxlib/issues/392)).
+`sdmxlib.builders.build_dataflow_constraint` and `build_component_availability` give
+the time dimension as a `KeyValue` whose `time_range` runs from the earliest period's
+start to the latest period's end, zoneless, with empty `values`; pass
+`time_dimension="values"` to keep the list of periods. The SDMX-JSON writers write a
+zoneless time range as given, and the SDMX-JSON data writers give `start` and `end` to
+reporting periods such as `2021-A1` and `2021-M06`. sdmxlib's
+[upgrading page](https://statcat-suite.github.io/sdmxlib/upgrading/#the-availability-builders-give-the-time-dimension-as-a-range)
+lists the cases that keep the list of periods.
+
+`wc.seal()` keeps the search index when no row of the edition changed since the last
+`wc.build_index()`, and seals it without encoding any text again
+([GH-108](https://github.com/StatCat-Suite/statcatlib/issues/108)). This holds in a
+later process too, such as a seal after `statcat build-index`. `build_index` records
+its options, all but `embedding_model` and `progress`, in the working copy's
+`statcat._meta.index_options`. When a row changed, a seal in the same process repeats
+the last `build_index` call, and a seal in a later process rebuilds with the recorded
+options and the encoder given to `working_copy(embedding_model=)`. Before this release,
+a seal in a later process rebuilt the index with the default options. To seal an index
+with embeddings after `statcat build-index`, either change no row before the seal, or
+open the working copy with `embedding_model=`
+([`build_index`](api/store.md#build_index)).
+
 ## 0.19.0: `statcat admin create`
 
 No call changes, and no catalog is rebuilt. `statcat admin create AZ_URL` creates a
