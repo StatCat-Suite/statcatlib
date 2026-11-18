@@ -44,6 +44,17 @@ from statcatlib import checks, query, urn
 from statcatlib.admin import CatalogAdmin
 from statcatlib.catalog import Catalog, Edition, NoLiveEditionError, Product, SealOutcomes
 from statcatlib.embargo import EmbargoReader
+from sdmxlib import InvalidTagError, LocalisedString, MissingTagError
+
+from statcatlib.labels import (
+    Gap,
+    Labels,
+    Langs,
+    MissingTranslationError,
+    RowList,
+    UnknownCodeError,
+    ValueList,
+)
 from statcatlib.expr import (
     AliasedExpr,
     CountExpr,
@@ -157,18 +168,25 @@ __all__ = [
     "ExistsExpr",
     "Expr",
     "Frequency",
+    "Gap",
     "GeospatialDataset",
     "Hit",
     "IncompatibleCatalogError",
     "IncompatibleIndexError",
     "InternationalString",
+    "InvalidTagError",
     "InventoryConflictError",
     "InventoryContentionError",
     "InventoryRuleError",
     "InventoryWriteRefusedError",
     "JournalError",
+    "Labels",
+    "Langs",
     "LicenceDocument",
+    "LocalisedString",
     "MicrodataDataset",
+    "MissingTagError",
+    "MissingTranslationError",
     "NoLiveEditionError",
     "NonFastForwardError",
     "NotLoadedError",
@@ -182,6 +200,7 @@ __all__ = [
     "ReferenceMetadataHit",
     "ReferenceMetadataScope",
     "Row",
+    "RowList",
     "SchemeScope",
     "SealCheckError",
     "SealOutcomes",
@@ -193,8 +212,10 @@ __all__ = [
     "ThemesScope",
     "TokenIdentity",
     "TraversalExpr",
+    "UnknownCodeError",
     "UploadCheckError",
     "UploadReport",
+    "ValueList",
     "Variable",
     "WorkingCopy",
     "WorkingCopyClosedError",

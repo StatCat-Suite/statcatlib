@@ -117,6 +117,7 @@ nav:
     - Scopes: reference/scopes.md
     - Domain Model: reference/model.md
     - Query: reference/query.md
+    - Labels: reference/labels.md
     - Sources: reference/sources.md
     - Bundles: reference/bundle.md
     - Checks: reference/checks.md
