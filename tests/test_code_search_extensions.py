@@ -529,7 +529,7 @@ class TestCodesScopeSemantic:
     def test_vector_mode_requires_model(self, tmp_path: pathlib.Path) -> None:
         store = _store_with_sdmx(tmp_path)
         with pytest.raises(RuntimeError, match="embedding_model"):
-            store.codes.find("anything", mode="vector")
+            store.codes.find("anything", mode="vector", lang="en")
 
 
 class TestCodesScopeHybrid:
@@ -555,4 +555,4 @@ class TestCodesScopeHybrid:
     def test_hybrid_mode_requires_model(self, tmp_path: pathlib.Path) -> None:
         store = _store_with_sdmx(tmp_path)
         with pytest.raises(RuntimeError, match="embedding_model"):
-            store.codes.find("anything", mode="hybrid")
+            store.codes.find("anything", mode="hybrid", lang="en")

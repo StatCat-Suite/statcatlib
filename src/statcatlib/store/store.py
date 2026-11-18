@@ -36,7 +36,7 @@ from sdmxlib import InternationalString, LocalisedString
 from sdmxlib.model.registry import artefact_urn
 
 from statcatlib._lang_sql import pick_map, spatial_key_sql
-from statcatlib.labels import Gap, Labels, Langs, RowList, ValueList, _as_langs
+from statcatlib.labels import Gap, Labels, Langs, MissingTranslationError, RowList, ValueList, _as_langs
 from statcatlib.model.agents import Agent, ContactPoint
 from statcatlib.model.classification import Standard
 from statcatlib.model.dataset import (
@@ -1268,6 +1268,7 @@ class _QueryResult:
     total: int
     rows: list[str]
     scores: dict[str, float] = Factory(dict)
+    langs: dict[str, str] = Factory(dict)
 
 
 # ---------------------------------------------------------------------------
@@ -1277,13 +1278,19 @@ class _QueryResult:
 
 @define
 class SearchResult[T]:
-    """Container for query results with pagination metadata."""
+    """Container for query results with pagination metadata.
+
+    For a `QueryBuilder` text or hybrid search, ``langs`` maps each item's
+    identifier to the stored tag of the search row that matched it; it is
+    empty otherwise.
+    """
 
     items: list[T]
     total: int
     facets: dict[str, dict[str, int]] = Factory(dict)
     offset: int = 0
     scores: dict[str, float] = Factory(dict)
+    langs: dict[str, str] = Factory(dict)
 
 
 @define(frozen=True)
@@ -1298,10 +1305,10 @@ class CodeHit:
 
     dataset_id: str
     dimension_id: str
-    dimension_label: str
+    dimension_label: LocalisedString | None
     code_id: str
-    code_label: str
-    text: str
+    code_label: LocalisedString
+    document: str
     code_urn: str = ""
     codelist_urn: str = ""
     parent_id: str = ""
@@ -1322,9 +1329,9 @@ class ConceptHit:
     concept_urn: str
     scheme_urn: str
     concept_id: str
-    name: str
-    description: str
-    text: str
+    name: LocalisedString | None
+    description: LocalisedString | None
+    document: str
 
 
 @define(frozen=True)
@@ -1345,12 +1352,14 @@ class Hit[T]:
       hybrid-search explainability and telemetry.
     - ``highlights`` — per-field snippet extracts when available.
     - ``matched_field`` — which indexed column drove the rank.
+    - ``lang`` — the stored tag of the matched row's text, which with
+      language pairs can be an alternate such as ``en-t-fr``.
     """
 
     kind: str
     score: float
     payload: T
-    lang: str = "en"
+    lang: str
     source: str = "bm25"
     highlights: Mapping[str, str] = Factory(dict)
     matched_field: str | None = None
@@ -1384,39 +1393,46 @@ _CONCEPT_ROW_COLUMNS: tuple[str, ...] = (
 )
 
 
+def _row_lang(row: SearchRow) -> str:
+    """The stored tag of a search row, which every row carries."""
+    lang = row.get("lang")
+    if not lang:
+        msg = f"search row {row.get('id')!r} has no lang"
+        raise ValueError(msg)
+    return lang
+
+
+def _tagged(text: str | None, lang: str) -> LocalisedString | None:
+    """*text* under *lang*, or ``None`` for an empty or absent text."""
+    return LocalisedString(text, lang) if text else None
+
+
 def _row_to_code_hit(
     row: SearchRow,
     *,
-    fallback_lang: str,
     score: float,
     source: str = "bm25",
 ) -> Hit[CodeHit]:
-    """Build a ``Hit[CodeHit]`` from a LanceDB row dict."""
+    """Build a ``Hit[CodeHit]`` from a LanceDB row dict; its labels carry the row's tag."""
+    lang = _row_lang(row)
     payload = CodeHit(
         dataset_id=row.get("id", "") or "",
         dimension_id=row.get("dimension_id", "") or "",
-        dimension_label=row.get("dimension_label", "") or "",
+        dimension_label=_tagged(row.get("dimension_label"), lang),
         code_id=row.get("code_id", "") or "",
-        code_label=row.get("code_label", "") or "",
-        text=row.get("text", "") or "",
+        code_label=LocalisedString(row.get("code_label", "") or "", lang),
+        document=row.get("text", "") or "",
         code_urn=row.get("code_urn", "") or "",
         codelist_urn=row.get("codelist_urn", "") or "",
         parent_id=row.get("parent_id", "") or "",
         depth=row.get("depth", 0) or 0,
     )
-    return Hit(
-        kind="code",
-        score=score,
-        payload=payload,
-        lang=row.get("lang", fallback_lang) or fallback_lang,
-        source=source,
-    )
+    return Hit(kind="code", score=score, payload=payload, lang=lang, source=source)
 
 
 def _row_to_concept_hit(
     row: SearchRow,
     *,
-    fallback_lang: str,
     score: float,
     source: str = "bm25",
 ) -> Hit[ConceptHit]:
@@ -1432,21 +1448,16 @@ def _row_to_concept_hit(
         name, _, description = text.partition(" | ")
     else:
         name, description = text, ""
+    lang = _row_lang(row)
     payload = ConceptHit(
         concept_urn=row.get("concept_urn", row.get("id", "")) or "",
         scheme_urn=row.get("scheme_urn", "") or "",
         concept_id=row.get("concept_id", "") or "",
-        name=name,
-        description=description,
-        text=text,
+        name=_tagged(name, lang),
+        description=_tagged(description, lang),
+        document=text,
     )
-    return Hit(
-        kind="concept",
-        score=score,
-        payload=payload,
-        lang=row.get("lang", fallback_lang) or fallback_lang,
-        source=source,
-    )
+    return Hit(kind="concept", score=score, payload=payload, lang=lang, source=source)
 
 
 @define(frozen=True)
@@ -1466,7 +1477,7 @@ class ReferenceMetadataHit:
     set_urn: str
     attribute_path: str
     section_title: str
-    text: str
+    document: str
     chunk_index: int = 0
 
 
@@ -1483,7 +1494,6 @@ _REFMETA_ROW_COLUMNS: tuple[str, ...] = (
 def _row_to_reference_metadata_hit(
     row: SearchRow,
     *,
-    fallback_lang: str,
     score: float,
     source: str = "bm25",
 ) -> Hit[ReferenceMetadataHit]:
@@ -1502,16 +1512,10 @@ def _row_to_reference_metadata_hit(
         set_urn=row.get("set_urn", "") or "",
         attribute_path=row.get("attribute_path", "") or "",
         section_title=row.get("section_title", "") or "",
-        text=row.get("text", "") or "",
+        document=row.get("text", "") or "",
         chunk_index=chunk_index,
     )
-    return Hit(
-        kind="reference_metadata",
-        score=score,
-        payload=payload,
-        lang=row.get("lang", fallback_lang) or fallback_lang,
-        source=source,
-    )
+    return Hit(kind="reference_metadata", score=score, payload=payload, lang=_row_lang(row), source=source)
 
 
 # Reference-metadata chunking knobs. A section shorter than the floor is
@@ -1820,29 +1824,34 @@ def _rrf_merge_rows(
 
     Returns ``(representative_row, rrf_score, source)`` triples sorted by
     descending score. ``source`` is ``"hybrid"`` when both lists ranked
-    the same key, otherwise the list that contributed.
+    the same key, otherwise the list that contributed. The representative
+    row is the one from the list that ranks the key higher, BM25 on a tie.
 
     Keeping this as a free function lets every scope share one RRF
     implementation — duplicating it per scope ages badly the first time
     we tweak the formula or the tie-break.
     """
-    rep: dict[str, SearchRow] = {}
+    # The representative row comes from the ranking that places the entity
+    # higher, BM25 on a tie, so its tag is the one that matched best.
+    rep: dict[str, tuple[int, SearchRow]] = {}
     scores: dict[str, float] = {}
     sources: dict[str, set[str]] = {}
     for rank, row in enumerate(bm25_rows):
         k = key(row)
-        rep.setdefault(k, row)
+        if k not in rep:
+            rep[k] = (rank, row)
         scores[k] = scores.get(k, 0.0) + 1.0 / (rrf_k + rank + 1)
         sources.setdefault(k, set()).add("bm25")
     for rank, row in enumerate(vec_rows):
         k = key(row)
-        rep.setdefault(k, row)
+        if k not in rep or rank < rep[k][0]:
+            rep[k] = (rank, row)
         scores[k] = scores.get(k, 0.0) + 1.0 / (rrf_k + rank + 1)
         sources.setdefault(k, set()).add("vector")
     ordered = sorted(scores, key=lambda x: -scores[x])
     return [
         (
-            rep[k],
+            rep[k][1],
             scores[k],
             "hybrid" if len(sources[k]) > 1 else next(iter(sources[k])),
         )
@@ -1897,7 +1906,7 @@ class QueryBuilder[T]:
         hybrid_text: str | None = None,
         search_operator: str = "or",
         search_fuzziness: int = 0,
-        search_lang: str = "en",
+        search_lang: str | None = None,
         sort_fields: list[_SortSpec] | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -1975,15 +1984,16 @@ class QueryBuilder[T]:
         """Restrict results to a pre-computed list of identifiers."""
         return self._clone(from_ids=ids)
 
-    def search(self, text: str, *, lang: str = "en", operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]:
+    def search(self, text: str, *, lang: str, operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]:
         """Add full-text search. Requires LanceDB.
 
         Args:
             text: The search text. Tokenised and stemmed with *lang*'s rules
                 before matching.
-            lang: The language whose search table answers the query. Each
+            lang: The one tag whose search table answers the query. Each
                 language has its own table, so a French query needs
-                ``lang="fr"``. A language with no table matches nothing.
+                ``lang="fr"``; an alternate tag such as ``en-t-fr`` reads its
+                primary's table. A language with no table matches nothing.
             operator: How to join multi-term queries: ``"or"`` (default) matches any term; ``"and"``
                 requires all terms.
             fuzzy: Levenshtein edit distance for fuzzy matching: ``0`` (default, exact match), ``1``, or
@@ -1996,7 +2006,7 @@ class QueryBuilder[T]:
         lang = sdmxlib.normalize_tag(lang)
         return self._clone(text=text, search_lang=lang, search_operator=operator, search_fuzziness=fuzzy)
 
-    def hybrid_search(self, text: str, *, lang: str = "en") -> QueryBuilder[T]:
+    def hybrid_search(self, text: str, *, lang: str) -> QueryBuilder[T]:
         """Add hybrid BM25 + semantic search. Requires LanceDB.
 
         Args:
@@ -2362,7 +2372,7 @@ class CodesScope:
         codelist_urn: str | Sequence[str] | None = None,
         dataset_ids: Sequence[str] | None = None,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 20,
         offset: int = 0,
         operator: str = "or",
@@ -2421,59 +2431,67 @@ class CodesScope:
 
         if mode == "hybrid":
             merged = _rrf_merge_rows(bm25_rows, vec_rows, rrf_k=rrf_k, key=_key)
-            hits = [_row_to_code_hit(row, fallback_lang=lang, score=score, source=src) for row, score, src in merged]
+            hits = [_row_to_code_hit(row, score=score, source=src) for row, score, src in merged]
         elif mode == "vector":
             hits = [
                 _row_to_code_hit(
                     r,
-                    fallback_lang=lang,
                     score=1.0 / (1.0 + r.get("_distance", 0.0) or 0.0),
                     source="vector",
                 )
                 for r in vec_rows
             ]
         else:  # bm25
-            hits = [_row_to_code_hit(r, fallback_lang=lang, score=r["_score"], source="bm25") for r in bm25_rows]
+            hits = [_row_to_code_hit(r, score=r["_score"], source="bm25") for r in bm25_rows]
 
         total = len(hits)
         page = hits[offset : offset + limit]
         scores = {h.payload.code_urn or h.payload.code_id: h.score for h in page}
         return SearchResult(items=page, total=total, offset=offset, scores=scores)
 
-    def get(self, code_urn: str) -> CodeHit | None:
+    def get(self, code_urn: str, *, lang: Langs) -> CodeHit | None:
         """Direct SQL lookup of a single code by URN — no Lance index involved.
 
-        Resolves the code's labels in any one language present
-        (default: prefer ``en``, fall back to whichever language has
-        the label). For multi-language access, fetch the underlying
-        ``sdmx.code`` row directly.
+        Args:
+            code_urn: The code's URN.
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The code, with ``code_label`` its name in the first of *lang* it
+            holds; ``dataset_id``, ``dimension_id`` and ``document`` are
+            empty and ``dimension_label`` is ``None``, since no search row is
+            read. ``None`` for an unknown code or no ``sdmx`` schema.
+
+        Raises:
+            MissingTranslationError: The code's name holds none of the tags.
         """
+        langs = _as_langs(lang)
+        pick = pick_map("c.name", langs)
         store = self._store
         try:
             row = store._c.execute(
-                """
+                f"""
                 SELECT c.code_urn, c.codelist_urn, c.code_id, c.parent_id, c.depth,
-                       c.name
+                       {pick.text}, {pick.lang}, map_keys(c.name)
                 FROM sdmx.code c
-                WHERE c.code_urn = $code_urn
+                WHERE c.code_urn = ?
                 """,
-                {"code_urn": code_urn},
+                [*pick.text_params, *pick.lang_params, code_urn],
             ).fetchone()
         except duckdb.Error:
             return None
         if row is None:
             return None
-        c_urn, cl_urn, code_id, parent_id, depth, name_map = row
-        name = ""
-        if name_map:
-            name = name_map.get("en") or next(iter(name_map.values()), "")
+        c_urn, cl_urn, code_id, parent_id, depth, text, tag, held = row
+        if text is None:
+            raise MissingTranslationError(code_urn, "name", langs, sorted(held or ()))
         return CodeHit(
             dataset_id="",
             dimension_id="",
-            dimension_label="",
+            dimension_label=None,
             code_id=str(code_id or ""),
-            code_label=str(name or ""),
-            text=str(name or ""),
+            code_label=LocalisedString(text, tag),
+            document="",
             code_urn=str(c_urn or ""),
             codelist_urn=str(cl_urn or ""),
             parent_id=str(parent_id or ""),
@@ -2500,7 +2518,7 @@ class ConceptsScope:
         *,
         scheme_urn: str | Sequence[str] | None = None,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 20,
         offset: int = 0,
         operator: str = "or",
@@ -2547,56 +2565,70 @@ class ConceptsScope:
 
         if mode == "hybrid":
             merged = _rrf_merge_rows(bm25_rows, vec_rows, rrf_k=rrf_k, key=_key)
-            hits = [_row_to_concept_hit(row, fallback_lang=lang, score=score, source=src) for row, score, src in merged]
+            hits = [_row_to_concept_hit(row, score=score, source=src) for row, score, src in merged]
         elif mode == "vector":
             hits = [
                 _row_to_concept_hit(
                     r,
-                    fallback_lang=lang,
                     score=1.0 / (1.0 + r.get("_distance", 0.0) or 0.0),
                     source="vector",
                 )
                 for r in vec_rows
             ]
         else:
-            hits = [_row_to_concept_hit(r, fallback_lang=lang, score=r["_score"], source="bm25") for r in bm25_rows]
+            hits = [_row_to_concept_hit(r, score=r["_score"], source="bm25") for r in bm25_rows]
 
         total = len(hits)
         page = hits[offset : offset + limit]
         scores = {h.payload.concept_urn: h.score for h in page}
         return SearchResult(items=page, total=total, offset=offset, scores=scores)
 
-    def get(self, concept_urn: str) -> ConceptHit | None:
-        """Direct SQL lookup of a single concept by URN."""
+    def get(self, concept_urn: str, *, lang: Langs) -> ConceptHit | None:
+        """Direct SQL lookup of a single concept by URN.
+
+        The name and the description are each picked over *lang*, so the
+        two can answer in different tags; each one's ``lang`` says which.
+
+        Args:
+            concept_urn: The concept's URN.
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The concept, with ``document`` empty; ``description`` is ``None``
+            when it holds none of the tags. ``None`` for an unknown concept
+            or no ``sdmx`` schema.
+
+        Raises:
+            MissingTranslationError: The concept's name holds none of the tags.
+        """
+        langs = _as_langs(lang)
+        name = pick_map("c.name", langs)
+        desc = pick_map("c.description", langs)
         store = self._store
         try:
             row = store._c.execute(
-                """
-                SELECT c.concept_urn, c.scheme_urn, c.concept_id, c.name, c.description
+                f"""
+                SELECT c.concept_urn, c.scheme_urn, c.concept_id,
+                       {name.text}, {name.lang}, map_keys(c.name), {desc.text}, {desc.lang}
                 FROM sdmx.concept c
-                WHERE c.concept_urn = $concept_urn
+                WHERE c.concept_urn = ?
                 """,
-                {"concept_urn": concept_urn},
+                [*name.text_params, *name.lang_params, *desc.text_params, *desc.lang_params, concept_urn],
             ).fetchone()
         except duckdb.Error:
             return None
         if row is None:
             return None
-        c_urn, sc_urn, c_id, name_map, desc_map = row
-        name = ""
-        desc = ""
-        if name_map:
-            name = name_map.get("en") or next(iter(name_map.values()), "")
-        if desc_map:
-            desc = desc_map.get("en") or next(iter(desc_map.values()), "")
-        text = f"{name} | {desc}" if (name and desc) else (name or desc)
+        c_urn, sc_urn, c_id, name_text, name_tag, held, desc_text, desc_tag = row
+        if name_text is None:
+            raise MissingTranslationError(concept_urn, "name", langs, sorted(held or ()))
         return ConceptHit(
             concept_urn=str(c_urn),
             scheme_urn=str(sc_urn or ""),
             concept_id=str(c_id or ""),
-            name=name,
-            description=desc,
-            text=text,
+            name=LocalisedString(name_text, name_tag),
+            description=None if desc_text is None else LocalisedString(desc_text, desc_tag),
+            document="",
         )
 
 
@@ -2624,7 +2656,7 @@ class ReferenceMetadataScope:
         *,
         target_urn: str | None = None,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 20,
         offset: int = 0,
         operator: str = "or",
@@ -2684,25 +2716,18 @@ class ReferenceMetadataScope:
 
         if mode == "hybrid":
             merged = _rrf_merge_rows(bm25_rows, vec_rows, rrf_k=rrf_k, key=_key)
-            hits = [
-                _row_to_reference_metadata_hit(row, fallback_lang=lang, score=score, source=src)
-                for row, score, src in merged
-            ]
+            hits = [_row_to_reference_metadata_hit(row, score=score, source=src) for row, score, src in merged]
         elif mode == "vector":
             hits = [
                 _row_to_reference_metadata_hit(
                     r,
-                    fallback_lang=lang,
                     score=1.0 / (1.0 + r.get("_distance", 0.0) or 0.0),
                     source="vector",
                 )
                 for r in vec_rows
             ]
         else:
-            hits = [
-                _row_to_reference_metadata_hit(r, fallback_lang=lang, score=r["_score"], source="bm25")
-                for r in bm25_rows
-            ]
+            hits = [_row_to_reference_metadata_hit(r, score=r["_score"], source="bm25") for r in bm25_rows]
 
         total = len(hits)
         page = hits[offset : offset + limit]
@@ -2727,7 +2752,7 @@ class DatasetsScope:
         query: str,
         *,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 50,
         offset: int = 0,
         operator: str = "or",
@@ -2741,8 +2766,8 @@ class DatasetsScope:
         if store._lance is None:
             return SearchResult(items=[], total=0, offset=offset)
 
-        bm25_pairs: list[tuple[str, float]] = []
-        vec_pairs: list[tuple[str, float]] = []
+        bm25_pairs: list[tuple[str, float, str]] = []
+        vec_pairs: list[tuple[str, float, str]] = []
         if mode in ("bm25", "hybrid"):
             bm25_pairs = store._lance.bm25_search(
                 query,
@@ -2765,10 +2790,12 @@ class DatasetsScope:
             )
 
         if mode == "hybrid":
-            bm25_rank = {ident: i for i, (ident, _) in enumerate(bm25_pairs)}
-            vec_rank = {ident: i for i, (ident, _) in enumerate(vec_pairs)}
+            bm25_rank = {ident: i for i, (ident, _, _) in enumerate(bm25_pairs)}
+            vec_rank = {ident: i for i, (ident, _, _) in enumerate(vec_pairs)}
+            bm25_lang = {ident: tag for ident, _, tag in bm25_pairs}
+            vec_lang = {ident: tag for ident, _, tag in vec_pairs}
             all_ids = set(bm25_rank) | set(vec_rank)
-            scored: dict[str, tuple[float, str]] = {}
+            scored: dict[str, tuple[float, str, str]] = {}
             for ident in all_ids:
                 s = 0.0
                 srcs: set[str] = set()
@@ -2778,12 +2805,15 @@ class DatasetsScope:
                 if ident in vec_rank:
                     s += 1.0 / (rrf_k + vec_rank[ident] + 1)
                     srcs.add("vector")
-                scored[ident] = (s, "hybrid" if len(srcs) > 1 else next(iter(srcs)))
+                # The tag of the ranking that places the dataset higher, BM25 on a tie.
+                bm25_wins = ident in bm25_rank and (ident not in vec_rank or bm25_rank[ident] <= vec_rank[ident])
+                tag = bm25_lang[ident] if bm25_wins else vec_lang[ident]
+                scored[ident] = (s, "hybrid" if len(srcs) > 1 else next(iter(srcs)), tag)
             ranked = sorted(scored.items(), key=lambda kv: -kv[1][0])
         elif mode == "vector":
-            ranked = [(ident, (1.0 / (1.0 + d), "vector")) for ident, d in vec_pairs]
+            ranked = [(ident, (1.0 / (1.0 + d), "vector", tag)) for ident, d, tag in vec_pairs]
         else:
-            ranked = [(ident, (score, "bm25")) for ident, score in bm25_pairs]
+            ranked = [(ident, (score, "bm25", tag)) for ident, score, tag in bm25_pairs]
 
         total = len(ranked)
         page = ranked[offset : offset + limit]
@@ -2791,12 +2821,12 @@ class DatasetsScope:
         datasets = store._fetch_by_identifiers(identifiers)
         by_id = {ds.identifier: ds for ds in datasets}
         hits: list[Hit[BaseDataset]] = []
-        for ident, (score, src) in page:
+        for ident, (score, src, tag) in page:
             ds = by_id.get(ident)
             if ds is None:
                 continue
-            hits.append(Hit(kind="dataset", score=score, payload=ds, lang=lang, source=src))
-        scores = {ident: score for ident, (score, _) in page}
+            hits.append(Hit(kind="dataset", score=score, payload=ds, lang=tag, source=src))
+        scores = {ident: score for ident, (score, _, _) in page}
         return SearchResult(items=hits, total=total, offset=offset, scores=scores)
 
 
@@ -3560,15 +3590,19 @@ class _Store:
         self,
         text: str,
         *,
-        lang: str = "en",
+        lang: str,
         rrf_k: int = 60,
         oversample: int = 200,
         operator: str = "or",
         fuzziness: int = 0,
         entity_type: Sequence[str] = _DATASET_ENTITY_TYPES,
         id_filter: Sequence[str] | None = None,
-    ) -> dict[str, float]:
-        """Compute RRF-merged identifier ranking from vector + BM25 hits."""
+    ) -> dict[str, tuple[float, str]]:
+        """Compute RRF-merged identifier ranking from vector + BM25 hits.
+
+        Each identifier maps to its fused score and the tag of its matched
+        row, taken from the ranking that places it higher, BM25 on a tie.
+        """
         assert self._lance is not None  # noqa: S101
         assert self._embedding_model is not None  # noqa: S101
 
@@ -3576,7 +3610,8 @@ class _Store:
         vec_hits = self._lance.search(
             query_vec, lang=lang, limit=oversample, entity_type=entity_type, id_filter=id_filter
         )
-        vec_rank: dict[str, int] = {ident: i + 1 for i, (ident, _) in enumerate(vec_hits)}
+        vec_rank: dict[str, int] = {ident: i + 1 for i, (ident, _, _) in enumerate(vec_hits)}
+        vec_lang = {ident: tag for ident, _, tag in vec_hits}
 
         bm25_hits = self._lance.bm25_search(
             text,
@@ -3587,17 +3622,19 @@ class _Store:
             entity_type=entity_type,
             id_filter=id_filter,
         )
-        bm25_rank: dict[str, int] = {ident: i + 1 for i, (ident, _) in enumerate(bm25_hits)}
+        bm25_rank: dict[str, int] = {ident: i + 1 for i, (ident, _, _) in enumerate(bm25_hits)}
+        bm25_lang = {ident: tag for ident, _, tag in bm25_hits}
 
         all_ids = set(vec_rank) | set(bm25_rank)
-        rrf: dict[str, float] = {}
+        rrf: dict[str, tuple[float, str]] = {}
         for ident in all_ids:
             score = 0.0
             if ident in vec_rank:
                 score += 1.0 / (rrf_k + vec_rank[ident])
             if ident in bm25_rank:
                 score += 1.0 / (rrf_k + bm25_rank[ident])
-            rrf[ident] = score
+            bm25_wins = ident in bm25_rank and (ident not in vec_rank or bm25_rank[ident] <= vec_rank[ident])
+            rrf[ident] = (score, bm25_lang[ident] if bm25_wins else vec_lang[ident])
 
         return rrf
 
@@ -6021,7 +6058,7 @@ class _Store:
         text: str,
         *,
         kinds: Sequence[str] = ("dataset", "concept", "code"),
-        lang: str = "en",
+        lang: str,
         limit: int = 50,
         offset: int = 0,
         operator: str = "or",
@@ -6329,7 +6366,7 @@ class _Store:
         facet_fields: list[str],
         *,
         include_rels: frozenset[str] | None = None,
-        search_lang: str = "en",
+        search_lang: str | None = None,
     ) -> SearchResult[T]:
         # Entity types (Agent, DataService, Distribution) use flat-column queries
         if cls in _ENTITY_SPECS:
@@ -6399,7 +6436,9 @@ class _Store:
         for ff in facet_fields:
             computed_facets[ff] = self._compute_facet_in_context(ff, fsql)
 
-        return SearchResult(items=items, total=qr.total, facets=computed_facets, offset=offset, scores=qr.scores)
+        return SearchResult(
+            items=items, total=qr.total, facets=computed_facets, offset=offset, scores=qr.scores, langs=qr.langs
+        )
 
     def _execute_entity_query[T](
         self,
@@ -6473,7 +6512,7 @@ class _Store:
         from_ids: list[str] | None = None,  # noqa: ARG002
         operator: str = "or",
         fuzziness: int = 0,
-        lang: str = "en",
+        lang: str | None = None,
         kinds: Sequence[str] = _DATASET_ENTITY_TYPES,
     ) -> _QueryResult:
         """Execute a search query using LanceDB.
@@ -6495,6 +6534,9 @@ class _Store:
         empty-results case, and a soft failure is friendlier than a
         hard ``RuntimeError`` mid-request.
         """
+        if lang is None:
+            msg = "search needs lang, the tag whose table answers it"
+            raise ValueError(msg)
         if self._lance is None:
             return _QueryResult(total=0, rows=[], scores={})
 
@@ -6524,8 +6566,9 @@ class _Store:
                 entity_type=kinds,
                 id_filter=id_filter,
             )
-            search_ids = sorted(rrf_scores, key=lambda i: rrf_scores[i], reverse=True)
-            scores = rrf_scores
+            search_ids = sorted(rrf_scores, key=lambda i: rrf_scores[i][0], reverse=True)
+            scores = {i: score for i, (score, _) in rrf_scores.items()}
+            langs = {i: tag for i, (_, tag) in rrf_scores.items()}
         else:
             bm25_hits = self._lance.bm25_search(
                 text,
@@ -6538,6 +6581,7 @@ class _Store:
             )
             search_ids = [h[0] for h in bm25_hits]
             scores = {h[0]: h[1] for h in bm25_hits}
+            langs = {h[0]: h[2] for h in bm25_hits}
 
         if not search_ids:
             return _QueryResult(total=0, rows=[], scores={})
@@ -6562,7 +6606,10 @@ class _Store:
 
         page_start = offset
         page_end = (offset + limit) if limit is not None else None
-        return _QueryResult(total=len(ordered), rows=ordered[page_start:page_end], scores=filtered_scores)
+        page = ordered[page_start:page_end]
+        return _QueryResult(
+            total=len(ordered), rows=page, scores=filtered_scores, langs={k: langs[k] for k in page if k in langs}
+        )
 
     def _ranked_ids_from_search(
         self,
@@ -6578,7 +6625,7 @@ class _Store:
         limit: int | None,
         offset: int,
         *,
-        search_lang: str = "en",
+        search_lang: str | None = None,
     ) -> list[str]:
         """Run a search query with relational filters and return ranked IDs."""
         search_text = hybrid_text if hybrid_text is not None else text
@@ -7407,7 +7454,7 @@ class EditionView:
         text: str,
         *,
         kinds: Sequence[str] = ("dataset", "concept", "code"),
-        lang: str = "en",
+        lang: str,
         limit: int = 50,
         offset: int = 0,
         operator: str = "or",

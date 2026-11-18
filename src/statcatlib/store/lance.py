@@ -40,7 +40,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
-from sdmxlib import InvalidTagError, normalize_tag, tag_alias
+from sdmxlib import normalize_tag, tag_alias
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -633,27 +633,28 @@ def _strip_stopwords(text: str, lang: str | None = None) -> str:
 
 
 def _dedupe_by_id(
-    hits: Iterable[tuple[str, float]],
+    hits: Iterable[tuple[str, float, str]],
     *,
     keep: str,
-) -> list[tuple[str, float]]:
-    """Collapse repeated ``id`` rows, keeping the best score per id.
+) -> list[tuple[str, float, str]]:
+    """Collapse repeated ``id`` rows, keeping the best score per id and that row's tag.
 
     Preserves the order of *first* occurrence of each id, since LanceDB
     returns rows in rank order; ``keep`` controls which score replaces a
     later duplicate (``"max"`` for BM25 relevance, ``"min"`` for vector
     distance).
     """
-    best: dict[str, float] = {}
+    best: dict[str, tuple[float, str]] = {}
     order: list[str] = []
-    for ident, score in hits:
+    for ident, score, lang in hits:
         if ident in best:
-            if (keep == "max" and score > best[ident]) or (keep == "min" and score < best[ident]):
-                best[ident] = score
+            kept = best[ident][0]
+            if (keep == "max" and score > kept) or (keep == "min" and score < kept):
+                best[ident] = (score, lang)
         else:
-            best[ident] = score
+            best[ident] = (score, lang)
             order.append(ident)
-    return [(ident, best[ident]) for ident in order]
+    return [(ident, *best[ident]) for ident in order]
 
 
 def _entity_type_clause(entity_type: str | Sequence[str] | None) -> str:
@@ -1205,11 +1206,13 @@ class LanceIndex:
     # -- language routing ----------------------------------------------
 
     def _for(self, lang: str) -> _LanguageIndex | None:
-        """Return the index serving *lang*, or ``None`` if nothing does."""
-        try:
-            return self._langs.get(tag_alias(lang))
-        except InvalidTagError:
-            return None
+        """Return the index serving *lang*, or ``None`` if nothing does.
+
+        A malformed *lang* raises `sdmxlib.InvalidTagError`, and one that is
+        not a ``str`` (a sequence of tags included) raises `TypeError`: a
+        search reads one table, with one stemmer.
+        """
+        return self._langs.get(tag_alias(lang))
 
     def _writer(self) -> str:
         """The edition this index writes tables for.
@@ -1235,7 +1238,7 @@ class LanceIndex:
         """Languages with their own table, sorted."""
         return sorted(self._langs)
 
-    def table_for(self, lang: str = "en") -> lancedb.table.Table | None:
+    def table_for(self, lang: str) -> lancedb.table.Table | None:
         """Return the Lance table serving *lang*, or ``None``.
 
         The escape hatch for inspecting a single language's corpus
@@ -1491,20 +1494,21 @@ class LanceIndex:
         self,
         text: str,
         *,
-        lang: str = "en",
+        lang: str,
         limit: int = 100,
         operator: str = "or",
         fuzziness: int = 0,
         entity_type: str | Sequence[str] | None = None,
         id_filter: Sequence[str] | None = None,
-    ) -> list[tuple[str, float]]:
-        """Return ``[(identifier, bm25_score), …]`` ordered by BM25 relevance.
+    ) -> list[tuple[str, float, str]]:
+        """Return ``[(identifier, bm25_score, lang), …]`` ordered by BM25 relevance.
 
         Builds the FTS index lazily on first call if not already present.
         Returns an empty list when no table serves *lang*.
 
         Results are deduplicated by ``id`` (best score per id wins) so a
-        single dataset never appears more than once in the ranked output.
+        single dataset never appears more than once in the ranked output;
+        ``lang`` is the stored tag of the row that won.
 
         Args:
             text: Query text, tokenised and stemmed with *lang*'s rules.
@@ -1522,8 +1526,8 @@ class LanceIndex:
                 so *limit* counts rows that pass it.
 
         Returns:
-            ``[(identifier, score), …]`` ordered by descending BM25 score,
-            at most *limit* long. Empty when no table serves *lang*.
+            ``[(identifier, score, lang), …]`` ordered by descending BM25
+            score, at most *limit* long. Empty when no table serves *lang*.
         """
         index = self._for(lang)
         if index is None:
@@ -1532,20 +1536,20 @@ class LanceIndex:
         oversample = min(limit * 4, 1000) if entity_type is None else limit * 2
         rows = index.bm25(
             text,
-            columns=None,
+            columns=("id", "lang"),
             limit=oversample,
             operator=operator,
             fuzziness=fuzziness,
             filters=[_entity_type_clause(entity_type), _in_clause("id", id_filter)],
         )
-        return _dedupe_by_id(((r["id"], r["_score"]) for r in rows), keep="max")[:limit]
+        return _dedupe_by_id(((r["id"], r["_score"], r["lang"]) for r in rows), keep="max")[:limit]
 
     def bm25_search_rows(
         self,
         text: str,
         *,
         columns: Sequence[str],
-        lang: str = "en",
+        lang: str,
         limit: int = 100,
         operator: str = "or",
         fuzziness: int = 0,
@@ -1613,12 +1617,12 @@ class LanceIndex:
         self,
         embedding: list[float],
         *,
-        lang: str = "en",
+        lang: str,
         limit: int = 100,
         entity_type: str | Sequence[str] | None = None,
         id_filter: Sequence[str] | None = None,
-    ) -> list[tuple[str, float]]:
-        """Return ``[(identifier, distance), …]`` ordered by vector distance.
+    ) -> list[tuple[str, float, str]]:
+        """Return ``[(identifier, distance, lang), …]`` ordered by vector distance.
 
         Returns an empty list when no table serves *lang*.
 
@@ -1639,8 +1643,9 @@ class LanceIndex:
             id_filter: Rank only rows whose ``id`` is in this set, as for `bm25_search`.
 
         Returns:
-            ``[(identifier, distance), …]`` ordered by ascending distance,
-            at most *limit* long. Empty when no table serves *lang*.
+            ``[(identifier, distance, lang), …]`` ordered by ascending
+            distance, at most *limit* long, ``lang`` being the stored tag of
+            the row kept. Empty when no table serves *lang*.
         """
         index = self._for(lang)
         if index is None:
@@ -1649,18 +1654,18 @@ class LanceIndex:
         oversample = min(limit * 4, 1000) if entity_type is None else limit * 2
         rows = index.vector(
             embedding,
-            columns=None,
+            columns=("id", "lang"),
             limit=oversample,
             filters=[_entity_type_clause(entity_type), _in_clause("id", id_filter)],
         )
-        return _dedupe_by_id(((r["id"], r["_distance"]) for r in rows), keep="min")[:limit]
+        return _dedupe_by_id(((r["id"], r["_distance"], r["lang"]) for r in rows), keep="min")[:limit]
 
     def search_rows(
         self,
         embedding: list[float],
         *,
         columns: Sequence[str],
-        lang: str = "en",
+        lang: str,
         limit: int = 100,
         entity_type: str | Sequence[str] | None = None,
         id_filter: Sequence[str] | None = None,

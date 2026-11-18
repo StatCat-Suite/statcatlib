@@ -144,7 +144,7 @@ class TestReadPath:
                 view.facets("publisher")
                 view.code_map(_DATASET, lang="en")
                 if view.index_layout:
-                    view.search("north")
+                    view.search("north", lang="en")
                 cat.product(product).editions()
         assert _snapshot(root) == before
 
@@ -154,7 +154,7 @@ class TestReadPath:
         catalog.refresh()
         view = catalog.product("empty").view()
         assert view.index_layout == {}
-        assert view.search("anything").items == []
+        assert view.search("anything", lang="en").items == []
 
     def test_a_changed_manifest_is_refused(self, tmp_path: Path, catalog: sc.Catalog) -> None:
         edition = catalog.product("p").working_copy().seal()
@@ -204,11 +204,11 @@ class TestSearchAcrossEditions:
             )
         )
         b = wc.seal()
-        assert [d.identifier for d in old.query(sc.BaseDataset).search("aardvark").collect()] == ["a"]
-        assert old.query(sc.BaseDataset).search("badger").collect() == []
+        assert [d.identifier for d in old.query(sc.BaseDataset).search("aardvark", lang="en").collect()] == ["a"]
+        assert old.query(sc.BaseDataset).search("badger", lang="en").collect() == []
         catalog.refresh()
         new = catalog.product("p").view()
-        found = new.query(sc.BaseDataset).search("aardvark badger").collect()
+        found = new.query(sc.BaseDataset).search("aardvark badger", lang="en").collect()
         assert {d.identifier for d in found} == {"a", "b"}
         old_tables = {layout["table"] for layout in old.index_layout.values()}
         new_tables = {layout["table"] for layout in new.index_layout.values()}

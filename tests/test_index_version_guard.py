@@ -66,7 +66,7 @@ class TestReadable:
     def test_this_builds_version_opens_and_searches(self, catalog: sc.Catalog) -> None:
         view = catalog.product("synthetic").view()
         assert view.index_layout
-        assert view.search("synthetic", kinds=("dataset",)).total >= 0
+        assert view.search("synthetic", kinds=("dataset",), lang="en").total >= 0
 
     def test_no_index_has_nothing_to_check(self, tmp_path: Path) -> None:
         assert LanceIndex.unreadable_version(tmp_path / "search") is None

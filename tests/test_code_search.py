@@ -9,6 +9,7 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+from sdmxlib import LocalisedString
 from sdmxlib.model.codelist import Code, Codelist
 from sdmxlib.model.dataflow import Dataflow
 from sdmxlib.model.datastructure import DataStructure, Dimension
@@ -179,7 +180,7 @@ class TestCodesScope:
         store.build_index(include_codes=True)
 
         result = store.codes.find("Canada", lang="en", limit=10)
-        assert any(h.payload.code_label == "Canada" for h in result.items)
+        assert any(h.payload.code_label.text == "Canada" for h in result.items)
 
     def test_find_returns_structured_fields(self, tmp_path: pathlib.Path) -> None:
         """Hits expose dimension_id and code_id directly — no text re-parsing."""
@@ -188,10 +189,10 @@ class TestCodesScope:
         store.build_index(include_codes=True)
 
         result = store.codes.find("Canada", lang="en")
-        canada = next(h for h in result.items if h.payload.code_label == "Canada")
+        canada = next(h for h in result.items if h.payload.code_label.text == "Canada")
         assert canada.payload.dimension_id == "GEO"
         assert canada.payload.code_id == "CA"
-        assert canada.payload.dimension_label == "Geography"
+        assert canada.payload.dimension_label == LocalisedString("Geography", canada.lang)
         assert canada.lang == "en"
         assert canada.score > 0
         assert canada.kind == "code"
@@ -211,21 +212,21 @@ class TestCodesScope:
         ingest_sdmx(store, _make_registry())
         store.build_index(include_codes=True)
 
-        result = store.codes.find("Canada", dataset_ids=["does-not-exist"])
+        result = store.codes.find("Canada", dataset_ids=["does-not-exist"], lang="en")
         assert result.items == []
 
         all_hits = store.codes.find("Canada", lang="en").items
         ds_id = all_hits[0].payload.dataset_id
         scoped = store.codes.find("Canada", dataset_ids=[ds_id], lang="en").items
         assert all(h.payload.dataset_id == ds_id for h in scoped)
-        assert any(h.payload.code_label == "Canada" for h in scoped)
+        assert any(h.payload.code_label.text == "Canada" for h in scoped)
 
     def test_find_returns_empty_without_index(self, tmp_path: pathlib.Path) -> None:
         """Without a built index, codes.find degrades gracefully."""
         store = open_scratch(tmp_path / "catalog")
         ingest_sdmx(store, _make_registry())
         store._store._lance = None
-        assert store.codes.find("anything").items == []
+        assert store.codes.find("anything", lang="en").items == []
 
     def test_find_excludes_dataset_rows(self, tmp_path: pathlib.Path) -> None:
         """Dataset-level rows must never leak into codes.find results."""
@@ -309,4 +310,4 @@ class TestEmbedCodes:
         store.build_index(embedding_model=self._stub_model(), include_codes=True)
 
         result = store.codes.find("Canada", lang="en", limit=5)
-        assert any(h.payload.code_label == "Canada" for h in result.items)
+        assert any(h.payload.code_label.text == "Canada" for h in result.items)

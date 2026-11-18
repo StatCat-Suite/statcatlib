@@ -21,7 +21,7 @@ class TestChaining:
         which the `store` fixture does not build. Unlike `EditionView.search`,
         this yields the entities themselves, not `Hit` wrappers.
         """
-        result = indexed_store.query(sc.BaseDataset).filter(publisher="ECB").search("exchange").execute()
+        result = indexed_store.query(sc.BaseDataset).filter(publisher="ECB").search("exchange", lang="en").execute()
         assert any(ds.identifier == "EXR" for ds in result.items)
 
     def test_sort_by_identifier(self, store):

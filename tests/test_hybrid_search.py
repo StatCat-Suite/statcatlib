@@ -184,7 +184,7 @@ def test_hybrid_search_with_querybuilder_filter(store_with_model, tmp_path):
     results = (
         store_with_model.query(sc.OpenDataset)
         .filter(status="current")
-        .hybrid_search("labour employment jobs")
+        .hybrid_search("labour employment jobs", lang="en")
         .execute()
     )
     assert all(d.status == "current" for d in results.items)
@@ -201,7 +201,7 @@ def test_without_model_semantic_raises(tmp_path):
         )
     )
     with pytest.raises(RuntimeError, match="embedding_model"):
-        store.datasets.find(mode="vector", query="test query")
+        store.datasets.find(mode="vector", query="test query", lang="en")
 
 
 @pytest.mark.unit
@@ -215,7 +215,7 @@ def test_without_model_hybrid_raises(tmp_path):
         )
     )
     with pytest.raises(RuntimeError, match="embedding_model"):
-        store.datasets.find(mode="hybrid", query="test query")
+        store.datasets.find(mode="hybrid", query="test query", lang="en")
 
 
 @pytest.mark.unit
@@ -297,7 +297,7 @@ def test_search_by_theme_label(tmp_path):
     store.put(ds)
     store.build_index()
 
-    results = store.datasets.find("Environment")
+    results = store.datasets.find("Environment", lang="en")
     ids = [d.payload.identifier for d in results.items]
     assert "themed-ds" in ids
 
@@ -356,7 +356,7 @@ def test_build_index_idempotent(tmp_path):
     store.build_index()
     store.build_index()
 
-    results = store.datasets.find("Idempotent")
+    results = store.datasets.find("Idempotent", lang="en")
     ids = [d.payload.identifier for d in results.items]
     assert ids.count("idem-ds") == 1
 
@@ -414,7 +414,7 @@ def test_search_scalars_identifier(tmp_path):
     )
     store.build_index()
 
-    ids = store.query(sc.OpenDataset).search("labour employment").scalars("identifier").values()
+    ids = store.query(sc.OpenDataset).search("labour employment", lang="en").scalars("identifier").values()
     assert isinstance(ids, list)
     assert len(ids) > 0
     assert all(isinstance(i, str) for i in ids)
@@ -429,7 +429,7 @@ def test_search_scalars_title(tmp_path):
     store.put(sc.OpenDataset(identifier="ds-b", title=I18n(en="Beta Dataset"), description=I18n(en="Second beta")))
     store.build_index()
 
-    titles = store.query(sc.OpenDataset).search("alpha").scalars("title", lang="en").values()
+    titles = store.query(sc.OpenDataset).search("alpha", lang="en").scalars("title", lang="en").values()
     assert isinstance(titles, list)
     assert len(titles) > 0
     assert sc.LocalisedString("Alpha Dataset", "en") in titles
@@ -455,7 +455,7 @@ def test_search_select_projection(tmp_path):
     )
     store.build_index()
 
-    rows = store.query(sc.OpenDataset).search("selection").select("identifier", "title", lang="en").rows()
+    rows = store.query(sc.OpenDataset).search("selection", lang="en").select("identifier", "title", lang="en").rows()
     assert isinstance(rows, list)
     assert len(rows) > 0
     assert all(isinstance(r, dict) for r in rows)
@@ -476,8 +476,8 @@ def test_search_exists(tmp_path):
     )
     store.build_index()
 
-    assert store.query(sc.OpenDataset).search("existence").exists() is True
-    assert store.query(sc.OpenDataset).search("xyzzy_nonexistent_term_42").exists() is False
+    assert store.query(sc.OpenDataset).search("existence", lang="en").exists() is True
+    assert store.query(sc.OpenDataset).search("xyzzy_nonexistent_term_42", lang="en").exists() is False
 
 
 @pytest.mark.unit
@@ -493,7 +493,7 @@ def test_search_scalars_first(tmp_path):
     )
     store.build_index()
 
-    val = store.query(sc.OpenDataset).search("first result").scalars("identifier").value()
+    val = store.query(sc.OpenDataset).search("first result", lang="en").scalars("identifier").value()
     assert val == "first-ds"
 
 
@@ -550,7 +550,7 @@ def test_search_and_operator_default(tmp_path):
     store.build_index()
 
     # "labour statistics" with AND: only "both-terms" has both words
-    ids = store.query(sc.BaseDataset).search("labour statistics").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("labour statistics", lang="en").scalars("identifier").values()
     assert "both-terms" in ids
 
 
@@ -575,7 +575,7 @@ def test_search_or_operator(tmp_path):
     store.build_index()
 
     # "labour price" with OR: both should match (each has one term)
-    ids = store.query(sc.BaseDataset).search("labour price", operator="or").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("labour price", operator="or", lang="en").scalars("identifier").values()
     assert "labour-only" in ids
     assert "price-only" in ids
 
@@ -594,7 +594,7 @@ def test_search_english_stopwords_stripped(tmp_path):
     store.build_index()
 
     # "health and safety" → strips "and" → "health AND safety"
-    ids = store.query(sc.BaseDataset).search("health and safety").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("health and safety", lang="en").scalars("identifier").values()
     assert "health-safety" in ids
 
 
@@ -633,7 +633,7 @@ def test_search_single_term_unchanged(tmp_path):
     )
     store.build_index()
 
-    ids = store.query(sc.BaseDataset).search("labour").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("labour", lang="en").scalars("identifier").values()
     assert "labour-ds" in ids
 
 
@@ -657,7 +657,7 @@ def test_standalone_search_operator(tmp_path):
     )
     store.build_index()
 
-    results = store.datasets.find("alpha beta", operator="and")
+    results = store.datasets.find("alpha beta", operator="and", lang="en")
     ids = [d.payload.identifier for d in results.items]
     assert "ds-a" in ids
 
@@ -669,17 +669,17 @@ def test_standalone_search_operator(tmp_path):
 
 @pytest.mark.unit
 def test_dedupe_by_id_keep_min_picks_lowest_distance():
-    hits = [("a", 0.5), ("b", 0.4), ("a", 0.1), ("c", 0.9), ("b", 0.6)]
+    hits = [("a", 0.5, "en"), ("b", 0.4, "en"), ("a", 0.1, "en-t-fr"), ("c", 0.9, "en"), ("b", 0.6, "fr")]
     out = _dedupe_by_id(iter(hits), keep="min")
-    # Order: first occurrence; values: best (min) per id.
-    assert out == [("a", 0.1), ("b", 0.4), ("c", 0.9)]
+    # Order: first occurrence; values: best (min) per id, with that row's tag.
+    assert out == [("a", 0.1, "en-t-fr"), ("b", 0.4, "en"), ("c", 0.9, "en")]
 
 
 @pytest.mark.unit
 def test_dedupe_by_id_keep_max_picks_highest_score():
-    hits = [("a", 0.1), ("b", 0.4), ("a", 0.9), ("c", 0.2)]
+    hits = [("a", 0.1, "en"), ("b", 0.4, "en"), ("a", 0.9, "en-t-fr"), ("c", 0.2, "en")]
     out = _dedupe_by_id(iter(hits), keep="max")
-    assert out == [("a", 0.9), ("b", 0.4), ("c", 0.2)]
+    assert out == [("a", 0.9, "en-t-fr"), ("b", 0.4, "en"), ("c", 0.2, "en")]
 
 
 @pytest.mark.unit
@@ -918,7 +918,7 @@ def test_querybuilder_search_returns_empty_when_lance_missing(tmp_path):
     )
     # Simulate "lancedb not installed" / "index never built".
     store._store._lance = None
-    result = store.query(sc.OpenDataset).search("labour").execute()
+    result = store.query(sc.OpenDataset).search("labour", lang="en").execute()
     assert isinstance(result, sc.SearchResult)
     assert result.items == []
     assert result.total == 0
@@ -937,7 +937,7 @@ def test_catalogstore_search_returns_empty_when_lance_missing(tmp_path):
         )
     )
     store._store._lance = None
-    result = store.datasets.find("labour")
+    result = store.datasets.find("labour", lang="en")
     assert isinstance(result, sc.SearchResult)
     assert result.items == []
     assert result.total == 0
@@ -955,7 +955,7 @@ def test_querybuilder_hybrid_returns_empty_when_lance_missing(tmp_path, model):
         )
     )
     store._store._lance = None
-    result = store.query(sc.OpenDataset).hybrid_search("test").execute()
+    result = store.query(sc.OpenDataset).hybrid_search("test", lang="en").execute()
     assert result.items == []
     assert result.total == 0
 
@@ -985,7 +985,7 @@ def test_search_fuzzy_one_preserves_exact_match(tmp_path):
     )
     store.build_index()
     for fz in (1, 2):
-        ids = store.query(sc.OpenDataset).search("inflation", fuzzy=fz).scalars("identifier").values()
+        ids = store.query(sc.OpenDataset).search("inflation", fuzzy=fz, lang="en").scalars("identifier").values()
         assert "ds-exact" in ids, f"exact match dropped at fuzzy={fz}"
 
 
@@ -1030,7 +1030,7 @@ def test_search_codes_fuzzy_preserves_exact(tmp_path):
     # quirk's exclusion window. With the BooleanQuery fix, an exact
     # query at fuzzy=1 must still surface it.
     result = store.codes.find("Saskatchewan", lang="en", fuzzy=1)
-    assert any(h.payload.code_label == "Saskatchewan" for h in result.items)
+    assert any(h.payload.code_label.text == "Saskatchewan" for h in result.items)
 
 
 @pytest.mark.unit
@@ -1045,7 +1045,7 @@ def test_search_fuzzy_zero_requires_exact_match(tmp_path):
         )
     )
     store.build_index()
-    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=0).scalars("identifier").values()
+    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=0, lang="en").scalars("identifier").values()
     assert "ds-exact" not in ids
 
 
@@ -1062,7 +1062,7 @@ def test_search_fuzzy_two_catches_typos(tmp_path):
     )
     store.build_index()
     # 1-character typo: "inflaton" → "inflation"
-    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=2).scalars("identifier").values()
+    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=2, lang="en").scalars("identifier").values()
     assert "ds-fuzzy" in ids
 
 
@@ -1078,7 +1078,7 @@ def test_catalogstore_search_fuzzy_int(tmp_path):
         )
     )
     store.build_index()
-    result = store.datasets.find("inflaton", fuzzy=2)
+    result = store.datasets.find("inflaton", fuzzy=2, lang="en")
     assert any(d.payload.identifier == "ds-cs-fuzzy" for d in result.items)
 
 
@@ -1581,8 +1581,8 @@ class TestAtomicRebuild:
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         idx.add_bulk(self._rows("first", "premier"))
         idx.add_bulk(self._rows("second", "deuxieme"))
-        assert [i for i, _ in idx.bm25_search("second", lang="en")] == ["a"]
-        assert [i for i, _ in idx.bm25_search("deuxieme", lang="fr")] == ["a"]
+        assert [i for i, _, _ in idx.bm25_search("second", lang="en")] == ["a"]
+        assert [i for i, _, _ in idx.bm25_search("deuxieme", lang="fr")] == ["a"]
         # The superseded content is gone, not merged in alongside.
         assert idx.bm25_search("first", lang="en") == []
 
@@ -1629,8 +1629,8 @@ class TestAtomicRebuild:
         # Both languages still answer with the pre-rebuild content.
         reopened = LanceIndex(tmp_path / "search")
         assert sorted(reopened.languages) == ["en", "fr"]
-        assert [i for i, _ in reopened.bm25_search("first", lang="en")] == ["a"]
-        assert [i for i, _ in reopened.bm25_search("premier", lang="fr")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("first", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("premier", lang="fr")] == ["a"]
         assert reopened.bm25_search("second", lang="en") == []
         # The failed rebuild dropped the table it had built.
         assert reopened.orphan_tables() == []
@@ -1675,7 +1675,7 @@ class TestAtomicRebuild:
         assert orphan not in set(lancedb.connect(str(tmp_path / "search")).list_tables().tables)
         # The live language is untouched.
         assert reopened.languages == ["en"]
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
     def test_a_rebuild_reclaims_orphans_first(self, tmp_path):
         """A table no manifest names is dropped by the next rebuild, not shipped with it.
@@ -1730,8 +1730,8 @@ class TestIncrementalAddPersistence:
 
         reopened = LanceIndex(tmp_path / "search")
         assert reopened.languages == ["en", "fr"]
-        assert [i for i, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
     def test_upsert_into_existing_language_survives_reopen(self, tmp_path):
         from statcatlib.store.lance import LanceIndex
@@ -1741,8 +1741,8 @@ class TestIncrementalAddPersistence:
         idx.add([{"id": "c", "entity_type": "open", "lang": "en", "text": "goodbye"}])
 
         reopened = LanceIndex(tmp_path / "search")
-        assert [i for i, _ in reopened.bm25_search("goodbye", lang="en")] == ["c"]
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("goodbye", lang="en")] == ["c"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
     def test_search_after_reopen_writes_nothing(self, tmp_path):
         """A built index is used as found, not rebuilt by the first query.
@@ -1767,8 +1767,8 @@ class TestIncrementalAddPersistence:
 
         before = snapshot()
         reopened = LanceIndex(tmp_path / "search")
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
-        assert [i for i, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
         assert snapshot() == before
 
 
@@ -2248,7 +2248,7 @@ class TestQueryBuilderSearchLang:
 
     def test_search_defaults_to_the_english_table(self, tmp_path):
         store = self._french_store(tmp_path)
-        query = store.query(sc.BaseDataset).search("chômage")
+        query = store.query(sc.BaseDataset).search("chômage", lang="en")
         assert query.collect() == []
         assert not query.exists()
 
@@ -2259,7 +2259,7 @@ class TestQueryBuilderSearchLang:
             "chomage-qc",
             "loyers-qc",
         }
-        assert query.hybrid_search("chômage").collect() == []
+        assert query.hybrid_search("chômage", lang="en").collect() == []
 
     def test_lang_survives_later_chaining(self, tmp_path):
         store = self._french_store(tmp_path)
@@ -2312,19 +2312,19 @@ class TestSearchRanksOnlyFilteredDatasets:
 
     def test_the_filtered_match_ranks_past_the_pool(self, tmp_path):
         store = self._store(tmp_path)
-        unfiltered = store.query(sc.OpenDataset).search("population").collect()
+        unfiltered = store.query(sc.OpenDataset).search("population", lang="en").collect()
         assert "o'brien-census" not in [ds.identifier for ds in unfiltered]
 
     def test_search_finds_a_filtered_match_ranked_last(self, tmp_path):
-        query = self._store(tmp_path).query(sc.OpenDataset).filter(status="current").search("population")
+        query = self._store(tmp_path).query(sc.OpenDataset).filter(status="current").search("population", lang="en")
         assert [ds.identifier for ds in query.collect()] == ["o'brien-census"]
         assert query.count() == 1
         assert query.exists()
 
     def test_hybrid_search_finds_a_filtered_match_ranked_last(self, tmp_path):
         query = self._store(tmp_path, _FarFromCensusModel()).query(sc.OpenDataset).filter(status="current")
-        assert [ds.identifier for ds in query.hybrid_search("population").collect()] == ["o'brien-census"]
+        assert [ds.identifier for ds in query.hybrid_search("population", lang="en").collect()] == ["o'brien-census"]
 
     def test_paging_reaches_past_the_pool(self, tmp_path):
-        query = self._store(tmp_path).query(sc.OpenDataset).search("population")
+        query = self._store(tmp_path).query(sc.OpenDataset).search("population", lang="en")
         assert len(query.offset(240).limit(20).collect()) == self._N - 240

@@ -291,7 +291,7 @@ class TestPublisherMapping:
 
 class TestFTS:
     def test_search_hits_title(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.search("Dataflow")
+        result = indexed_sdmx_store.search("Dataflow", lang="en")
         assert result.total >= 1
         # `search()` yields `Hit` wrappers; the entity is on `.payload`.
         # This read the entity directly and would have raised if the class
@@ -301,15 +301,15 @@ class TestFTS:
         )
 
     def test_search_hits_description(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.search("integration testing")
+        result = indexed_sdmx_store.search("integration testing", lang="en")
         assert result.total >= 1
 
     def test_search_no_match(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.search("xyzzy_nonexistent_token_1234")
+        result = indexed_sdmx_store.search("xyzzy_nonexistent_token_1234", lang="en")
         assert result.total == 0
 
     def test_query_with_search(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.query(sc.StatisticalDataset).search("Dataflow").execute()
+        result = indexed_sdmx_store.query(sc.StatisticalDataset).search("Dataflow", lang="en").execute()
         assert result.total >= 1
 
 

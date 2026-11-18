@@ -693,7 +693,7 @@ class TestIngestCkan:
         with scratch_store(tmp_path / "catalog") as store:
             sc.ingest_ckan(store, _CKAN_BASE, limit=5)
             store.build_index()
-            result = store.search("Labour Force Survey")
+            result = store.search("Labour Force Survey", lang="en")
         assert result.total >= 1
 
     def test_ingest_is_idempotent(self, httpx_mock: HTTPXMock):
