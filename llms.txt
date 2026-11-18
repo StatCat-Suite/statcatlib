@@ -197,7 +197,7 @@ before indexing so theme labels appear in BM25 search results.
 results = (
     view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT", status="current")
-    .search("unemployment quarterly")
+    .search("unemployment quarterly", lang="en")
     .include("publisher", "themes")   # load only these relationships
     .sort_by("modified", desc=True)
     .with_facets("themes", "frequency")
@@ -266,13 +266,14 @@ reconstruction (single SQL query):
 # Row projection — .select() returns Row objects (dict subclass with attribute access)
 rows = (
     view.query(sc.BaseDataset)
-    .filter(q.title_contains("GDP"))
+    .filter(q.title_contains("GDP", lang="en"))
     .sort_by("title", lang="en")
     .limit(3)
     .select("identifier", "title", lang="en")
     .rows()
 )
-# → [Row({"identifier": "GDP", "title": "GDP Growth"}), ...]
+# → RowList([Row({"identifier": "GDP", "title": "GDP Growth", "title__lang": "en"}), ...])
+rows.gaps            # a Gap per row with no English title, whose "title" is None
 rows[0].identifier   # attribute-style access
 rows[0]["title"]     # dict-style access — both work
 isinstance(rows[0], dict)  # True
@@ -283,10 +284,14 @@ ids = view.query(sc.BaseDataset).filter(status="current").scalars("identifier").
 
 # .row() is the single-row terminal; .first() and .one() raise ValueError under a projection
 row = view.query(sc.BaseDataset).filter(identifier="EXR").select("identifier", "title", lang="en").row()
-# → Row({"identifier": "EXR", "title": "Exchange Rate EUR/USD"})
+# → Row({"identifier": "EXR", "title": "Exchange Rate EUR/USD", "title__lang": "en"})
+
+# A MAP column as scalars yields LocalisedString | None; the first held tag answers
+titles = view.query(sc.BaseDataset).scalars("title", lang=("fr", "en")).values()
+# → ValueList([LocalisedString(text="Taux de change", lang="fr"), ...]), with .gaps
 ```
 
-Selectable columns: `identifier`, `kind`, `status`, `issued`, `modified`, `landing_page`, `version`, `title` (MAP, requires `lang`), `description` (MAP, requires `lang`).
+Selectable columns: `identifier`, `kind`, `status`, `issued`, `modified`, `landing_page`, `version`, `title` (MAP, requires `lang`), `description` (MAP, requires `lang`). A MAP column gives `title` (text or `None`) and `title__lang` (the tag that answered, or `None`).
 
 `sc.Row` is a `dict` subclass — `isinstance(row, dict)` is `True`, JSON serialisation works normally.
 
@@ -332,11 +337,12 @@ q.distribution(media_type="application/zip")
 q.has_service(endpoint_url="https://sdmx.oecd.org/public/rest")
 
 # MAP column filters — spatial, keyword, title, description
-q.has_spatial("Canada")                    # spatial coverage label match
-q.has_spatial("Ontario", lang="en")
-q.has_keyword("employment")               # keyword match
-q.title_contains("GDP")                   # case-insensitive ILIKE on title
-q.description_contains("quarterly")       # case-insensitive ILIKE on description
+# Each takes a required lang: a tag, or tags of which the first held one is tested
+q.has_spatial("Ontario", lang="en")              # spatial coverage label match
+q.has_spatial_key("sha256:0bbd…")                # spatial facet key: a URI or a sha256: key
+q.has_keyword("employment", lang="en")           # keyword match
+q.title_contains("GDP", lang=("en", "en-t-fr"))  # case-insensitive ILIKE on title
+q.description_contains("quarterly", lang="en")   # case-insensitive ILIKE on description
 ```
 
 All filters are ANDed:
@@ -377,18 +383,26 @@ view.query(sc.DataService).filter(
 
 A dataset's search text holds its title, description and keywords, plus its theme labels and dimension names, so BM25 also finds datasets by classification metadata.
 
+Every search takes `lang`, required, one tag: it names the language table to read. An alternate tag's text (open.canada.ca's `en-t-fr`) is indexed in its primary's table, so `lang="en"` finds it, and each hit's `lang` is the stored tag of the row that matched. A sequence of tags raises `TypeError`. Search over an index written by statcatlib 0.20 or earlier (format 3) raises `IncompatibleCatalogError` until the product is re-indexed.
+
 ```python
 # Standalone BM25 search over datasets, concepts and codes; each item is a Hit
-results = view.search("gross domestic product", kinds=("dataset",), limit=10)
+results = view.search("gross domestic product", kinds=("dataset",), lang="en", limit=10)
 results.items[0].payload.identifier
+results.items[0].lang      # "en", or "en-t-fr" for text translated from French
 
 # Combined with filters via QueryBuilder
 results = (
     view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT")
-    .search("labour force")
+    .search("labour force", lang="en")
     .execute()
 )
+results.langs              # {identifier: tag of the matched row}
+
+# Codes and concepts: hit fields carry LocalisedString
+hit = view.codes.find("ontario", lang="en").items[0]
+hit.payload.code_label.text, hit.payload.code_label.lang, hit.payload.document
 ```
 
 ## Semantic and hybrid search
@@ -402,16 +416,16 @@ model = SentenceTransformer("intfloat/multilingual-e5-small")
 view = cat.product("14100287").view(embedding_model=model)   # query_prefix= too; BM25 needs no model
 
 # Pure vector search — returns Hit objects; hit.payload is the dataset
-results = view.datasets.find("people moving between provinces", mode="vector")
+results = view.datasets.find("people moving between provinces", mode="vector", lang="en")
 
 # Hybrid BM25 + vector (RRF fusion) — recommended
-results = view.datasets.find("labour market monthly data", mode="hybrid", limit=20)
+results = view.datasets.find("labour market monthly data", mode="hybrid", lang="en", limit=20)
 
 # Hybrid via QueryBuilder with filters
 results = (
     view.query(sc.AggregateDataset)
     .filter(status="current")
-    .hybrid_search("unemployment trends")
+    .hybrid_search("unemployment trends", lang="en")
     .limit(20)
     .execute()
 )
@@ -446,12 +460,12 @@ print(results.facets["themes"])
 
 ### Facet label resolution
 
-Publisher and theme facets return IDs. Use label methods for display names:
+Publisher and theme facets return IDs, and spatial facets return a region's URI or a `sha256:` key of its label map. Use label methods for display names. Each returns `Labels`, a mapping to `LocalisedString | None` with a `gaps` tuple:
 
 ```python
-view.agent_labels(lang="en")    # {"ESTAT": "Eurostat", "ECB": "European Central Bank", ...}
-view.concept_labels(lang="en")  # {"<concept uri>": "Economy and finance", ...}
-view.spatial_labels(lang="en")  # {"Canada": "Canada", ...}
+view.agent_labels(lang="en")    # Labels({"ESTAT": LocalisedString(text="Eurostat", lang="en"), ...})
+view.concept_labels(lang="en")  # Labels({"<concept uri>": LocalisedString(text="Economy and finance", lang="en"), ...})
+view.spatial_labels(lang=view.preference(lang="en"))  # Labels({"sha256:…": LocalisedString(text="Canada", lang="en"), ...})
 ```
 
 ## Source connectors
@@ -534,26 +548,28 @@ view.codelist(sc.urn.codelist("SDMX", "CL_GEO")).collect()          # ItemList[C
 view.codelist(sc.urn.codelist("SDMX", "CL_GEO"))["ON"].collect()    # Code
 view.codelist(sc.urn.codelist("SDMX", "CL_GEO")).datasets.collect() # datasets using this codelist
 
-# CodelistsScope — supports enrich with labels, lang, and text filtering
-view.codelists.lang("en").enrich(n=sc.each("datasets").count()).collect()
-# → [{"urn": "...", "label": "Geography", "n": 5}, ...]
+# CodelistsScope — enriched rows carry each name and the tag that answered
+view.codelists.enrich(n=sc.each("datasets").count()).rows(lang="en")
+# → [Row({"urn": "...", "label": "Geography", "label__lang": "en", "n": 5}), ...]
 
 # Filter codelists by label text (SQL-level, case-insensitive)
-view.codelists.filter(text_contains="geo").enrich(n=sc.each("datasets").count()).collect()
+view.codelists.filter(text_contains="geo", lang="en").enrich(n=sc.each("datasets").count()).rows(lang="en")
 
-view.codelist(urn).label("en")   # quick name lookup
+view.codelist(urn).label(lang="en")   # LocalisedString | None; raises MissingTranslationError with no English name
 
-# Enriched per-code output includes code name labels
-view.codelist(urn).lang("en").enrich(n=sc.each("datasets").count()).collect()
-# → [{"code_id": "ON", "label": "Ontario", "n": 5}, ...]
+# Enriched per-code rows carry code name labels
+view.codelist(urn).enrich(n=sc.each("datasets").count()).rows(lang=("fr", "en"))
+# → [Row({"code_id": "ON", "label": "Ontario", "label__lang": "fr", "n": 5}), ...]
 
 # Batch label resolution — single SQL query for many codes
-view.codelist(geo_urn).batch_labels(["CA", "US", "DE"])
-# → {"CA": "Canada", "US": "United States", "DE": "Germany"}
+labels = view.codelist(geo_urn).batch_labels(["CA", "US", "DE"], lang="en")
+labels["CA"]   # LocalisedString(text="Canada", lang="en"); None for a code with no English name
+labels.gaps    # (Gap(key=..., entity=..., field="name", langs=("en",)), ...)
+# A code the codelist does not hold raises UnknownCodeError
 
 # Across multiple codelists in one query
 view.codelists.batch_labels([(geo_urn, "CA"), (freq_urn, "A")], lang="en")
-# → {(geo_urn, "CA"): "Canada", (freq_urn, "A"): "Annual"}
+# → Labels({(geo_urn, "CA"): LocalisedString(text="Canada", lang="en"), ...})
 
 # Dimension traversal
 dims = view.dimensions(ds).collect()              # ItemList[DimensionInfo]
@@ -598,11 +614,9 @@ view.themes["subjects"] \
 | `DimensionsScope` | `view.dimensions(ds)` | `ItemList[DimensionInfo]` |
 | `DimensionScope` | `view.dimensions(ds)["GEO"]` | `DimensionInfo` |
 
-All collection scopes (ThemesScope, SchemeScope, CodelistsScope, CodelistScope, DimensionsScope) support `.enrich()`, `.filter()`, `.sort_by()`. Single-item scopes (ConceptScope, CodeScope, DimensionScope) have `.collect()` and navigation only. `CodelistScope` also has `.label(lang)` for quick name lookup.
+All collection scopes (ThemesScope, SchemeScope, CodelistsScope, CodelistScope, DimensionsScope) support `.enrich()`, `.filter()`, `.sort_by()`. Single-item scopes (ConceptScope, CodeScope, DimensionScope) have `.collect()` and navigation only. `CodelistScope` also has `.label(lang=)` for quick name lookup.
 
-`CodelistsScope` supports `.lang(lang)` and `.filter(text_contains=)` for SQL-level label resolution and text filtering. Enriched `.collect()` includes a `label` field (via `sdmx.localized_text`).
-
-`CodelistScope` supports `.lang(lang)`. Enriched `.collect()` includes a `label` field from the code's `name` MAP column (falls back to `code_id`).
+The codelist scopes have no `.lang()` setter: each terminal takes `lang=`. `CodelistsScope.filter(text_contains=, lang=)` filters by name or URN. Enriched `.rows(lang=)` gives `label` and `label__lang` (via `sdmx.localized_text` for a codelist, the code's `name` MAP column for a code), `None` and a gap where the name holds none of the tags. `SchemeScope.labels(lang=)` returns `Labels[str]` keyed by notation.
 
 ### Expression terminals
 
@@ -621,7 +635,7 @@ For `AggregateDataset` records linked to SDMX structural metadata:
 ```python
 # Dimension → code → label mapping
 codes = view.code_map("ESTAT:NAMA_10_GDP(1.0)", lang="en")
-# {"na_item": {"B1GQ": "Gross domestic product at market prices", ...}, "geo": {"AT": "Austria", ...}}
+# {"na_item": Labels({"B1GQ": LocalisedString(text="Gross domestic product at market prices", lang="en"), ...}), ...}
 
 # Full sdmxlib Codelist object
 cl = view.codelist_for("ESTAT:NAMA_10_GDP(1.0)", "geo")
@@ -704,10 +718,10 @@ statcatlib queries JOIN freely across both its own tables and sdmxlib's tables. 
 `Agent`, `AggregateDataset`, `BaseDataset`, `CatalogDescription`, `CatalogRecord`, `Concept`, `ConceptRef`, `ConceptScheme`, `ConceptSchemeRef`, `ContactPoint`, `DataService`, `Dataset`, `DatasetT`, `Distribution`, `Frequency`, `GeospatialDataset`, `InternationalString`, `LicenceDocument`, `MicrodataDataset`, `OpenDataset`, `ProvenanceStatement`, `PublicationDataset`, `QualityAnnotation`, `SpatialCoverage`, `Standard`, `StatisticalDataset`, `TemporalCoverage`, `Variable`, `is_concept_in_scheme`
 
 ### Catalog, views and scopes
-`Catalog`, `Product`, `Edition`, `WorkingCopy`, `EditionView`, `QueryBuilder`, `Row`, `SearchResult`, `ConceptSchemesScope`, `ConceptSchemeScope`, `ThemesScope`, `SchemeScope`, `ConceptScope`, `CodelistsScope`, `CodelistScope`, `CodeScope`, `DimensionsScope`, `DimensionScope`, `DimensionInfo`
+`Catalog`, `Product`, `Edition`, `WorkingCopy`, `EditionView`, `QueryBuilder`, `Row`, `SearchResult`, `Langs`, `Labels`, `RowList`, `ValueList`, `Gap`, `LocalisedString`, `ConceptSchemesScope`, `ConceptSchemeScope`, `ThemesScope`, `SchemeScope`, `ConceptScope`, `CodelistsScope`, `CodelistScope`, `CodeScope`, `DimensionsScope`, `DimensionScope`, `DimensionInfo`
 
 ### Sentinels and error types
-`NotLoadedError`, `is_unloaded`, `IncompatibleCatalogError`, `IncompatibleIndexError`, `NoLiveEditionError`, `WorkingCopyExistsError`, `WorkingCopyClosedError`, `SealCheckError`, `JournalError`, `InventoryConflictError`, `InventoryContentionError`, `InventoryRuleError`, `NonFastForwardError`
+`NotLoadedError`, `is_unloaded`, `MissingTranslationError`, `UnknownCodeError`, `MissingTagError`, `InvalidTagError`, `IncompatibleCatalogError`, `IncompatibleIndexError`, `NoLiveEditionError`, `WorkingCopyExistsError`, `WorkingCopyClosedError`, `SealCheckError`, `JournalError`, `InventoryConflictError`, `InventoryContentionError`, `InventoryRuleError`, `NonFastForwardError`
 
 ### Seal checks (`statcatlib.checks`)
 `conf_status`, `SealCheck`
@@ -722,5 +736,5 @@ statcatlib queries JOIN freely across both its own tables and sdmxlib's tables. 
 `dataset_from_dataflow`, `ingest_ckan`, `ingest_data`, `ingest_sdmx`, `ingest_sdmx_registry`, `prepare_sdmx`
 
 ### Query filters (`statcatlib.query`)
-`has_code`, `has_dimensions`, `distribution`, `has_service`, `publishes`, `serves`, `has_spatial`, `has_keyword`, `title_contains`, `description_contains`, `ExistsFilter`, `MapCondition`, `MapFilter`, `PositionalFilter`
+`has_code`, `has_dimensions`, `distribution`, `has_service`, `publishes`, `serves`, `has_spatial`, `has_spatial_key`, `has_keyword`, `title_contains`, `description_contains`, `ExistsFilter`, `MapCondition`, `MapFilter`, `PositionalFilter`
 

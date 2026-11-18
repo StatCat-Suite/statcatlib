@@ -281,7 +281,7 @@ operations:
 |---|---|---|---|
 | `get(cls, id)` | `T \| None` | Yes | Direct lookup by identifier |
 | `query(cls)` | `QueryBuilder[T]` | Yes | Structured filtering and sorting |
-| `search(text)` | `SearchResult[Hit]` | No | Full-text BM25 across datasets, concepts and codes |
+| `search(text, lang=)` | `SearchResult[Hit]` | No | Full-text BM25 across datasets, concepts and codes |
 | `facets(*fields)` | `dict[str, dict[str, int]]` | No | Aggregation counts for UI facets |
 
 `QueryBuilder` supports chaining:
@@ -296,7 +296,7 @@ results = (
         q.has_dimensions(["geo", "freq"]),
     )
     .filter(publisher="ESTAT")
-    .search("exchange rate")
+    .search("exchange rate", lang="en")
     .include("publisher", "themes")   # load only these relationships
     .sort_by("modified", desc=True)
     .limit(20)

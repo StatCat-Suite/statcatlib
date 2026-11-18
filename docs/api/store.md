@@ -522,7 +522,7 @@ view.search(
     text: str,
     *,
     kinds: Sequence[str] = ("dataset", "concept", "code"),
-    lang: str = "en",
+    lang: str,
     limit: int = 50,
     offset: int = 0,
     operator: str = "or",
@@ -541,7 +541,7 @@ to narrow by dataset kind.
 | Parameter  | Description |
 |------------|-------------|
 | `kinds`    | Entity kinds to search; pass `"reference_metadata"` explicitly to include methodology sections |
-| `lang`     | Which language's index to search. Each language has its own index, so a French query needs `lang="fr"` — the default `"en"` will not match French text |
+| `lang`     | Required: the one tag whose table to search. Each language has its own table, so a French query needs `lang="fr"`. An alternate tag such as `en-t-fr` reads its primary's table. A sequence of tags raises `TypeError` |
 | `operator` | `"or"` (default) matches any term; `"and"` requires all terms |
 | `fuzzy`    | Levenshtein edit distance for fuzzy matching: `0` (default), `1`, or `2` |
 | `rrf_k`    | Reciprocal-Rank-Fusion constant for merging across kinds |
@@ -549,21 +549,40 @@ to narrow by dataset kind.
 Requires LanceDB (`statcatlib[search]`). Returns an empty `SearchResult` when
 the edition has no search index, as in a product's first working copy before
 `wc.build_index()`, or without the extra; it never raises for a missing index.
+It raises `IncompatibleCatalogError` for an index of format 3, written by
+statcatlib 0.20 or earlier, until the product is re-indexed
+([Upgrading](../upgrading.md#stored-data)).
+
+Each hit's `lang` is the stored tag of the row that matched, which can be an
+alternate of the tag searched: a search with `lang="en"` on open.canada.ca
+returns `en-t-fr` hits.
 
 ```python
-results = view.search("labour force survey", kinds=("dataset",), limit=10)
+results = view.search("labour force survey", kinds=("dataset",), lang="en", limit=10)
 for hit in results.items:
-    print(hit.score, hit.payload.identifier, hit.payload.title.get("en"))
+    print(hit.score, hit.lang, hit.payload.identifier, hit.payload.title.get(hit.lang))
 
 # Fuzzy search catches typos and spelling variations
-results = view.search("consumr price", fuzzy=1)
+results = view.search("consumr price", lang="en", fuzzy=1)
 ```
+
+### Hits
+
+| Hit payload | Fields |
+| --- | --- |
+| `CodeHit` | `dataset_id`, `dimension_id`, `dimension_label: LocalisedString \| None`, `code_id`, `code_label: LocalisedString`, `document`, `code_urn`, `codelist_urn`, `parent_id`, `depth` |
+| `ConceptHit` | `concept_urn`, `scheme_urn`, `concept_id`, `name: LocalisedString \| None`, `description: LocalisedString \| None`, `document` |
+| `ReferenceMetadataHit` | `set_urn`, `attribute_path`, `section_title`, `document`, `chunk_index` |
+
+A dataset hit's payload is the dataset. `document` is the text the row was
+indexed under. A hit field's `LocalisedString` carries the row's tag, and a
+field the row holds no text for is `None`.
 
 ### Vector and hybrid search — `datasets.find`
 
 ```python
 view.datasets.find(
-    query: str, *, mode: str = "bm25", lang: str = "en", limit: int = 50,
+    query: str, *, mode: str = "bm25", lang: str, limit: int = 50,
     offset: int = 0, operator: str = "or", fuzzy: int = 0, rrf_k: int = 60,
 ) -> SearchResult[Hit[BaseDataset]]
 ```
@@ -587,19 +606,19 @@ model = SentenceTransformer("intfloat/multilingual-e5-small")  # 384 dims, bilin
 view = cat.product("14100287").view(embedding_model=model)
 
 # Pure semantic
-results = view.datasets.find("people moving between provinces", mode="vector")
+results = view.datasets.find("people moving between provinces", mode="vector", lang="en")
 
 # Hybrid — recommended for most queries
-results = view.datasets.find("labour market monthly data", mode="hybrid", limit=20)
+results = view.datasets.find("labour market monthly data", mode="hybrid", lang="en", limit=20)
 for hit in results.items:
-    print(hit.payload.identifier, hit.score, hit.source)
+    print(hit.payload.identifier, hit.score, hit.source, hit.lang)
 
 # Hybrid + relational filter via QueryBuilder
 import statcatlib.query as q
 results = (
     view.query(sc.AggregateDataset)
     .filter(q.has_code("GEO", "ON"), status="current")
-    .hybrid_search("unemployment by region")
+    .hybrid_search("unemployment by region", lang="en")
     .limit(20)
     .execute()
 )
@@ -687,7 +706,9 @@ view.index_layout -> dict[str, dict[str, Any]]
 ```
 
 What each language's search index was built with — `{lang: {"table", "rows",
-"stemmer"}}`. Empty when no index has been built.
+"stemmer"}}`, keyed by `sdmxlib.tag_alias` of each primary or unpaired tag; an
+alternate tag's rows count in its primary's entry. Empty when no index has been
+built.
 
 ```python
 print(view.index_layout)
@@ -704,12 +725,14 @@ no word is stemmed by another language's rules.
 Unlike `embedding_metadata`, this is populated for BM25-only catalogs, which
 write no `embeddings.json` at all.
 
-It also doubles as a startup guard. An index written by a *newer* statcatlib is
-not readable by an older one, which returns zero hits with no error:
+An empty layout means the edition has no index to search. `Product.view`
+refuses an index format this build does not read with
+`IncompatibleCatalogError`. A format 3 index opens, reports its layout, and
+raises on every search.
 
 ```python
 if not view.index_layout:
-    raise RuntimeError("search index missing or built by a newer statcatlib")
+    raise RuntimeError("search index missing")
 ```
 
 ---
@@ -726,11 +749,15 @@ building filter panels in UIs or profiling catalog composition.
 Supported fields: `"publisher"`, `"themes"`, `"frequency"`, `"status"`,
 `"spatial"`, `"type"`.
 
-A `"spatial"` key is the region's `uri` when it has one, such as a CKAN
-`geographic_region` code stored as a concept URI, and its English label
-otherwise. `view.spatial_labels(lang)` maps each key to a display label,
-read from the region's concept for a `uri` key, and `q.has_spatial_uri(key)`
-filters on a `uri` key.
+A `"spatial"` key is in no language. It is the region's `uri` when it has
+one, such as a CKAN `geographic_region` code stored as a concept URI, and
+otherwise `sha256:` followed by the SHA-256 of the region's whole label map.
+Regions that differ in any translation get separate keys, and a region's key
+changes when a later edition adds or edits one of its translations. A region
+with neither a `uri` nor a label text has no key and no facet entry.
+`view.spatial_labels(lang=...)` maps each key to a display label, read from
+the region's concept for a `uri` key, and `q.has_spatial_key(key)` filters on
+either kind of key.
 
 ```python
 counts = view.facets("publisher", "themes", "frequency")
@@ -747,15 +774,19 @@ DSDs, dataflows) in the edition's database.
 ### `code_map`
 
 ```python
-view.code_map(dataset_id: str, lang: str = "en") -> dict[str, dict[str, str]]
+view.code_map(dataset_id: str, *, lang: Langs) -> dict[str, Labels[str]]
 ```
 
 Return all dimension→codes for an `AggregateDataset`. Keys are dimension IDs;
-values map each code ID to its label in `lang`.
+each value is a `Labels` mapping each code ID to its label in the first of
+`lang` the code's name holds, or `None`, with a `Gap` for each such code in its
+`gaps`.
 
 ```python
-codes = view.code_map("ESTAT:NAMA_10_GDP(1.0)")
-# {"na_item": {"B1GQ": "Gross domestic product at market prices", ...}, "geo": {"AT": "Austria", ...}, ...}
+codes = view.code_map("ESTAT:NAMA_10_GDP(1.0)", lang="en")
+codes["geo"]["AT"]        # LocalisedString(text="Austria", lang="en")
+codes["geo"]["AT"].text   # "Austria"
+codes["geo"].gaps         # () when every code has an English name
 ```
 
 ### `codelist_for`
@@ -866,7 +897,11 @@ from French, so text under it is English. statcatlib infers no pairs from the
 tags themselves. It records what a source or caller declares, and
 `ingest_ckan` records the portal's pairs with the portal's URL as `source`.
 Label lookup still matches tags exactly: `title.get("en")` does not return
-`en-t-fr` text.
+`en-t-fr` text. `view.preference(lang="en")` gives `("en", "en-t-fr")`, a tag
+tuple to pass as a label call's `lang` so that it answers from either tag.
+Search indexes an alternate tag's text in its primary's table, so
+`view.search(..., lang="en")` finds `en-t-fr` text
+([How search works](../search.md#one-table-per-language)).
 
 A pair already recorded is kept, its source included. Nothing is written when
 any pair is refused:
@@ -1013,43 +1048,159 @@ view.dataset("housing-stats").themes.collect()
 
 ---
 
-## Batch label resolution
+## Label lookup
 
-### `CodelistScope.batch_labels`
+Every label call follows the same rules
+([`statcatlib.labels`](../reference/labels.md), and the design
+[Label lookup](../design/label-lookup.md)):
+
+- **`lang` is required and keyword-only.** It is a tag or a sequence of tags
+  (`sc.Langs`). Each tag is normalised; the first tag the stored text holds
+  answers, and a held `""` answers. An empty sequence raises `ValueError`, a
+  non-`str` tag `TypeError`, and a malformed tag `sdmxlib.InvalidTagError`.
+- **A label is a `LocalisedString`.** Read the text as `.text` and the tag
+  that answered as `.lang`. A `Row` column holds the text, with the tag in a
+  `__lang` column beside it.
+- **A single lookup raises** `MissingTranslationError`, a `KeyError` and an
+  `sdmxlib.MissingTagError`, when the entity exists and its required label
+  holds none of the tags. An unknown entity returns `None`.
+- **A bulk call returns `None`** for each missing label, and lists it in the
+  result's `gaps` as a `Gap(key, entity, field, langs)`. `Labels` is the
+  mapping result, `RowList` the `Row` list and `ValueList` the scalar list.
+  `json.dumps` refuses a `Labels` and a `LocalisedString`; use
+  `msgspec.json.encode` or `as_dict()`.
+
+```python
+labels = view.agent_labels(lang=view.preference(lang="fr"))
+for agent_id, label in labels.items():
+    print(agent_id, label.text if label else "—")
+print(labels.gaps)   # (Gap(key="X", entity="X", field="name", langs=("fr", "fr-t-en")), ...)
+```
+
+### Label maps on the view
+
+```python
+view.agent_labels(*, lang: Langs) -> Labels[str]                          # agent ID → name, by ID
+view.concept_labels(*, lang: Langs, scheme_uri: str | None = None) -> Labels[str]  # concept URI → label, by URI
+view.spatial_labels(*, lang: Langs) -> Labels[str]                        # spatial facet key → label, by key
+```
+
+Each maps every entity to its label, `None` and a gap where it holds none of
+the tags. A spatial key's label comes from the region's concept, for a `uri`
+key, and from every coverage under the key; a tag earlier in `lang` wins, and
+within one tag the concept wins over a coverage.
+
+### `preference` and `language_counts`
+
+```python
+view.preference(*, lang: str) -> tuple[str, ...]
+view.language_counts() -> list[Row]
+```
+
+`preference` gives a tag with its language pairs, for a label call's `lang`.
+For a primary tag it is the tag, then its alternates in tag order; for an
+alternate it is the tag, its primary, then the primary's other alternates; for
+a tag in no pair it is the tag alone. On open.canada.ca,
+`view.preference(lang="en")` is `("en", "en-t-fr")`. A display UI that shows
+untagged text and code labels last can pass
+`(*view.preference(lang="fr"), "und", "zxx")`.
+
+`language_counts` gives one `Row` per stored text column and tag, with
+`table` (schema-qualified, such as `statcat.dataset`), `column`, `lang` and
+`texts`, the number of texts held under the tag. It covers every MAP column of
+the `statcat` schema except `dataset.extras`, and the code names, concept
+names and descriptions, and localised texts of the `sdmx` schema.
+
+### Single lookups
+
+```python
+view.codelist(urn).label(*, lang: Langs) -> LocalisedString | None
+view.codes.get(code_urn: str, *, lang: Langs) -> CodeHit | None
+view.concepts.get(concept_urn: str, *, lang: Langs) -> ConceptHit | None
+```
+
+`label` returns the codelist's name, or `None` when the edition holds no
+codelist with that URN. `codes.get` and `concepts.get` return the hit
+payload with `document` empty and no search row read. A code's or a concept's
+name raises `MissingTranslationError` when it holds none of the tags; a
+concept's description is `None` when absent, and may answer in another tag
+than its name.
+
+```python
+view.codelist(geo_urn).label(lang="fr")   # LocalisedString(text="Géographie", lang="fr")
+try:
+    hit = view.codes.get(code_urn, lang="de")
+except sc.MissingTranslationError as err:
+    print(err)   # no text for 'de' in name of urn:…; held: 'en', 'fr'
+```
+
+### Codelist and scheme scopes
+
+```python
+view.codelists.filter(*, text_contains: str, lang: Langs) -> CodelistsScope
+view.codelists.enrich(...).rows(*, lang: Langs) -> RowList
+view.codelist(urn).enrich(...).rows(*, lang: Langs) -> RowList
+view.themes[scheme_uri].labels(*, lang: Langs) -> Labels[str]
+view.themes[scheme_uri].rows(*, lang: Langs) -> RowList
+```
+
+The codelist scopes have no `.lang()` setter; each terminal takes `lang`.
+`rows` gives `label` and `label__lang` beside the enrich columns, `None` and a
+gap where the name holds none of the tags, and an empty `RowList` when the
+edition has no `sdmx` schema. `filter` keeps codelists whose name, in the
+first tag it holds, or whose URN contains the text. `labels` maps every
+concept's notation to its label, ordered by notation.
+
+```python
+rows = view.codelists.enrich(n=sc.each("datasets").count()).rows(lang="en")
+# → [Row({"urn": "...", "label": "Geography", "label__lang": "en", "n": 5}), ...]
+```
+
+### Batch label resolution
+
+#### `CodelistScope.batch_labels`
 
 ```python
 view.codelist(urn).batch_labels(
     code_ids: list[str],
-    lang: str | None = None,
-) -> dict[str, str]
+    *,
+    lang: Langs,
+) -> Labels[str]
 ```
 
-Resolve labels for many codes in a single SQL query. Returns a dict mapping
-`code_id → label`. Falls back to the code ID when the requested language has
-no entry. `lang` defaults to the scope's `.lang()` setting.
+Resolve labels for many codes in a single SQL query. Returns a `Labels`
+mapping each `code_id` to its `LocalisedString`, in request order with
+duplicates collapsed. A code whose name holds none of the tags maps to `None`
+and has a `Gap` in `labels.gaps`. A code the codelist does not hold raises
+`UnknownCodeError`, whose `missing` lists every such `(codelist URN, code ID)`
+pair.
 
 ```python
 geo_urn = sc.urn.codelist("SDMX", "CL_GEO")
-labels = view.codelist(geo_urn).batch_labels(["CA", "US", "DE"])
-# → {"CA": "Canada", "US": "United States", "DE": "Germany"}
+labels = view.codelist(geo_urn).batch_labels(["CA", "US", "DE"], lang="en")
+labels["CA"]   # LocalisedString(text="Canada", lang="en")
 
-# Language override via scope
-labels = view.codelist(geo_urn).lang("fr").batch_labels(["CA", "US"])
-# Falls back to code_id when French label is absent
+# French first, then English
+labels = view.codelist(geo_urn).batch_labels(["CA", "US"], lang=("fr", "en"))
+for code_id, label in labels.items():
+    print(code_id, label.text if label else None, label.lang if label else None)
+for gap in labels.gaps:
+    print("no label for", gap.key, "in", gap.langs)
 ```
 
-### `CodelistsScope.batch_labels`
+#### `CodelistsScope.batch_labels`
 
 ```python
 view.codelists.batch_labels(
     pairs: list[tuple[str, str]],
-    lang: str | None = None,
-) -> dict[tuple[str, str], str]
+    *,
+    lang: Langs,
+) -> Labels[tuple[str, str]]
 ```
 
 Resolve labels across multiple codelists in one query. Accepts a list of
-`(codelist_urn, code_id)` tuples and returns a dict mapping each pair to its
-label.
+`(codelist_urn, code_id)` tuples and returns a `Labels` mapping each pair to
+its label, with the rules of `CodelistScope.batch_labels`.
 
 ```python
 pairs = [
@@ -1058,9 +1209,9 @@ pairs = [
     (sc.urn.codelist("SDMX", "CL_FREQ"), "A"),
 ]
 labels = view.codelists.batch_labels(pairs, lang="en")
-# → {("urn:...CL_GEO...", "CA"): "Canada",
-#    ("urn:...CL_GEO...", "US"): "United States",
-#    ("urn:...CL_FREQ...", "A"): "Annual"}
+# → Labels({("urn:...CL_GEO...", "CA"): LocalisedString(text="Canada", lang="en"),
+#           ("urn:...CL_GEO...", "US"): LocalisedString(text="United States", lang="en"),
+#           ("urn:...CL_FREQ...", "A"): LocalisedString(text="Annual", lang="en")})
 ```
 
 ---
@@ -1082,36 +1233,39 @@ Add one or more filter conditions (ANDed together). Accepts:
 - keyword arguments for flat column filters (`publisher`, `status`,
   `frequency`, `identifier`)
 - `PositionalFilter` objects from `statcatlib.query`: `has_code`, `has_dimensions`,
-  `distribution`, `has_service`, `publishes`, `serves`, `has_spatial_uri` (and any
+  `distribution`, `has_service`, `publishes`, `serves`, `has_spatial_key` (and any
   `ExistsFilter` subclass)
 - `MapFilter` objects: `has_spatial`, `has_keyword`, `title_contains`,
-  `description_contains`
+  `description_contains`. Each takes a required `lang`, a tag or a sequence
+  of tags, and tests the text of the first tag the stored map holds.
 
 Multiple calls to `.filter()` are also ANDed.
 
 ### `.search`
 
 ```python
-.search(text: str, *, lang: str = "en", operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]
+.search(text: str, *, lang: str, operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]
 ```
 
 Add BM25 full-text search. Combines with any `.filter()` conditions.
 
 | Parameter  | Description |
 |------------|-------------|
-| `lang`     | Which language's index to search, as for `view.search()`. A French query needs `lang="fr"` |
+| `lang`     | Required: the one tag whose table to search, as for `view.search()`. A French query needs `lang="fr"` |
 | `operator` | `"or"` (default) matches any term; `"and"` requires all terms |
 | `fuzzy`    | Levenshtein edit distance for fuzzy matching: `0` (default), `1`, or `2` |
 
 ### `.hybrid_search`
 
 ```python
-.hybrid_search(text: str, *, lang: str = "en") -> QueryBuilder[T]
+.hybrid_search(text: str, *, lang: str) -> QueryBuilder[T]
 ```
 
 Add hybrid BM25 + vector search (RRF). Requires an embedding model on the view.
 Relational filters from `.filter()` are applied on top of the RRF-merged result.
 `lang` selects the language's index for both techniques, as for `.search`.
+`execute()` returns a `SearchResult` whose `langs` maps each dataset
+identifier to the stored tag of its matched row.
 
 ```python
 import statcatlib.query as q
@@ -1119,7 +1273,7 @@ results = (
     view.query(sc.AggregateDataset)
     .filter(status="current")
     .filter(q.has_code("GEO", "ON"))
-    .hybrid_search("unemployment trends")
+    .hybrid_search("unemployment trends", lang="en")
     .limit(20)
     .execute()
 )
@@ -1128,11 +1282,12 @@ results = (
 ### `.sort_by`
 
 ```python
-.sort_by(field: str, *, desc: bool = False) -> QueryBuilder[T]
+.sort_by(field: str, *, desc: bool = False, nulls: str | None = None, lang: Langs | None = None) -> QueryBuilder[T]
 ```
 
 Sort by a flat column. Valid fields: `identifier`, `status`, `frequency_id`,
-`issued`, `modified`.
+`issued`, `modified`. A MAP column such as `title` needs `lang`, and sorts on
+the text of the first tag each row holds, so one order can mix languages.
 
 ### `.limit` / `.offset`
 
@@ -1248,14 +1403,14 @@ Entity terminals (default — return domain objects):
 Row terminals (require `.select()` — return `Row` projections):
 
 ```python
-.rows()    -> list[Row]          # projected rows
+.rows()    -> RowList            # projected rows, with .gaps
 .row()     -> Row | None         # first projected row or None
 ```
 
 Scalar terminals (require `.scalars()` — return bare values):
 
 ```python
-.values()  -> list[Any]          # flat scalar values
+.values()  -> ValueList          # flat scalar values, with .gaps
 .value()   -> Any | None         # first scalar value or None
 ```
 
@@ -1288,7 +1443,7 @@ row.nonexistent     # AttributeError: Row has no field 'nonexistent'
 ### `.select`
 
 ```python
-.select(*columns: str, lang: str | None = None) -> QueryBuilder[T]
+.select(*columns: str, lang: Langs | None = None) -> QueryBuilder[T]
 ```
 
 Set row projection mode. Use `.rows()` or `.row()` as the terminal.
@@ -1296,6 +1451,10 @@ A single SQL query is issued — no `view.get()` call per row.
 
 Selectable columns: `identifier`, `kind`, `status`, `issued`, `modified`,
 `landing_page`, `version` (flat), `title`, `description` (MAP — require `lang`).
+A MAP column gives two `Row` columns: `title`, the text of the first tag of
+`lang` the row holds, or `None`, and `title__lang`, that tag. `.rows()`
+returns a `RowList` whose `gaps` lists each row with no text in any of the
+tags. `.row()` returns `rows()[0]` and drops the gaps.
 
 ```python
 rows = (
@@ -1305,10 +1464,11 @@ rows = (
     .select("identifier", "title", lang="en")
     .rows()
 )
-# → [Row({"identifier": "EXR", "title": "Exchange Rates"}), ...]
+# → [Row({"identifier": "EXR", "title": "Exchange Rates", "title__lang": "en"}), ...]
 
 rows[0].identifier   # "EXR"
 rows[0]["title"]     # "Exchange Rates"
+rows.gaps            # one Gap per row with no English title
 ```
 
 Raises `ValueError` for unrecognised columns or MAP columns missing `lang`.
@@ -1316,18 +1476,21 @@ Raises `ValueError` for unrecognised columns or MAP columns missing `lang`.
 ### `.scalars`
 
 ```python
-.scalars(column: str, *, lang: str | None = None) -> QueryBuilder[T]
+.scalars(column: str, *, lang: Langs | None = None) -> QueryBuilder[T]
 ```
 
 Set scalar projection mode. Use `.values()` or `.value()` as the terminal.
-Single SQL query.
+Single SQL query. A MAP column yields a `LocalisedString`, or `None` for a row
+with no text in any of the tags; `.values()` returns a `ValueList` whose
+`gaps` lists those rows. `.value()` returns `None` both for no row and for no
+text; use `.values()` to tell them apart.
 
 ```python
 ids = view.query(sc.BaseDataset).filter(status="current").scalars("identifier").values()
 # → ["EXR", "M1", "UNEMP", ...]
 
-titles = view.query(sc.BaseDataset).scalars("title", lang="en").values()
-# → ["Exchange Rates", "Money Supply", ...]
+titles = view.query(sc.BaseDataset).scalars("title", lang=("en", "fr")).values()
+# → [LocalisedString(text="Exchange Rates", lang="en"), ...]
 ```
 
 ---
@@ -1342,9 +1505,13 @@ class SearchResult(Generic[T]):
     offset: int = 0
     facets: dict[str, dict[str, int]] = Factory(dict)
     scores: dict[str, float] = Factory(dict)
+    langs: dict[str, str] = Factory(dict)
 ```
 
 - `items` — the dataset objects for the current page
 - `total` — total matching datasets (may exceed `len(items)` when paginating)
 - `offset` — the offset this page starts at
 - `facets` — populated when `.with_facets()` was used; otherwise empty dict
+- `langs` — for a `QueryBuilder` `.search()` or `.hybrid_search()`, each
+  item's identifier mapped to the stored tag of its matched row; otherwise
+  empty

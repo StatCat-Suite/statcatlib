@@ -2,7 +2,9 @@
 
 *   **Author:** Gabriel Gellner
 *   **Date:** 2026-11-18
-*   **Status:** Accepted, revision 3. Revision 1 had an EGM review
+*   **Status:** Built on `feat/gh-91-localised-string` (commits 7–17 of
+    the implementation plan), awaiting release as 0.21.0. Accepted at
+    revision 3. Revision 1 had an EGM review
     ([report](egm/label-lookup/goldfish_review_report.md): 1 Blocker, 19
     Major, 22 Minor), after which the project owner decided four findings on
     2026-11-18 (LL-D5, LL-D6, LL-D14 and LL-D15). Revision 2 had a second
@@ -674,7 +676,7 @@ also a primary (`store.py:7075-7084`).
             wc = product.working_copy(lifecycle=lifecycle)
         except sc.WorkingCopyExistsError:
             # An unsealed working copy exists. Resume it when its changes are
-            # meant to ship; otherwise call wc.discard() and start again.
+            # meant to ship; otherwise resume it, call .discard(), and start again.
             wc = product.working_copy(lifecycle=lifecycle, resume=True)
         wc.build_index(embedding_model=model, model_name="intfloat/e5-base-v2")
         edition = wc.seal()
@@ -853,7 +855,7 @@ removes.
 
 ### Commit 14's version 3 fixture and tests
 
-`tools/make_v3_fixture.py` builds `tests/fixtures/v3_catalog/` with
+`tools/make_v3_fixture.py` builds `tests/fixtures/v3_catalog.tar.xz` with
 statcatlib 0.20.0 from PyPI (`uv run --no-project --with
 "statcatlib[search]==0.20.0" python -I tools/make_v3_fixture.py`). The catalog
 holds two products: `sealed`, with one live edition whose index is version
@@ -861,8 +863,9 @@ holds two products: `sealed`, with one live edition whose index is version
 `stub-encoder` so its rows carry vectors and `text_sha256`; and `open`, with
 a live edition and an unsealed working copy indexed under 0.20. Its tables
 hold the version 3 columns (`text`, no concept columns). The fixture is
-small (one dataset, one codelist, `en`, `fr` and `en-t-fr` text) and checked
-in; tests copy it to `tmp_path`.
+small (one dataset per product, `en`, `fr` and `en-t-fr` text) and checked
+in as an archive, about 8 MB unpacked and under 50 kB compressed; tests
+unpack it into `tmp_path`.
 
 Tests over the fixture:
 

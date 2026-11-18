@@ -194,26 +194,27 @@ codes = view.codelist(sc.urn.codelist("SDMX", "CL_GEO")).collect()    # ItemList
 code = view.codelist(sc.urn.codelist("SDMX", "CL_GEO"))["ON"].collect()  # Code
 
 # CodelistsScope — parallel to ThemesScope, supports enrich
-# Enriched output includes labels resolved via sdmx.localized_text
-view.codelists.lang("en").enrich(n=sc.each("datasets").count()).collect()
-# → [{"urn": "...", "label": "Geography", "n": 5}, ...]
+# Enriched rows carry each codelist's name and the tag that answered
+view.codelists.enrich(n=sc.each("datasets").count()).rows(lang="en")
+# → [Row({"urn": "...", "label": "Geography", "label__lang": "en", "n": 5}), ...]
 
 # Filter codelists by label text (SQL-level, case-insensitive)
-view.codelists.filter(text_contains="geo").enrich(n=sc.each("datasets").count()).collect()
+view.codelists.filter(text_contains="geo", lang="en").enrich(n=sc.each("datasets").count()).rows(lang="en")
 
-view.codelist(urn).label("en")   # quick name lookup
+view.codelist(urn).label(lang="en")   # LocalisedString(text="Geography", lang="en")
 
-# Enriched per-code output includes code name labels
-view.codelist(urn).lang("en").enrich(n=sc.each("datasets").count()).collect()
-# → [{"code_id": "ON", "label": "Ontario", "n": 5}, ...]
+# Enriched per-code rows carry code name labels; French first, then English
+view.codelist(urn).enrich(n=sc.each("datasets").count()).rows(lang=("fr", "en"))
+# → [Row({"code_id": "ON", "label": "Ontario", "label__lang": "fr", "n": 5}), ...]
 
 # Batch label resolution — single SQL query for many codes
-view.codelist(geo_urn).batch_labels(["CA", "US", "DE"])
-# → {"CA": "Canada", "US": "United States", "DE": "Germany"}
+labels = view.codelist(geo_urn).batch_labels(["CA", "US", "DE"], lang="en")
+labels["CA"].text   # "Canada"
+labels.gaps         # one Gap per code with no English name; its label is None
 
 # Across multiple codelists at once
 view.codelists.batch_labels([(geo_urn, "CA"), (freq_urn, "A")], lang="en")
-# → {(geo_urn, "CA"): "Canada", (freq_urn, "A"): "Annual"}
+# → Labels({(geo_urn, "CA"): LocalisedString(text="Canada", lang="en"), ...})
 
 # Dimension traversal
 dims = view.dimensions(ds).collect()              # ItemList[DimensionInfo]
@@ -273,14 +274,14 @@ view.query(sc.DataService).filter(
 
 ```python
 # Spatial coverage filter
-view.query(sc.BaseDataset).filter(q.has_spatial("Canada")).all()
+view.query(sc.BaseDataset).filter(q.has_spatial("Canada", lang="en")).all()
 
 # Keyword filter
-view.query(sc.BaseDataset).filter(q.has_keyword("employment")).all()
+view.query(sc.BaseDataset).filter(q.has_keyword("employment", lang="en")).all()
 
-# Title/description search (case-insensitive ILIKE)
-view.query(sc.BaseDataset).filter(q.title_contains("GDP")).all()
-view.query(sc.BaseDataset).filter(q.description_contains("quarterly")).all()
+# Title/description search (case-insensitive ILIKE) on the first tag held
+view.query(sc.BaseDataset).filter(q.title_contains("GDP", lang=("en", "en-t-fr"))).all()
+view.query(sc.BaseDataset).filter(q.description_contains("quarterly", lang="en")).all()
 
 # Sort by multilingual title
 view.query(sc.BaseDataset).sort_by("title", lang="en").all()
@@ -337,13 +338,13 @@ bypass full object reconstruction — a single SQL query:
 # Row projection — .select() + .rows() returns Row objects (dict subclass)
 rows = (
     view.query(sc.BaseDataset)
-    .filter(q.title_contains("GDP"))
+    .filter(q.title_contains("GDP", lang="en"))
     .sort_by("title", lang="en")
     .limit(3)
     .select("identifier", "title", lang="en")
     .rows()
 )
-# → [Row({"identifier": "GDP", "title": "GDP Growth"}), ...]
+# → [Row({"identifier": "GDP", "title": "GDP Growth", "title__lang": "en"}), ...]
 rows[0].identifier   # attribute-style access
 rows[0]["title"]     # dict-style access — both work
 
@@ -360,13 +361,13 @@ if view.query(sc.AggregateDataset).filter(q.has_code("geo", "DE")).exists():
 
 ```python
 # BM25 search across titles, descriptions, keywords, themes, and dimensions
-results = view.search("unemployment", limit=20)
+results = view.search("unemployment", lang="en", limit=20)
 
 # Combined search and filter
 results = (
     view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT")
-    .search("labour force")
+    .search("labour force", lang="en")
     .with_facets("themes", "frequency")
     .execute()
 )

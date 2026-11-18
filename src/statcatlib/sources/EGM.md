@@ -51,7 +51,10 @@ Exported from `statcatlib.sources` (and from `statcatlib`):
   `zxx` (a code) when the agency has no name.
   `dimension_names` holds each dimension's resolved concept name, or the
   dimension id under `zxx` when the concept is unresolved or the resolved
-  object has no `name` (GH-94).
+  object has no `name` (GH-94). `_name_or_code(name, code)` builds both:
+  it drops each tag whose text is empty or whitespace, and gives
+  `{zxx: code}` when no tag remains, so `{en: "", fr: "X"}` becomes
+  `{fr: "X"}` (LL-D13, `docs/design/label-lookup.md`).
 - `ingest_data(store: WorkingCopy, reg, identifier, *, measure_dim=None) -> str`
   reads the dataset through `store.view().get` and the DSD through
   `store.registry.dsd`, fetches observations from `reg.obs(flow_urn).frame()`
@@ -140,6 +143,10 @@ Internal helpers that tests import directly:
   per DSD component). The `DataflowBinding` maps each component to a
   same-named column, and a pivoted table cannot be read through it (GH-29).
   `measure_dim` is metadata for readers that pivot and changes nothing stored.
+- SDMX ingest stores no empty name: an agency name or a dimension's concept
+  name keeps only its non-blank texts, else the ID under `zxx` (LL-D13).
+  Every label call answers a held `""`, so an empty name would mask a
+  translation.
 - CKAN payloads stay typed `object` at the boundary. The `_s`, `_i`, `_d` and
   `_seq` accessors narrow each value and return `None` or an empty container
   on a type mismatch. Keep new CKAN fields behind these accessors rather than
