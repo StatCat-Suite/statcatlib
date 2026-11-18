@@ -8,10 +8,13 @@ import pytest
 import sdmxlib
 from sdmxlib.model.codelist import Code, Codelist
 from sdmxlib.model.concept import Concept, ConceptScheme
+from sdmxlib.model.dataflow import Dataflow
+from sdmxlib.model.datastructure import DataStructure, Dimension
+from sdmxlib.model.in_memory_registry import InMemoryRegistry
 
 import statcatlib as sc
 from statcatlib.store.store import _rrf_merge_rows
-from tests.conftest import ScratchStore, cursor_of, open_scratch
+from tests.conftest import ScratchStore, concept_of, cursor_of, open_scratch
 
 pytestmark = pytest.mark.unit
 
@@ -115,3 +118,44 @@ def test_concept_get_returns_none_for_a_missing_description(tmp_path: Path) -> N
     assert hit.description is None
     with pytest.raises(sc.MissingTranslationError):
         s.concepts.get(urn, lang="de")
+
+
+def test_a_dataset_is_indexed_under_the_tags_it_holds_and_no_other(tmp_path: Path) -> None:
+    s = open_scratch(tmp_path / "catalog")
+    s.put(
+        sc.OpenDataset(
+            identifier="kw",
+            title=sc.InternationalString(),
+            description=sc.InternationalString(),
+            keywords=[sc.InternationalString.of({"fr": "pluie", "zxx": "RAIN_01"})],
+        )
+    )
+    s.build_index()
+    assert set(s.index_layout) == {"fr"}
+    assert s.datasets.find("pluie", lang="fr").items[0].lang == "fr"
+
+
+def test_a_code_row_exists_for_each_tag_its_label_holds(tmp_path: Path) -> None:
+    """A code named only in French gets a French row, though the dataflow is titled only in English."""
+    geo = Codelist(
+        id="CL_GEO",
+        maintainer="TEST",
+        name=sc.InternationalString(en="Geography"),
+        codes=[Code(id="CA", name=sc.InternationalString(fr="Canada (fr)"))],
+    )
+    dsd = DataStructure(
+        id="DSD",
+        maintainer="TEST",
+        name=sc.InternationalString(en="D"),
+        dimensions=[Dimension(id="GEO", concept=concept_of("GEO"), representation=geo)],
+    )
+    flow = Dataflow(id="DF", maintainer="TEST", name=sc.InternationalString(en="Flow"), structure=dsd)
+    registry = InMemoryRegistry()
+    for obj in (geo, dsd, flow):
+        registry.add(obj)
+    s = open_scratch(tmp_path / "catalog")
+    sc.ingest_sdmx(s, registry)
+    s.build_index()
+    [hit] = s.codes.find("Canada", lang="fr").items
+    assert hit.payload.code_label == sc.LocalisedString("Canada (fr)", "fr")
+    assert s.codes.find("Canada", lang="en").items == []

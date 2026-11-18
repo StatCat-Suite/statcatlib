@@ -1206,6 +1206,10 @@ _MAP_SORTABLE_COLUMNS: frozenset[str] = frozenset({"title"})
 #: (``docs/design/label-lookup.md``, LL-D5).
 _SPATIAL_FACET_KEY = spatial_key_sql("ds")
 
+#: The tag of a code or identifier stored as text (LT-3). It carries no
+#: language, so the search index gives it no table.
+_NO_LANGUAGE = "zxx"
+
 #: The text columns of the ``sdmx`` schema `EditionView.language_counts`
 #: counts. A constant, because that schema also holds MAP columns whose keys
 #: are not tags, such as ``dimension_column_map``.
@@ -3684,10 +3688,16 @@ class _Store:
         theme_maps: list[dict[str, str]] | None,
         dim_maps: list[dict[str, str]] | None,
     ) -> list[tuple[str, str, str, str]]:
-        """Build ``(id, kind, lang, text)`` tuples for one dataset row."""
-        langs = set(title_map or {}) | set(desc_map or {})
-        if not langs:
-            langs = {"en"}
+        """Build ``(id, kind, lang, text)`` tuples for one dataset row.
+
+        One tuple per tag any of the dataset's indexed maps holds, ``und``
+        included and ``zxx`` (codes stored as text) left out; the document of
+        a tag holds that tag's text only.
+        """
+        langs: set[str] = set()
+        for m in [title_map, desc_map, *(kw_maps or []), *(theme_maps or []), *(dim_maps or [])]:
+            langs.update(m or {})
+        langs.discard(_NO_LANGUAGE)
         result: list[tuple[str, str, str, str]] = []
         for lang in sorted(langs):
             parts = [
@@ -3702,7 +3712,7 @@ class _Store:
                 result.append((ident, kind, lang, text))
         return result
 
-    def _collect_code_texts(  # noqa: C901
+    def _collect_code_texts(
         self,
         *,
         max_codes_per_codelist: int = 500,
@@ -3860,10 +3870,8 @@ class _Store:
             parent_id,
             depth,
         ) in rows:
-            # Determine languages from the dataset title
-            langs = set(title_map or {})
-            if not langs:
-                langs = {"en"}
+            # One row per tag the code's label holds; ``zxx`` text is a code, not language.
+            langs = set(code_label_map or {}) - {_NO_LANGUAGE}
             alt_by_lang = alt_by_code.get(str(code_urn), {})
             blend_by_lang = blend_text_by_code.get(str(code_urn), {})
             context_by_lang = context_by_code.get(str(code_urn), {})
@@ -3976,7 +3984,7 @@ class _Store:
 
         items: list[SearchRow] = []
         for concept_urn, scheme_urn, concept_id, name_map, desc_map in rows:
-            langs = set(name_map or {}) | set(desc_map or {})
+            langs = (set(name_map or {}) | set(desc_map or {})) - {_NO_LANGUAGE}
             if not langs:
                 continue
             for lang in sorted(langs):
