@@ -360,8 +360,10 @@ beside `InternationalString`.
 The containers' limits, stated in their docstrings: `gaps` describes the
 result as returned, so it drifts if a caller mutates a `RowList` or
 `ValueList`; slicing, `copy()` and `+` return a plain `list`; `==` ignores
-`gaps`; `json.dumps` refuses a `Labels` (a `Mapping`, not a `dict`) and a
-`LocalisedString` (use `msgspec.json.encode` or `as_dict()`).
+`gaps`; `json.dumps` and `msgspec.json.encode` refuse a `Labels` (a
+`Mapping` that is no `dict`), so a caller encodes `dict(labels)` with
+`msgspec.json.encode`, and `msgspec.structs.asdict(label)` gives one
+`LocalisedString` as a dict.
 
 ### Errors
 

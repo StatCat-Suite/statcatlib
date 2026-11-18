@@ -1067,8 +1067,10 @@ Every label call follows the same rules
 - **A bulk call returns `None`** for each missing label, and lists it in the
   result's `gaps` as a `Gap(key, entity, field, langs)`. `Labels` is the
   mapping result, `RowList` the `Row` list and `ValueList` the scalar list.
-  `json.dumps` refuses a `Labels` and a `LocalisedString`; use
-  `msgspec.json.encode` or `as_dict()`.
+  `json.dumps` and `msgspec.json.encode` both refuse a `Labels`: encode
+  `dict(labels)` with `msgspec.json.encode`, which writes each
+  `LocalisedString` as `{"text": …, "lang": …}`, and use
+  `msgspec.structs.asdict(label)` for one label.
 
 ```python
 labels = view.agent_labels(lang=view.preference(lang="fr"))

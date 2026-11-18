@@ -89,3 +89,13 @@ class TestContainers:
         assert rows == [{"title": None}]
         assert rows.gaps == values.gaps == (gap,)
         assert type(rows[:1]) is list
+
+    def test_labels_encode_through_a_dict(self) -> None:
+        """The serialisation the docs give: ``dict(labels)`` encodes; ``Labels`` itself does not."""
+        import msgspec
+
+        labels = sc.Labels([("ON", sdmxlib.LocalisedString("Ontario", "en")), ("QC", None)])
+        with pytest.raises(TypeError):
+            msgspec.json.encode(labels)
+        assert msgspec.json.encode(dict(labels)) == b'{"ON":{"text":"Ontario","lang":"en"},"QC":null}'
+        assert msgspec.structs.asdict(sdmxlib.LocalisedString("Ontario", "en")) == {"text": "Ontario", "lang": "en"}

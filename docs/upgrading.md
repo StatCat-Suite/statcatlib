@@ -147,9 +147,10 @@ call's `lang`; `view.language_counts()` counts the texts held under each tag.
 
 Read a label's text as `.text` and its tag as `.lang`. Catch
 `MissingTranslationError` and `UnknownCodeError` by name: both are `KeyError`s,
-so `except KeyError` catches both. `json.dumps` refuses a `Labels` and a
-`LocalisedString`; encode them with `msgspec.json.encode`, or call
-`as_dict()`. New names in `statcatlib`: `Langs`, `Labels`, `RowList`,
+so `except KeyError` catches both. `json.dumps` and `msgspec.json.encode`
+both refuse a `Labels`: encode `dict(labels)` with `msgspec.json.encode`, which
+writes each `LocalisedString` as `{"text": …, "lang": …}`. For one label,
+`msgspec.structs.asdict(label)` gives that dict. New names in `statcatlib`: `Langs`, `Labels`, `RowList`,
 `ValueList`, `Gap`, `MissingTranslationError`, `UnknownCodeError`, and
 sdmxlib's `LocalisedString`, `MissingTagError` and `InvalidTagError`.
 

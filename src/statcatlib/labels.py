@@ -168,8 +168,9 @@ class Labels[K](Mapping[K, LocalisedString | None]):
 
     A missing label maps to ``None`` and is listed in `gaps`. Iteration
     follows the order the call states (request order, or the key order of a
-    whole-table map). ``json.dumps`` refuses it, as it refuses any
-    `Mapping` that is not a ``dict``.
+    whole-table map). ``json.dumps`` and ``msgspec.json.encode`` refuse it;
+    ``msgspec.json.encode(dict(labels))`` writes each label as
+    ``{"text": …, "lang": …}``.
 
     Attributes:
         gaps: Every key whose label holds none of the requested tags.
