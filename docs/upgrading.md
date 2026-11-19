@@ -5,7 +5,7 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
-## Next release: labels carry their language, and search index format 4
+## 0.21.0: labels carry their language, and search index format 4
 
 This release requires a `lang` on every label, filter and search call, returns
 each label as an `sdmxlib.LocalisedString` that carries the tag that answered,
@@ -121,7 +121,7 @@ tag raises `sdmxlib.InvalidTagError`. `view.preference(lang="en")` gives a tag
 with its language pairs, such as `("en", "en-t-fr")`, to pass as a label
 call's `lang`; `view.language_counts()` counts the texts held under each tag.
 
-| 0.20 | This release |
+| 0.20 | 0.21 |
 | --- | --- |
 | `view.codelist(urn).label("en") -> str` | `view.codelist(urn).label(lang="en") -> LocalisedString \| None`; `None` for an unknown codelist; raises `MissingTranslationError` when the name holds none of the tags |
 | `view.codelist(urn).batch_labels(ids, lang=None) -> dict[str, str]`, code ID fallback | `batch_labels(ids, lang="en") -> Labels[str]`; `None` and a `Gap` for an untranslated code; raises `UnknownCodeError` naming every code the codelist does not hold |

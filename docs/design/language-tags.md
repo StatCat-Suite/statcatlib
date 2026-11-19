@@ -6,7 +6,7 @@
   Goldfish round with the six standard reviewers, and 14 decisions settled by
   the owner. Slices 1 to 3 are built (GH-84, GH-83, GH-94, GH-88). Slice 4
   and the two open items below are designed and built in
-  [Label lookup](label-lookup.md) (GH-91), awaiting release as 0.21.0.
+  [Label lookup](label-lookup.md) (GH-91), released in 0.21.0.
 
 ## Overview
 

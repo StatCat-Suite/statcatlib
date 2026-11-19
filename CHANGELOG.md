@@ -2,6 +2,52 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.0] - 2026-11-18
+
+### Breaking Changes
+
+Every label, filter and search call takes a required, keyword-only `lang`,
+labels return `sdmxlib.LocalisedString`, and the seal writes search index
+format 4 (GH-91). This release reads version 3 and 4 indexes, and search over
+a version 3 index raises `IncompatibleCatalogError` until the product is
+re-indexed. No catalog is re-ingested. The
+[upgrading guide](https://statcat-suite.github.io/statcatlib/upgrading/#0210-labels-carry-their-language-and-search-index-format-4)
+gives the upgrade order, the re-index loop and the call table.
+
+- **scopes**: Return LocalisedString from codelist and scheme labels
+- **store**: Return Labels from the view's label maps; key spatial facets by URI or hash
+- **query**: Require lang and take tag tuples in projections and filters
+- **search**: Require lang in search and tag every hit with its stored language
+- **search**: Index each row under the tags its stored text holds
+- **search**: Write search index format 4 with language pairs
+
+### Bug Fixes
+
+- **search**: Name index tables from the tag and count region-tag tables in check_catalog
+- **sdmx**: Drop empty names at SDMX ingest
+
+### Documentation
+
+- **design**: Add the label lookup design for GH-91 and language-tags slice 4
+- **design**: Add the EGM review of the label lookup design
+- **design**: Revise the label lookup design after review
+- **design**: Add the second EGM review of the label lookup design
+- **design**: Revise the label lookup design after the second review
+- **design**: Add the LocalisedString audit table
+- Describe label lookup, gaps and search index format 4
+- Give the working way to encode Labels and a LocalisedString
+- Pass lang in the docstring examples of the search and label calls
+
+### Features
+
+- **labels**: Add Langs, Gap, Labels, RowList, ValueList and the label errors
+
+### Testing
+
+- Enumerate every lang parameter and pin tag_alias
+- Cover agent_labels, concept_labels gaps and unknown entity filter keys
+- Rebuild the version 3 fixture with statcatlib 0.20.0 and cover every scope over it
+
 ## [0.20.0] - 2026-11-18
 
 ### Breaking Changes

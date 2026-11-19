@@ -2,8 +2,8 @@
 
 *   **Author:** Gabriel Gellner
 *   **Date:** 2026-11-18
-*   **Status:** Built on `feat/gh-91-localised-string` (commits 7–17 of
-    the implementation plan), awaiting release as 0.21.0. Accepted at
+*   **Status:** Built in statcatlib 0.21.0 (commits 7–17 of the
+    implementation plan, GH-169). Accepted at
     revision 3. Revision 1 had an EGM review
     ([report](egm/label-lookup/goldfish_review_report.md): 1 Blocker, 19
     Major, 22 Minor), after which the project owner decided four findings on
