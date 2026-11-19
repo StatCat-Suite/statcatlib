@@ -167,45 +167,45 @@ class TestSearch:
     """
 
     def test_search_by_title(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("exchange rate")
+        result = indexed_store.search("exchange rate", lang="en")
         assert any(_identifier(hit) == "EXR" for hit in result.items)
 
     def test_search_case_insensitive(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("EXCHANGE RATE")
+        result = indexed_store.search("EXCHANGE RATE", lang="en")
         assert any(_identifier(hit) == "EXR" for hit in result.items)
 
     def test_search_by_description(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("GDP growth rate")
+        result = indexed_store.search("GDP growth rate", lang="en")
         assert any(_identifier(hit) == "GDP" for hit in result.items)
 
     def test_search_returns_total(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("quarterly")
+        result = indexed_store.search("quarterly", lang="en")
         assert result.total > 0
 
     def test_search_limit(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("rate", limit=2)
+        result = indexed_store.search("rate", limit=2, lang="en")
         assert len(result.items) <= 2
 
     def test_search_offset(self, indexed_store: sc.EditionView):
-        all_results = indexed_store.search("monthly")
-        offset_results = indexed_store.search("monthly", offset=1)
+        all_results = indexed_store.search("monthly", lang="en")
+        offset_results = indexed_store.search("monthly", offset=1, lang="en")
         assert offset_results.total == all_results.total
         if all_results.total > 1:
             assert _identifier(offset_results.items[0]) != _identifier(all_results.items[0])
 
     def test_search_no_results(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("xyzzy_nonexistent_term")
+        result = indexed_store.search("xyzzy_nonexistent_term", lang="en")
         assert result.items == []
         assert result.total == 0
 
     def test_search_returns_both_kinds(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("monthly")
+        result = indexed_store.search("monthly", lang="en")
         payloads = [hit.payload for hit in result.items]
         assert any(isinstance(p, sc.AggregateDataset) for p in payloads)
         assert any(isinstance(p, sc.OpenDataset) for p in payloads)
 
     def test_search_includes_open_dataset(self, indexed_store: sc.EditionView):
-        result = indexed_store.search("labour force")
+        result = indexed_store.search("labour force", lang="en")
         assert any(_identifier(hit) == "LFS" for hit in result.items)
 
 
@@ -294,10 +294,10 @@ class TestThemeSchemeIsolation:
 
     def test_concept_labels_per_scheme(self) -> None:
         s = self._build_store()
-        statcan_labels = s.concept_labels(scheme_uri=self._STATCAN)
-        assert statcan_labels == {f"{self._STATCAN}/13": "Labour"}
-        eurovoc_labels = s.concept_labels(scheme_uri=self._EUROVOC)
-        assert eurovoc_labels == {f"{self._EUROVOC}/13": "Energy"}
+        statcan_labels = s.concept_labels(lang="en", scheme_uri=self._STATCAN)
+        assert dict(statcan_labels) == {f"{self._STATCAN}/13": sc.LocalisedString("Labour", "en")}
+        eurovoc_labels = s.concept_labels(lang="en", scheme_uri=self._EUROVOC)
+        assert dict(eurovoc_labels) == {f"{self._EUROVOC}/13": sc.LocalisedString("Energy", "en")}
 
     def test_facets_with_different_schemes(self) -> None:
         """Themes from different schemes appear in facets as distinct URIs."""

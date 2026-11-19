@@ -178,8 +178,8 @@ Four query operations on `EditionView`:
 1. `get(cls, id)` → direct lookup by identifier (generic, narrows return type)
 2. `query(cls, **filters)` → structured query, returns `QueryBuilder` for
    chaining (generic, narrows return type)
-3. `search(text)` → BM25 search via LanceDB (requires `statcatlib[search]`
-   and an index in the edition's `search/`)
+3. `search(text, lang=)` → BM25 search via LanceDB (requires
+   `statcatlib[search]` and an index in the edition's `search/`)
 4. `facets(*fields)` → aggregation counts per field value (not generic,
    counts across all the edition's datasets)
 
@@ -212,13 +212,35 @@ FK-null special case: if the FK column is NULL in the main row, the field
 returns `None` regardless of `include_rels`. `is_unloaded(value)` and
 `NotLoadedError` are exported from `statcatlib.__all__`.
 
+**Label lookup** (GH-91, `docs/design/label-lookup.md`). Every label,
+filter and search `lang` is keyword-only and required; nothing defaults to
+English. Label calls take `Langs` (`statcatlib/labels.py`: a tag or a
+sequence of tags, normalised by `_as_langs`, the first held tag answers);
+search takes exactly one tag and raises `TypeError` for a sequence. A
+malformed tag raises `sdmxlib.InvalidTagError`. Labels come back as
+`sdmxlib.LocalisedString` (`.text`, `.lang`). Single lookups
+(`CodelistScope.label`, `CodesScope.get`, `ConceptsScope.get`) raise
+`MissingTranslationError` (a `MissingTagError`, so a `KeyError`) when a
+required label holds none of the tags. Bulk calls return `None` per missing
+label and list a `Gap(key, entity, field, langs)` in `.gaps`: `Labels` (a
+`Mapping`), `RowList`, `ValueList`. `batch_labels` raises `UnknownCodeError`
+(`.missing`, the (urn, code_id) pairs) for a code the codelist does not hold.
+`EditionView.preference(lang=)` gives a tag with its language pairs;
+`language_counts()` counts texts per tag. The SQL lives in
+`statcatlib/_lang_sql.py` (`pick_map`, `localized_map`, `spatial_key_sql`),
+with positional `?` parameters and no macros, so it runs on read-only
+connections.
+
 **Projection modifiers** bypass full object reconstruction:
 - `.select(*cols, lang=)` — sets `Row` projection. Use `.rows()` / `.row()`
-  as terminals (return `list[Row]` / `Row | None`). Single SQL query, no
-  `store.get()`. `Row` is a `dict` subclass in `store/row.py` that adds
-  attribute-style access (`row.identifier`). Exported as `sc.Row`.
+  as terminals (return `RowList` / `Row | None`). Single SQL query, no
+  `store.get()`. A MAP column gives `title` (text or `None`) and
+  `title__lang` (the tag that answered). `Row` is a `dict` subclass in
+  `store/row.py` that adds attribute-style access (`row.identifier`).
+  Exported as `sc.Row`.
 - `.scalars(col, lang=)` — sets flat value projection. Use `.values()` /
-  `.value()` as terminals (return `list[Any]` / `Any | None`).
+  `.value()` as terminals (return `ValueList` / `Any | None`). A MAP column
+  yields `LocalisedString | None`.
 - Entity terminals (`.collect()`, `.first()`, `.one()`, `.execute()`) raise
   `ValueError` when a projection modifier is active.
 - `.exists()` — terminal returning `bool` via `SELECT 1 ... LIMIT 1`.
@@ -227,7 +249,10 @@ returns `None` regardless of `include_rels`. `is_unloaded(value)` and
   description — require `lang` parameter).
 
 `.sort_by()` supports MAP columns (e.g. `title`) via the `lang` parameter:
-`.sort_by("title", lang="en")`. Uses DuckDB subscript syntax (`d.title[?]`).
+`.sort_by("title", lang="en")`, sorting on the first held tag's text
+(`COALESCE(d.title[?], …)` from `pick_map`). `select`, `scalars` and
+`sort_by` keep `lang=None` for flat columns and raise `ValueError` for a MAP
+column given none.
 
 Structural filters (e.g. `q.has_code("GEO", "ON")`) JOIN through
 `sdmx_dataflow_urn` into sdmxlib's tables: `sdmx.dataflow` →
@@ -251,31 +276,40 @@ surgery here — that was deleted deliberately (sdmxlib#372).
 MAP column filters in `statcatlib.query`:
 - `MapCondition` — condition on a MAP column inside a bridge-table
   `ExistsFilter` (e.g. `dataset_spatial.label`, `dataset_keyword.keyword`).
-  Uses `col[?] = ?` subscript syntax.
+  Its `key` is a tag tuple; it tests the first held tag's text.
 - `MapFilter` — direct WHERE clause on a dataset MAP column
-  (e.g. `d.title[?] ILIKE ?`). Supports `eq` and `ilike` operators.
+  (e.g. `COALESCE(d.title[?], …) ILIKE ?`). Supports `eq` and `ilike`
+  operators; `key` is a tag tuple.
 - Convenience functions: `has_spatial(label, lang=)`, `has_keyword(kw, lang=)`,
-  `title_contains(text, lang=)`, `description_contains(text, lang=)`.
+  `title_contains(text, lang=)`, `description_contains(text, lang=)`, each
+  with a required `lang`.
+- `has_spatial_key(key)` filters by a spatial facet key: a coverage's `uri`,
+  else `sha256:` + the hash of its label map (`_lang_sql.spatial_key_sql`,
+  LL-D5). A key in no language; regions that differ in any translation get
+  separate keys. `facets("spatial")` and `spatial_labels(lang=)` use it.
+- `query(Agent | DataService | Distribution, **kw)` raises `ValueError` for
+  a filter key its spec does not list; agents have no `name` filter.
 
 Scope-based traversal supports `CodelistsScope` (via `view.codelists`
 property) parallel to `ThemesScope` (`view.themes`). Both support
 `.enrich()` with `sc.each("datasets")` expressions. `CodelistScope` also
-has `.label(lang)` for quick name lookup via `sdmx.localized_text`.
+has `.label(lang=)` for quick name lookup via `sdmx.localized_text`,
+returning `None` for an unknown codelist.
 
-`CodelistsScope` supports `.lang(lang)` and `.filter(text_contains=)` for
-SQL-level label resolution and text filtering. Enriched `.collect()` always
-includes a `label` field (resolved via `sdmx.localized_text`).
-
-`CodelistScope` supports `.lang(lang)`. Enriched `.collect()` always
-includes a `label` field from the code's `name` MAP column (falls back
-to `code_id` when the requested language is missing).
+The codelist scopes have no `.lang()` setter (LL-D4); each terminal takes
+`lang=`. `CodelistsScope.filter(text_contains=, lang=)` filters by name or
+URN. Enriched `.rows(lang=)` on `CodelistsScope`, `CodelistScope` and
+`SchemeScope` gives `label` and `label__lang`, `None` and a gap where the
+label holds none of the tags; there is no ID or URN fallback.
+`SchemeScope.labels(lang=)` returns `Labels[str]` keyed by notation.
 
 **Batch label resolution** — `CodelistScope.batch_labels(code_ids, lang=)`
 resolves labels for many codes in a single SQL query, returning
-`dict[str, str]`. `CodelistsScope.batch_labels(pairs, lang=)` does the same
-across multiple codelists using a VALUES JOIN, returning
-`dict[tuple[str, str], str]` keyed by `(codelist_urn, code_id)`. Both
-methods fall back to the code ID when the language has no entry.
+`Labels[str]` in request order. `CodelistsScope.batch_labels(pairs, lang=)`
+does the same across multiple codelists using a VALUES JOIN, returning
+`Labels[tuple[str, str]]` keyed by `(codelist_urn, code_id)`. An
+untranslated code is `None` with a gap; an unknown code raises
+`UnknownCodeError`.
 
 **Lazy graph traversal** — `DatasetScope.upstream()`, `.downstream()`, and
 `.related(edge)` return `QueryBuilder[BaseDataset]` (not `list[BaseDataset]`).
@@ -620,6 +654,20 @@ per-language tables. Two consequences worth knowing:
   common in one language looked rarer than they were in another.
 - Queries carry no `lang` filter — table membership *is* the filter.
 
+**Language pairs in search** (format 4, LL-D15). An alternate tag's rows
+(open.canada.ca's `en-t-fr`) go to its primary's table: `_by_language(rows,
+pairs)` groups by `pairs.get(tag, tag)`, and `_for(lang)` routes an
+alternate to its primary through `index.json`'s `language_pairs`. A row's
+`lang` column keeps its own tag, and `Hit.lang` is that stored tag, so a
+search with `lang="en"` can return `en-t-fr` hits. A row's `document` holds
+one tag's text only. `bm25_search_rows` and `search_rows` oversample by
+`1 + n` alternates and deduplicate on the entity without its tag (code
+`(id, dimension_id, code_urn or code_id)`, concept `concept_urn`,
+reference metadata `id`), keeping the best-ranked row. In hybrid search an
+entity keeps the row of the ranking that placed it higher, BM25 on a tie.
+Rows exist per tag the text holds; no `en` row is added and `zxx` gets no
+row.
+
 A language with no Snowball stemmer (LanceDB rejects Chinese, Japanese,
 Korean, Catalan) is indexed **unstemmed**, never with another
 language's stemmer. Query-side stopwords are per-language too: applied
@@ -642,17 +690,33 @@ any write. The manifest records each language's stemmer and row count,
 surfaced as `EditionView.index_layout` — the thing to check after a build,
 and populated for BM25-only indexes, which write no `embeddings.json` at all.
 
-`index.json` records `lance._MANIFEST_VERSION`, which is 3. Bump it only when
-an existing field changes meaning or shape; a new field does not bump it.
-`_Store._over` refuses every other version, and a manifest with none, with
-`IncompatibleCatalogError` (`_refuse_unreadable_index`, GH-40). Version 2
-and older exist only in layouts statcatlib 0.12 refuses, and a higher
-version needs a newer statcatlib. That refusal is stricter than GH-3's
-warn-and-serve rule, which covers stale indexes in a format this build reads.
+`index.json` records `lance._MANIFEST_VERSION`, which is 4, and
+`language_pairs` (`{alternate: primary}`); its `languages` keys are
+`tag_alias` of primary or unpaired tags. Version 4 renamed the table column
+`text` to `document` and added `concept_name` and `concept_description`, so
+`ConceptHit` reads its fields from columns. Bump the version only when an
+existing field changes meaning or shape; a new field does not bump it.
+`lance._READABLE_VERSIONS` is `{3, 4}`: `_Store._over` refuses every other
+version, and a manifest with none, with `IncompatibleCatalogError`
+(`_refuse_unreadable_index`, GH-40). A version 3 index opens for labels,
+facets, queries, `describe`, `carried_vectors` and checks;
+`LanceIndex.check_searchable()` raises `IncompatibleCatalogError` on every
+search over it, called from `_for` and from `_Store._search_index()` before
+any early return. The seal keeps an index only when its fingerprint matches
+and `LanceIndex.version == _MANIFEST_VERSION`, so a carried or resumed
+version 3 index is rebuilt. `IncompatibleCatalogError` lives in the leaf
+module `statcatlib/_errors.py` so `lance.py` can raise it; `statcatlib` and
+`store.store` re-export it. Version 2 and older exist only in layouts
+statcatlib 0.12 refuses, and a higher version needs a newer statcatlib. That
+refusal is stricter than GH-3's warn-and-serve rule, which covers stale
+indexes in a format this build reads.
 
 **Multilingual columns** — All multilingual text fields use
 `MAP(VARCHAR, VARCHAR)`. Any language is queryable at any time via `title['en']`
-subscript syntax. No upfront language configuration needed.
+subscript syntax. No upfront language configuration needed. Read paths pick
+over a tag tuple with `_lang_sql.pick_map` (`COALESCE(col[?], …)` for the
+text, a `CASE` for the tag that answered) and never fall back to a tag the
+caller did not pass.
 
 ### SDMX ingest
 

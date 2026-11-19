@@ -276,7 +276,7 @@ def _check_language(index: LanceIndex, lang: str, found: LanguageLayout | None, 
         yield Finding(
             STATCAT_SECTION, subject, f"stemmed with {found['stemmer']}, the manifest says {want.get('stemmer')}"
         )
-    table = index.table_for(lang)
+    table = index.table_for_key(lang)
     rows = table.count_rows() if table is not None else 0
     if rows != want.get("rows"):
         yield Finding(STATCAT_SECTION, subject, f"{rows} rows, the manifest says {want.get('rows')}")

@@ -2,9 +2,11 @@
 
 `_MANIFEST_VERSION` is bumped only when an existing field of ``index.json``
 changes meaning, so an index at another version would be served wrongly.
-Phase 2a moved it to version 3, naming tables by edition id: a sealed
-edition's view refuses any other version, and so does a working copy that
-carries such an index from the edition it is built on.
+This build writes version 4 and opens versions 3 and 4
+(``docs/design/label-lookup.md``, LL-D15): a sealed edition's view refuses
+any other version, and so does a working copy that carries such an index
+from the edition it is built on. ``tests/test_index_v3.py`` covers version 3
+with a catalog sealed by statcatlib 0.20.
 
 Another version is simulated by rewriting ``search/index.json`` in the sealed
 edition, which is the only thing the guard reads. The view's manifest check
@@ -60,13 +62,13 @@ def catalog(tmp_path: Path, edition: sc.Edition) -> Iterator[sc.Catalog]:
 
 class TestReadable:
     def test_a_sealed_index_records_this_builds_version(self, search_dir: Path) -> None:
-        assert LanceIndex(search_dir).version == lance._MANIFEST_VERSION == 3
+        assert LanceIndex(search_dir).version == lance._MANIFEST_VERSION == 4
         assert LanceIndex.unreadable_version(search_dir) is None
 
     def test_this_builds_version_opens_and_searches(self, catalog: sc.Catalog) -> None:
         view = catalog.product("synthetic").view()
         assert view.index_layout
-        assert view.search("synthetic", kinds=("dataset",)).total >= 0
+        assert view.search("synthetic", kinds=("dataset",), lang="en").total >= 0
 
     def test_no_index_has_nothing_to_check(self, tmp_path: Path) -> None:
         assert LanceIndex.unreadable_version(tmp_path / "search") is None
@@ -75,7 +77,7 @@ class TestReadable:
 class TestGuard:
     def test_a_newer_version_is_refused(self, catalog: sc.Catalog, search_dir: Path) -> None:
         _set_index_version(search_dir, _NEWER)
-        expected = rf"index.json records version {_NEWER}, written by statcatlib .*build_index\(\)"
+        expected = rf"index.json records version {_NEWER}, written by statcatlib .*reads index versions 3 and 4"
         with pytest.raises(IncompatibleCatalogError, match=expected):
             catalog.product("synthetic").view()
 
@@ -85,7 +87,7 @@ class TestGuard:
             catalog.product("synthetic").view()
 
     @pytest.mark.parametrize(
-        ("version", "recorded"), [(None, "no version"), (True, "version True"), ("3", "version 3")]
+        ("version", "recorded"), [(None, "no version"), (True, "version True"), ("4", "version 4")]
     )
     def test_a_missing_or_malformed_version_is_refused(
         self, catalog: sc.Catalog, search_dir: Path, version: object, recorded: str
@@ -109,7 +111,7 @@ class TestGuard:
         what sdmxlib checks when it carries the file into the new edition.
         """
         path = search_dir / "index.json"
-        path.write_text(path.read_text().replace('"version": 3', '"version": 2'))
+        path.write_text(path.read_text().replace('"version": 4', '"version": 2'))
         product_dir = tmp_path / "catalog" / "products" / "synthetic"
         before = sorted(p.name for p in product_dir.iterdir())
         with (

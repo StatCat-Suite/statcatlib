@@ -184,7 +184,7 @@ def test_hybrid_search_with_querybuilder_filter(store_with_model, tmp_path):
     results = (
         store_with_model.query(sc.OpenDataset)
         .filter(status="current")
-        .hybrid_search("labour employment jobs")
+        .hybrid_search("labour employment jobs", lang="en")
         .execute()
     )
     assert all(d.status == "current" for d in results.items)
@@ -201,7 +201,7 @@ def test_without_model_semantic_raises(tmp_path):
         )
     )
     with pytest.raises(RuntimeError, match="embedding_model"):
-        store.datasets.find(mode="vector", query="test query")
+        store.datasets.find(mode="vector", query="test query", lang="en")
 
 
 @pytest.mark.unit
@@ -215,7 +215,7 @@ def test_without_model_hybrid_raises(tmp_path):
         )
     )
     with pytest.raises(RuntimeError, match="embedding_model"):
-        store.datasets.find(mode="hybrid", query="test query")
+        store.datasets.find(mode="hybrid", query="test query", lang="en")
 
 
 @pytest.mark.unit
@@ -297,7 +297,7 @@ def test_search_by_theme_label(tmp_path):
     store.put(ds)
     store.build_index()
 
-    results = store.datasets.find("Environment")
+    results = store.datasets.find("Environment", lang="en")
     ids = [d.payload.identifier for d in results.items]
     assert "themed-ds" in ids
 
@@ -356,7 +356,7 @@ def test_build_index_idempotent(tmp_path):
     store.build_index()
     store.build_index()
 
-    results = store.datasets.find("Idempotent")
+    results = store.datasets.find("Idempotent", lang="en")
     ids = [d.payload.identifier for d in results.items]
     assert ids.count("idem-ds") == 1
 
@@ -414,7 +414,7 @@ def test_search_scalars_identifier(tmp_path):
     )
     store.build_index()
 
-    ids = store.query(sc.OpenDataset).search("labour employment").scalars("identifier").values()
+    ids = store.query(sc.OpenDataset).search("labour employment", lang="en").scalars("identifier").values()
     assert isinstance(ids, list)
     assert len(ids) > 0
     assert all(isinstance(i, str) for i in ids)
@@ -429,10 +429,10 @@ def test_search_scalars_title(tmp_path):
     store.put(sc.OpenDataset(identifier="ds-b", title=I18n(en="Beta Dataset"), description=I18n(en="Second beta")))
     store.build_index()
 
-    titles = store.query(sc.OpenDataset).search("alpha").scalars("title", lang="en").values()
+    titles = store.query(sc.OpenDataset).search("alpha", lang="en").scalars("title", lang="en").values()
     assert isinstance(titles, list)
     assert len(titles) > 0
-    assert "Alpha Dataset" in titles
+    assert sc.LocalisedString("Alpha Dataset", "en") in titles
 
 
 @pytest.mark.unit
@@ -455,7 +455,7 @@ def test_search_select_projection(tmp_path):
     )
     store.build_index()
 
-    rows = store.query(sc.OpenDataset).search("selection").select("identifier", "title", lang="en").rows()
+    rows = store.query(sc.OpenDataset).search("selection", lang="en").select("identifier", "title", lang="en").rows()
     assert isinstance(rows, list)
     assert len(rows) > 0
     assert all(isinstance(r, dict) for r in rows)
@@ -476,8 +476,8 @@ def test_search_exists(tmp_path):
     )
     store.build_index()
 
-    assert store.query(sc.OpenDataset).search("existence").exists() is True
-    assert store.query(sc.OpenDataset).search("xyzzy_nonexistent_term_42").exists() is False
+    assert store.query(sc.OpenDataset).search("existence", lang="en").exists() is True
+    assert store.query(sc.OpenDataset).search("xyzzy_nonexistent_term_42", lang="en").exists() is False
 
 
 @pytest.mark.unit
@@ -493,7 +493,7 @@ def test_search_scalars_first(tmp_path):
     )
     store.build_index()
 
-    val = store.query(sc.OpenDataset).search("first result").scalars("identifier").value()
+    val = store.query(sc.OpenDataset).search("first result", lang="en").scalars("identifier").value()
     assert val == "first-ds"
 
 
@@ -550,7 +550,7 @@ def test_search_and_operator_default(tmp_path):
     store.build_index()
 
     # "labour statistics" with AND: only "both-terms" has both words
-    ids = store.query(sc.BaseDataset).search("labour statistics").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("labour statistics", lang="en").scalars("identifier").values()
     assert "both-terms" in ids
 
 
@@ -575,7 +575,7 @@ def test_search_or_operator(tmp_path):
     store.build_index()
 
     # "labour price" with OR: both should match (each has one term)
-    ids = store.query(sc.BaseDataset).search("labour price", operator="or").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("labour price", operator="or", lang="en").scalars("identifier").values()
     assert "labour-only" in ids
     assert "price-only" in ids
 
@@ -594,7 +594,7 @@ def test_search_english_stopwords_stripped(tmp_path):
     store.build_index()
 
     # "health and safety" → strips "and" → "health AND safety"
-    ids = store.query(sc.BaseDataset).search("health and safety").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("health and safety", lang="en").scalars("identifier").values()
     assert "health-safety" in ids
 
 
@@ -633,7 +633,7 @@ def test_search_single_term_unchanged(tmp_path):
     )
     store.build_index()
 
-    ids = store.query(sc.BaseDataset).search("labour").scalars("identifier").values()
+    ids = store.query(sc.BaseDataset).search("labour", lang="en").scalars("identifier").values()
     assert "labour-ds" in ids
 
 
@@ -657,7 +657,7 @@ def test_standalone_search_operator(tmp_path):
     )
     store.build_index()
 
-    results = store.datasets.find("alpha beta", operator="and")
+    results = store.datasets.find("alpha beta", operator="and", lang="en")
     ids = [d.payload.identifier for d in results.items]
     assert "ds-a" in ids
 
@@ -669,17 +669,17 @@ def test_standalone_search_operator(tmp_path):
 
 @pytest.mark.unit
 def test_dedupe_by_id_keep_min_picks_lowest_distance():
-    hits = [("a", 0.5), ("b", 0.4), ("a", 0.1), ("c", 0.9), ("b", 0.6)]
+    hits = [("a", 0.5, "en"), ("b", 0.4, "en"), ("a", 0.1, "en-t-fr"), ("c", 0.9, "en"), ("b", 0.6, "fr")]
     out = _dedupe_by_id(iter(hits), keep="min")
-    # Order: first occurrence; values: best (min) per id.
-    assert out == [("a", 0.1), ("b", 0.4), ("c", 0.9)]
+    # Order: first occurrence; values: best (min) per id, with that row's tag.
+    assert out == [("a", 0.1, "en-t-fr"), ("b", 0.4, "en"), ("c", 0.9, "en")]
 
 
 @pytest.mark.unit
 def test_dedupe_by_id_keep_max_picks_highest_score():
-    hits = [("a", 0.1), ("b", 0.4), ("a", 0.9), ("c", 0.2)]
+    hits = [("a", 0.1, "en"), ("b", 0.4, "en"), ("a", 0.9, "en-t-fr"), ("c", 0.2, "en")]
     out = _dedupe_by_id(iter(hits), keep="max")
-    assert out == [("a", 0.9), ("b", 0.4), ("c", 0.2)]
+    assert out == [("a", 0.9, "en-t-fr"), ("b", 0.4, "en"), ("c", 0.2, "en")]
 
 
 @pytest.mark.unit
@@ -701,13 +701,13 @@ def _seed_lance_with_mixed_rows(path) -> LanceIndex:
     """Build a LanceIndex with both dataset and code rows for the same id."""
     idx = LanceIndex(path, edition_id=_EDITION)
     rows: list[SearchRow] = [
-        {"id": "ds-1", "entity_type": "open", "lang": "en", "text": "labour force survey", "embedding": [0.1] * 8},
-        {"id": "ds-1", "entity_type": "code", "lang": "en", "text": "Geography: Canada", "embedding": [0.1] * 8},
-        {"id": "ds-1", "entity_type": "code", "lang": "en", "text": "Geography: Ontario", "embedding": [0.1] * 8},
-        {"id": "ds-2", "entity_type": "open", "lang": "en", "text": "consumer price index", "embedding": [0.2] * 8},
-        {"id": "ds-2", "entity_type": "code", "lang": "en", "text": "Frequency: Monthly", "embedding": [0.2] * 8},
+        {"id": "ds-1", "entity_type": "open", "lang": "en", "document": "labour force survey", "embedding": [0.1] * 8},
+        {"id": "ds-1", "entity_type": "code", "lang": "en", "document": "Geography: Canada", "embedding": [0.1] * 8},
+        {"id": "ds-1", "entity_type": "code", "lang": "en", "document": "Geography: Ontario", "embedding": [0.1] * 8},
+        {"id": "ds-2", "entity_type": "open", "lang": "en", "document": "consumer price index", "embedding": [0.2] * 8},
+        {"id": "ds-2", "entity_type": "code", "lang": "en", "document": "Frequency: Monthly", "embedding": [0.2] * 8},
     ]
-    idx.add_bulk(rows)
+    idx.add_bulk(rows, pairs={})
     idx.build_index()
     return idx
 
@@ -767,7 +767,7 @@ def test_semantic_search_excludes_code_rows_by_default(tmp_path, model):
         "id": "ds-1",
         "entity_type": "code",
         "lang": "en",
-        "text": "Geography: Ontario",
+        "document": "Geography: Ontario",
         "embedding": list(model.encode("Geography: Ontario")),
     }
     require_index(store).add([code_row])
@@ -918,7 +918,7 @@ def test_querybuilder_search_returns_empty_when_lance_missing(tmp_path):
     )
     # Simulate "lancedb not installed" / "index never built".
     store._store._lance = None
-    result = store.query(sc.OpenDataset).search("labour").execute()
+    result = store.query(sc.OpenDataset).search("labour", lang="en").execute()
     assert isinstance(result, sc.SearchResult)
     assert result.items == []
     assert result.total == 0
@@ -937,7 +937,7 @@ def test_catalogstore_search_returns_empty_when_lance_missing(tmp_path):
         )
     )
     store._store._lance = None
-    result = store.datasets.find("labour")
+    result = store.datasets.find("labour", lang="en")
     assert isinstance(result, sc.SearchResult)
     assert result.items == []
     assert result.total == 0
@@ -955,7 +955,7 @@ def test_querybuilder_hybrid_returns_empty_when_lance_missing(tmp_path, model):
         )
     )
     store._store._lance = None
-    result = store.query(sc.OpenDataset).hybrid_search("test").execute()
+    result = store.query(sc.OpenDataset).hybrid_search("test", lang="en").execute()
     assert result.items == []
     assert result.total == 0
 
@@ -985,7 +985,7 @@ def test_search_fuzzy_one_preserves_exact_match(tmp_path):
     )
     store.build_index()
     for fz in (1, 2):
-        ids = store.query(sc.OpenDataset).search("inflation", fuzzy=fz).scalars("identifier").values()
+        ids = store.query(sc.OpenDataset).search("inflation", fuzzy=fz, lang="en").scalars("identifier").values()
         assert "ds-exact" in ids, f"exact match dropped at fuzzy={fz}"
 
 
@@ -1030,7 +1030,7 @@ def test_search_codes_fuzzy_preserves_exact(tmp_path):
     # quirk's exclusion window. With the BooleanQuery fix, an exact
     # query at fuzzy=1 must still surface it.
     result = store.codes.find("Saskatchewan", lang="en", fuzzy=1)
-    assert any(h.payload.code_label == "Saskatchewan" for h in result.items)
+    assert any(h.payload.code_label.text == "Saskatchewan" for h in result.items)
 
 
 @pytest.mark.unit
@@ -1045,7 +1045,7 @@ def test_search_fuzzy_zero_requires_exact_match(tmp_path):
         )
     )
     store.build_index()
-    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=0).scalars("identifier").values()
+    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=0, lang="en").scalars("identifier").values()
     assert "ds-exact" not in ids
 
 
@@ -1062,7 +1062,7 @@ def test_search_fuzzy_two_catches_typos(tmp_path):
     )
     store.build_index()
     # 1-character typo: "inflaton" → "inflation"
-    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=2).scalars("identifier").values()
+    ids = store.query(sc.OpenDataset).search("inflaton", fuzzy=2, lang="en").scalars("identifier").values()
     assert "ds-fuzzy" in ids
 
 
@@ -1078,7 +1078,7 @@ def test_catalogstore_search_fuzzy_int(tmp_path):
         )
     )
     store.build_index()
-    result = store.datasets.find("inflaton", fuzzy=2)
+    result = store.datasets.find("inflaton", fuzzy=2, lang="en")
     assert any(d.payload.identifier == "ds-cs-fuzzy" for d in result.items)
 
 
@@ -1372,11 +1372,11 @@ class TestExplicitSchema:
         from statcatlib.store.lance import LanceIndex
 
         rows: list[SearchRow] = [
-            {"id": "a", "entity_type": "code", "lang": "en", "text": "x", "embedding": None},
-            {"id": "b", "entity_type": "code", "lang": "en", "text": "y", "embedding": None},
+            {"id": "a", "entity_type": "code", "lang": "en", "document": "x", "embedding": None},
+            {"id": "b", "entity_type": "code", "lang": "en", "document": "y", "embedding": None},
         ]
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(rows, embedding_dim=8)
+        idx.add_bulk(rows, embedding_dim=8, pairs={})
         field = require_table(idx).schema.field("embedding")
         assert field.type.value_type == pa.float32()
         assert field.type.list_size == 8
@@ -1389,17 +1389,17 @@ class TestExplicitSchema:
         from statcatlib.store.lance import LanceIndex
 
         rows: list[SearchRow] = [
-            {"id": "a", "entity_type": "code", "lang": "en", "text": "no vector", "embedding": None},
+            {"id": "a", "entity_type": "code", "lang": "en", "document": "no vector", "embedding": None},
             {
                 "id": "b",
                 "entity_type": "open",
                 "lang": "en",
-                "text": "has vector",
+                "document": "has vector",
                 "embedding": [0.1, 0.2, 0.3, 0.4],
             },
         ]
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(rows)
+        idx.add_bulk(rows, pairs={})
         field = require_table(idx).schema.field("embedding")
         assert field.type.value_type == pa.float32()
         assert field.type.list_size == 4
@@ -1408,18 +1408,18 @@ class TestExplicitSchema:
         """Rows with no embedding at all keep the pre-existing shape."""
         from statcatlib.store.lance import LanceIndex
 
-        rows: list[SearchRow] = [{"id": "a", "entity_type": "open", "lang": "en", "text": "plain"}]
+        rows: list[SearchRow] = [{"id": "a", "entity_type": "open", "lang": "en", "document": "plain"}]
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(rows)
+        idx.add_bulk(rows, pairs={})
         assert "embedding" not in require_table(idx).schema.names
 
     def test_rows_are_padded_to_the_union_schema(self, tmp_path):
         """A row missing an extension column gets NULL, not a failure."""
         from statcatlib.store.lance import LanceIndex
 
-        rows: list[SearchRow] = [{"id": "a", "entity_type": "open", "lang": "en", "text": "sparse row"}]
+        rows: list[SearchRow] = [{"id": "a", "entity_type": "open", "lang": "en", "document": "sparse row"}]
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(rows)
+        idx.add_bulk(rows, pairs={})
         names = set(require_table(idx).schema.names)
         assert {"code_urn", "concept_urn", "set_urn", "depth"} <= names
 
@@ -1429,8 +1429,10 @@ class TestExplicitSchema:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "x", "embedding": [1.0, 0.0]}])
-        idx.add([{"id": "b", "entity_type": "code", "lang": "en", "text": "y", "embedding": None}])
+        idx.add_bulk(
+            [{"id": "a", "entity_type": "open", "lang": "en", "document": "x", "embedding": [1.0, 0.0]}], pairs={}
+        )
+        idx.add([{"id": "b", "entity_type": "code", "lang": "en", "document": "y", "embedding": None}])
         assert require_table(idx).count_rows() == 2
         assert "embedding" in require_table(idx).schema.names
 
@@ -1513,12 +1515,13 @@ class TestPerLanguageStemming:
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         idx.add_bulk(
             [
-                {"id": "a", "entity_type": "open", "lang": "en", "text": "hello"},
-                {"id": "a", "entity_type": "open", "lang": "fr", "text": "bonjour"},
-            ]
+                {"id": "a", "entity_type": "open", "lang": "en", "document": "hello"},
+                {"id": "a", "entity_type": "open", "lang": "fr", "document": "bonjour"},
+            ],
+            pairs={},
         )
         assert idx.languages == ["en", "fr"]
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         assert idx.languages == ["en"]
         # `table_for`, not `require_table`: the dropped language having no
         # table is what this asserts, so the narrowing helper is wrong here.
@@ -1571,18 +1574,18 @@ class TestAtomicRebuild:
     @staticmethod
     def _rows(text_en: str, text_fr: str) -> list[SearchRow]:
         return [
-            {"id": "a", "entity_type": "open", "lang": "en", "text": text_en},
-            {"id": "a", "entity_type": "open", "lang": "fr", "text": text_fr},
+            {"id": "a", "entity_type": "open", "lang": "en", "document": text_en},
+            {"id": "a", "entity_type": "open", "lang": "fr", "document": text_fr},
         ]
 
     def test_successful_rebuild_replaces_every_language(self, tmp_path):
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(self._rows("first", "premier"))
-        idx.add_bulk(self._rows("second", "deuxieme"))
-        assert [i for i, _ in idx.bm25_search("second", lang="en")] == ["a"]
-        assert [i for i, _ in idx.bm25_search("deuxieme", lang="fr")] == ["a"]
+        idx.add_bulk(self._rows("first", "premier"), pairs={})
+        idx.add_bulk(self._rows("second", "deuxieme"), pairs={})
+        assert [i for i, _, _ in idx.bm25_search("second", lang="en")] == ["a"]
+        assert [i for i, _, _ in idx.bm25_search("deuxieme", lang="fr")] == ["a"]
         # The superseded content is gone, not merged in alongside.
         assert idx.bm25_search("first", lang="en") == []
 
@@ -1592,9 +1595,9 @@ class TestAtomicRebuild:
 
         from statcatlib.store.lance import LanceIndex
 
-        LanceIndex(tmp_path / "search", edition_id=_EDITION).add_bulk(self._rows("first", "premier"))
+        LanceIndex(tmp_path / "search", edition_id=_EDITION).add_bulk(self._rows("first", "premier"), pairs={})
         idx = LanceIndex(tmp_path / "search", edition_id=_NEXT_EDITION)
-        idx.add_bulk(self._rows("second", "deuxieme"))
+        idx.add_bulk(self._rows("second", "deuxieme"), pairs={})
         assert set(lancedb.connect(str(tmp_path / "search")).list_tables().tables) == {
             f"search_en__{self._NEXT_EDITION_HEX}",
             f"search_fr__{self._NEXT_EDITION_HEX}",
@@ -1608,7 +1611,7 @@ class TestAtomicRebuild:
         from statcatlib.store import lance as lance_mod
         from statcatlib.store.lance import LanceIndex
 
-        LanceIndex(tmp_path / "search", edition_id=_EDITION).add_bulk(self._rows("first", "premier"))
+        LanceIndex(tmp_path / "search", edition_id=_EDITION).add_bulk(self._rows("first", "premier"), pairs={})
         # The next edition rebuilds over the tables it carried from the first.
         idx = LanceIndex(tmp_path / "search", edition_id=_NEXT_EDITION)
 
@@ -1624,13 +1627,13 @@ class TestAtomicRebuild:
 
         monkeypatch.setattr(lance_mod._LanguageIndex, "create", exploding_create)
         with pytest.raises(RuntimeError, match="disk full"):
-            idx.add_bulk(self._rows("second", "deuxieme"))
+            idx.add_bulk(self._rows("second", "deuxieme"), pairs={})
 
         # Both languages still answer with the pre-rebuild content.
         reopened = LanceIndex(tmp_path / "search")
         assert sorted(reopened.languages) == ["en", "fr"]
-        assert [i for i, _ in reopened.bm25_search("first", lang="en")] == ["a"]
-        assert [i for i, _ in reopened.bm25_search("premier", lang="fr")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("first", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("premier", lang="fr")] == ["a"]
         assert reopened.bm25_search("second", lang="en") == []
         # The failed rebuild dropped the table it had built.
         assert reopened.orphan_tables() == []
@@ -1644,7 +1647,7 @@ class TestAtomicRebuild:
         name = f"search_fr__{self._NEXT_EDITION_HEX}"
         lancedb.connect(str(tmp_path / "search")).create_table(
             name,
-            data=_to_arrow([{"id": "b", "entity_type": "open", "lang": "fr", "text": "bonjour"}]),
+            data=_to_arrow([{"id": "b", "entity_type": "open", "lang": "fr", "document": "bonjour"}]),
         )
         return name
 
@@ -1654,7 +1657,7 @@ class TestAtomicRebuild:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         self._add_orphan(tmp_path)
 
         reopened = LanceIndex(tmp_path / "search")
@@ -1667,7 +1670,7 @@ class TestAtomicRebuild:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         orphan = self._add_orphan(tmp_path)
 
         reopened = LanceIndex(tmp_path / "search", edition_id=_NEXT_EDITION)
@@ -1675,7 +1678,7 @@ class TestAtomicRebuild:
         assert orphan not in set(lancedb.connect(str(tmp_path / "search")).list_tables().tables)
         # The live language is untouched.
         assert reopened.languages == ["en"]
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
     def test_a_rebuild_reclaims_orphans_first(self, tmp_path):
         """A table no manifest names is dropped by the next rebuild, not shipped with it.
@@ -1688,12 +1691,12 @@ class TestAtomicRebuild:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         orphan = self._add_orphan(tmp_path)
 
         reopened = LanceIndex(tmp_path / "search", edition_id=_NEXT_EDITION)
         assert reopened.orphan_tables() == [orphan]
-        reopened.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "again"}])
+        reopened.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "again"}], pairs={})
         assert reopened.orphan_tables() == []
         db = lancedb.connect(str(tmp_path / "search"))
         assert set(db.list_tables().tables) == {f"search_en__{self._NEXT_EDITION_HEX}"}
@@ -1703,13 +1706,13 @@ class TestAtomicRebuild:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         (tmp_path / "search" / "index.json").write_text("not json {")
 
         reopened = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         assert reopened.languages == []
         # And a rebuild recovers it.
-        reopened.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        reopened.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         assert reopened.languages == ["en"]
 
 
@@ -1725,24 +1728,24 @@ class TestIncrementalAddPersistence:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
-        idx.add([{"id": "b", "entity_type": "open", "lang": "fr", "text": "bonjour"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
+        idx.add([{"id": "b", "entity_type": "open", "lang": "fr", "document": "bonjour"}])
 
         reopened = LanceIndex(tmp_path / "search")
         assert reopened.languages == ["en", "fr"]
-        assert [i for i, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
     def test_upsert_into_existing_language_survives_reopen(self, tmp_path):
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
-        idx.add([{"id": "c", "entity_type": "open", "lang": "en", "text": "goodbye"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
+        idx.add([{"id": "c", "entity_type": "open", "lang": "en", "document": "goodbye"}])
 
         reopened = LanceIndex(tmp_path / "search")
-        assert [i for i, _ in reopened.bm25_search("goodbye", lang="en")] == ["c"]
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("goodbye", lang="en")] == ["c"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
 
     def test_search_after_reopen_writes_nothing(self, tmp_path):
         """A built index is used as found, not rebuilt by the first query.
@@ -1755,9 +1758,10 @@ class TestIncrementalAddPersistence:
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         idx.add_bulk(
             [
-                {"id": "a", "entity_type": "open", "lang": "en", "text": "hello"},
-                {"id": "b", "entity_type": "open", "lang": "fr", "text": "bonjour"},
-            ]
+                {"id": "a", "entity_type": "open", "lang": "en", "document": "hello"},
+                {"id": "b", "entity_type": "open", "lang": "fr", "document": "bonjour"},
+            ],
+            pairs={},
         )
         idx.build_fts_index()
 
@@ -1767,8 +1771,8 @@ class TestIncrementalAddPersistence:
 
         before = snapshot()
         reopened = LanceIndex(tmp_path / "search")
-        assert [i for i, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
-        assert [i for i, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
+        assert [i for i, _, _ in reopened.bm25_search("hello", lang="en")] == ["a"]
+        assert [i for i, _, _ in reopened.bm25_search("bonjour", lang="fr")] == ["b"]
         assert snapshot() == before
 
 
@@ -1786,10 +1790,11 @@ class TestIndexManifest:
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         idx.add_bulk(
             [
-                {"id": "a", "entity_type": "open", "lang": "en", "text": "hello"},
-                {"id": "b", "entity_type": "open", "lang": "fr", "text": "bonjour"},
-                {"id": "c", "entity_type": "open", "lang": "fr", "text": "salut"},
-            ]
+                {"id": "a", "entity_type": "open", "lang": "en", "document": "hello"},
+                {"id": "b", "entity_type": "open", "lang": "fr", "document": "bonjour"},
+                {"id": "c", "entity_type": "open", "lang": "fr", "document": "salut"},
+            ],
+            pairs={},
         )
         described = idx.describe()
         assert described["en"]["stemmer"] == "English"
@@ -1803,7 +1808,7 @@ class TestIndexManifest:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "ja", "text": "こんにちは"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "ja", "document": "こんにちは"}], pairs={})
         assert idx.describe()["ja"]["stemmer"] is None
 
     def test_manifest_written_without_an_embedding_model(self, tmp_path):
@@ -1856,7 +1861,7 @@ class TestManifestVersion:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         with w.catch_warnings():
             w.simplefilter("error")
             LanceIndex(tmp_path / "search")
@@ -1867,10 +1872,10 @@ class TestManifestVersion:
         from statcatlib.store.lance import LanceIndex
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         manifest = json.loads((tmp_path / "search" / "index.json").read_text())
         assert manifest["written_by"]
-        assert manifest["version"] == 3
+        assert manifest["version"] == 4
         assert manifest["edition_id"] == _EDITION
         assert "generation" not in manifest
 
@@ -1898,7 +1903,7 @@ def _row(i: int, *, embedding: list[float] | None) -> SearchRow:
         "id": f"r-{i:04d}",
         "entity_type": "open",
         "lang": "en",
-        "text": f"row {i}",
+        "document": f"row {i}",
         "embedding": embedding,
     }
 
@@ -1921,7 +1926,7 @@ class TestAnnThresholdCountsVectors:
     def test_count_embedded_ignores_rows_without_a_vector(self, tmp_path):
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         rows = [_row(i, embedding=_VEC if i % 10 == 0 else None) for i in range(100)]
-        idx.add_bulk(rows, embedding_dim=len(_VEC))
+        idx.add_bulk(rows, embedding_dim=len(_VEC), pairs={})
 
         lang = idx._langs["en"]
         assert lang.count_rows() == 100
@@ -1934,7 +1939,7 @@ class TestAnnThresholdCountsVectors:
         answered from the schema rather than by pushing the filter down.
         """
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
 
         lang = idx._langs["en"]
         assert lang.table is not None
@@ -1952,7 +1957,7 @@ class TestAnnThresholdCountsVectors:
         """
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         rows = [_row(i, embedding=_VEC if i < 10 else None) for i in range(300)]
-        idx.add_bulk(rows, embedding_dim=len(_VEC))
+        idx.add_bulk(rows, embedding_dim=len(_VEC), pairs={})
         idx.build_index()
 
         tbl = require_table(idx)
@@ -1961,7 +1966,7 @@ class TestAnnThresholdCountsVectors:
             f"ANN index built over a table that is 97% NULL vectors. Indices: {index_columns}"
         )
         # The FTS index is unaffected — those rows are still searchable.
-        assert ("text",) in index_columns
+        assert ("document",) in index_columns
 
     def test_sparse_table_is_indexed_exactly_rather_than_skipped(self, tmp_path):
         """A sparse table, 300 vectors in 6,000 rows, gets an exact index.
@@ -1975,7 +1980,7 @@ class TestAnnThresholdCountsVectors:
         """
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         rows = [_row(i, embedding=[(i % 97) / 100.0, *_VEC[1:]] if i < 300 else None) for i in range(6000)]
-        idx.add_bulk(rows, embedding_dim=len(_VEC))
+        idx.add_bulk(rows, embedding_dim=len(_VEC), pairs={})
         idx.build_index()
 
         tbl = require_table(idx)
@@ -1989,7 +1994,7 @@ class TestAnnThresholdCountsVectors:
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         rows = [_row(i, embedding=[(i % 97) / 100.0, *_VEC[1:]] if i < 300 else None) for i in range(6000)]
-        idx.add_bulk(rows, embedding_dim=len(_VEC))
+        idx.add_bulk(rows, embedding_dim=len(_VEC), pairs={})
         idx.build_index()
 
         manifest = json.loads((tmp_path / "search" / "index.json").read_text())
@@ -2003,7 +2008,7 @@ class TestAnnThresholdCountsVectors:
 
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         rows = [_row(i, embedding=_VEC if i < 10 else None) for i in range(300)]
-        idx.add_bulk(rows, embedding_dim=len(_VEC))
+        idx.add_bulk(rows, embedding_dim=len(_VEC), pairs={})
         idx.build_index()
 
         en = json.loads((tmp_path / "search" / "index.json").read_text())["languages"]["en"]
@@ -2014,7 +2019,7 @@ class TestAnnThresholdCountsVectors:
         """The gate must not become a blanket refusal to index."""
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
         rows = [_row(i, embedding=[(i % 7) / 10.0, *_VEC[1:]]) for i in range(300)]
-        idx.add_bulk(rows, embedding_dim=len(_VEC))
+        idx.add_bulk(rows, embedding_dim=len(_VEC), pairs={})
         idx.build_index()
 
         tbl = require_table(idx)
@@ -2042,7 +2047,7 @@ class TestQuantisedIndexWarning:
 
     def test_warns_when_the_vector_index_is_quantised(self, tmp_path, recwarn):
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(self._sparse_rows(300, 6000), embedding_dim=len(_VEC))
+        idx.add_bulk(self._sparse_rows(300, 6000), embedding_dim=len(_VEC), pairs={})
         idx.build_index()
         # Downgrade to what a pre-pinaxlib-5.24.0 build left behind.
         require_table(idx).create_index(
@@ -2056,7 +2061,7 @@ class TestQuantisedIndexWarning:
 
     def test_does_not_warn_on_a_current_index(self, tmp_path):
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(self._sparse_rows(300, 6000), embedding_dim=len(_VEC))
+        idx.add_bulk(self._sparse_rows(300, 6000), embedding_dim=len(_VEC), pairs={})
         idx.build_index()
 
         with warnings.catch_warnings():
@@ -2066,7 +2071,7 @@ class TestQuantisedIndexWarning:
     def test_does_not_warn_on_a_bm25_only_catalog(self, tmp_path):
         """No embedding column, no vector index, nothing to rebuild."""
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "text": "hello"}])
+        idx.add_bulk([{"id": "a", "entity_type": "open", "lang": "en", "document": "hello"}], pairs={})
         idx.build_index()
 
         with warnings.catch_warnings():
@@ -2080,7 +2085,7 @@ class TestQuantisedIndexWarning:
         and is in fact the most accurate configuration there is.
         """
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(self._sparse_rows(10, 300), embedding_dim=len(_VEC))
+        idx.add_bulk(self._sparse_rows(10, 300), embedding_dim=len(_VEC), pairs={})
         idx.build_index()
 
         with warnings.catch_warnings():
@@ -2092,7 +2097,7 @@ class TestQuantisedIndexWarning:
         fr_rows: list[SearchRow] = [{**r, "lang": "fr", "id": r["id"] + "-fr"} for r in rows]
         rows += fr_rows
         idx = LanceIndex(tmp_path / "search", edition_id=_EDITION)
-        idx.add_bulk(rows, embedding_dim=len(_VEC))
+        idx.add_bulk(rows, embedding_dim=len(_VEC), pairs={})
         idx.build_index()
         for lang in ("en", "fr"):
             require_table(idx, lang).create_index(
@@ -2248,7 +2253,7 @@ class TestQueryBuilderSearchLang:
 
     def test_search_defaults_to_the_english_table(self, tmp_path):
         store = self._french_store(tmp_path)
-        query = store.query(sc.BaseDataset).search("chômage")
+        query = store.query(sc.BaseDataset).search("chômage", lang="en")
         assert query.collect() == []
         assert not query.exists()
 
@@ -2259,7 +2264,7 @@ class TestQueryBuilderSearchLang:
             "chomage-qc",
             "loyers-qc",
         }
-        assert query.hybrid_search("chômage").collect() == []
+        assert query.hybrid_search("chômage", lang="en").collect() == []
 
     def test_lang_survives_later_chaining(self, tmp_path):
         store = self._french_store(tmp_path)
@@ -2312,19 +2317,19 @@ class TestSearchRanksOnlyFilteredDatasets:
 
     def test_the_filtered_match_ranks_past_the_pool(self, tmp_path):
         store = self._store(tmp_path)
-        unfiltered = store.query(sc.OpenDataset).search("population").collect()
+        unfiltered = store.query(sc.OpenDataset).search("population", lang="en").collect()
         assert "o'brien-census" not in [ds.identifier for ds in unfiltered]
 
     def test_search_finds_a_filtered_match_ranked_last(self, tmp_path):
-        query = self._store(tmp_path).query(sc.OpenDataset).filter(status="current").search("population")
+        query = self._store(tmp_path).query(sc.OpenDataset).filter(status="current").search("population", lang="en")
         assert [ds.identifier for ds in query.collect()] == ["o'brien-census"]
         assert query.count() == 1
         assert query.exists()
 
     def test_hybrid_search_finds_a_filtered_match_ranked_last(self, tmp_path):
         query = self._store(tmp_path, _FarFromCensusModel()).query(sc.OpenDataset).filter(status="current")
-        assert [ds.identifier for ds in query.hybrid_search("population").collect()] == ["o'brien-census"]
+        assert [ds.identifier for ds in query.hybrid_search("population", lang="en").collect()] == ["o'brien-census"]
 
     def test_paging_reaches_past_the_pool(self, tmp_path):
-        query = self._store(tmp_path).query(sc.OpenDataset).search("population")
+        query = self._store(tmp_path).query(sc.OpenDataset).search("population", lang="en")
         assert len(query.offset(240).limit(20).collect()) == self._N - 240

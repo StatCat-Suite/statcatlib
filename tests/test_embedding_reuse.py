@@ -118,7 +118,7 @@ class TestReuse:
             view = cat.product("p").view()
             rows = require_table(require_index(view), "en").to_arrow().to_pylist()
         for row in rows:
-            assert row["text_sha256"] == text_sha256("m", "", row["text"])
+            assert row["text_sha256"] == text_sha256("m", "", row["document"])
 
 
 class TestReencode:
@@ -149,7 +149,7 @@ class TestReencode:
             after = _vectors(cat)
             rows = require_table(require_index(cat.product("p").view()), "en").to_arrow().to_pylist()
         for row in rows:
-            assert list(row["embedding"]) == pytest.approx(model._one(row["text"]), abs=1e-6)
+            assert list(row["embedding"]) == pytest.approx(model._one(row["document"]), abs=1e-6)
         assert "not reused because no model_name was given" in caplog.text
         # The rows still carry the hash under the recorded name, for a later explicit build.
         assert {h for h, _ in after.values()} == {text_sha256("m", "", t) for t in first.encoded}

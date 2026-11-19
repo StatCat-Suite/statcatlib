@@ -22,6 +22,7 @@ from sdmxlib.model.urn import SdmxUrn
 
 import statcatlib as sc
 import statcatlib.query as q
+from statcatlib.sources.sdmx import _name_or_code
 from tests.conftest import ScratchStore, concept_of, cursor_of, open_scratch, scratch_store, seal_and_view, untyped
 
 pytestmark = pytest.mark.integration
@@ -291,7 +292,7 @@ class TestPublisherMapping:
 
 class TestFTS:
     def test_search_hits_title(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.search("Dataflow")
+        result = indexed_sdmx_store.search("Dataflow", lang="en")
         assert result.total >= 1
         # `search()` yields `Hit` wrappers; the entity is on `.payload`.
         # This read the entity directly and would have raised if the class
@@ -301,15 +302,15 @@ class TestFTS:
         )
 
     def test_search_hits_description(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.search("integration testing")
+        result = indexed_sdmx_store.search("integration testing", lang="en")
         assert result.total >= 1
 
     def test_search_no_match(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.search("xyzzy_nonexistent_token_1234")
+        result = indexed_sdmx_store.search("xyzzy_nonexistent_token_1234", lang="en")
         assert result.total == 0
 
     def test_query_with_search(self, indexed_sdmx_store: sc.EditionView):
-        result = indexed_sdmx_store.query(sc.StatisticalDataset).search("Dataflow").execute()
+        result = indexed_sdmx_store.query(sc.StatisticalDataset).search("Dataflow", lang="en").execute()
         assert result.total >= 1
 
 
@@ -1049,3 +1050,17 @@ class TestDimensionLabels:
         store, ds = self._store(with_concepts=False)
         labels = {d.id: d.label for d in store.dimensions(ds).collect()}
         assert labels == {"GEO": InternationalString(zxx="GEO"), "FREQ": InternationalString(zxx="FREQ")}
+
+
+class TestEmptyNames:
+    """An empty or whitespace text is no name (``docs/design/label-lookup.md``, LL-D13)."""
+
+    def test_an_agency_named_with_empty_text_is_labelled_by_its_id(self):
+        assert _name_or_code(InternationalString.of({"en": ""}), "TEST") == InternationalString(zxx="TEST")
+
+    def test_a_mixed_name_keeps_only_its_texts(self):
+        assert _name_or_code(InternationalString.of({"en": " ", "fr": "Pays"}), "GEO") == InternationalString(fr="Pays")
+
+    def test_an_absent_or_empty_dimension_name_is_the_id_as_a_code(self):
+        assert _name_or_code(None, "GEO") == InternationalString(zxx="GEO")
+        assert _name_or_code(InternationalString(), "GEO") == InternationalString(zxx="GEO")

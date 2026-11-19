@@ -105,7 +105,7 @@ class TestEstatSearch:
 
     def test_fts_search(self, estat_search_store: tuple[sc.EditionView, sc.Edition]):
         view, _ = estat_search_store
-        result = view.search("GDP")
+        result = view.search("GDP", lang="en")
         assert result.total >= 1
 
     def test_index_layout_records_every_language(self, estat_search_store: tuple[sc.EditionView, sc.Edition]):

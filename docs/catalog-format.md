@@ -10,7 +10,7 @@ specifies what it adds: the `statcat` schema in each edition's
 `metadata.duckdb`, the `search/` directory, the `statcat` extension section
 of the manifest, and the checks that hold the three to each other.
 
-It describes **statcat section format 3**, **search index manifest version 3**
+It describes **statcat section format 3**, **search index manifest version 4**
 and **embeddings sidecar version 4**, on sdmxlib's manifest format 3.0 and
 Inventory format 1.2. statcatlib's code is the reference implementation
 (`statcatlib.catalog`, `statcatlib.bundle`, `statcatlib.store.inventory`,
@@ -37,7 +37,7 @@ not repeated here.
       tables.ducklake                the DuckLake catalog for observations (sdmxlib)
       search/                        the search index (§4)
         index.json                   names the table for each language
-        search_<lang>__<edition>.lance   one LanceDB table per language
+        search_<lang>__<edition>.lance   one LanceDB table per primary or unpaired language tag
         embeddings.json              the embedding model's settings; only with vectors
       manifest.json                  sdmxlib's manifest, with a statcat section (§3), written last
   pending/<product_id>/<edition_id>.json   an uploaded edition waiting for the fold, in object storage only (§1.5)
@@ -259,10 +259,10 @@ languages, the section is:
   "format": 3,
   "kind": "data",
   "lifecycle": "revisable",
-  "statcatlib_version": "0.17.0",
+  "statcatlib_version": "0.21.0",
   "datasets": 1,
   "search": {
-    "index_version": 3,
+    "index_version": 4,
     "embedding_model": null,
     "languages": {
       "en": {"rows": 39, "stemmer": "English"},
@@ -293,7 +293,7 @@ languages, the section is:
 | --- | --- | --- |
 | `index_version` | required | The `version` of `search/index.json` (§4.1). |
 | `embedding_model` | required | The model id that produced the vectors, or `null` for a BM25-only index. |
-| `languages` | required | One `SearchLanguage` per language table, keyed by `sdmxlib.tag_alias`; empty for an edition with no rows to index. |
+| `languages` | required | One `SearchLanguage` per language table, keyed by `sdmxlib.tag_alias` of the table's primary or unpaired tag, as `index.json` keys it (§4.1); empty for an edition with no rows to index. |
 | `annotations` | required | The annotations the index was built from: an `IndexAnnotations` (§5). |
 
 ### `SearchLanguage`
@@ -407,7 +407,8 @@ edition that a live or embargoed data edition's `partial_of` cites
 
 ### 4.1 `index.json`
 
-`search/index.json` names the table that serves each language. It is the
+`search/index.json` names the table that serves each language, and the
+language pairs that route an alternate tag to its primary's table. It is the
 single source of truth for what a query reads: a reader MUST read the tables
 it names and no others.
 
@@ -415,10 +416,11 @@ it names and no others.
 
 | field | presence | meaning |
 | --- | --- | --- |
-| `version` | required | The manifest version: `3` for this page. |
+| `version` | required | The manifest version: `4` for this page. |
 | `written_by` | required | The version of statcatlib that wrote it. |
 | `edition_id` | required | The edition whose tables it names. |
-| `languages` | required | One `LanguageLayout` per language, keyed by `sdmxlib.tag_alias` (`fr-CA` is `fr_ca`). |
+| `languages` | required | One `LanguageLayout` per table, keyed by `sdmxlib.tag_alias` of its tag (`fr-CA` is `fr_ca`). Every key is a primary or unpaired tag: an alternate tag's rows sit in its primary's table (§4.2). |
+| `language_pairs` | required | Each alternate tag mapped to its primary tag, both in the form `sdmxlib.normalize_tag` returns, such as `{"en-t-fr": "en", "fr-t-en": "fr"}`; `{}` when the edition records no pairs. The edition's `statcat.language_alternate` rows at the time of the build. |
 | `annotations` | optional | The annotations the index was built from: an `IndexAnnotations` (§5). |
 
 #### `LanguageLayout`
@@ -444,12 +446,24 @@ first, so a sealed edition holds only the tables `index.json` names, and the
 
 A writer bumps `version` only when an existing field changes meaning or
 shape. Version 2 changed each `languages` entry; version 3 named tables by
-edition id in place of a generation number. A reader MUST refuse a manifest
-whose `version` is not the one it reads, or that records none, since it
+edition id in place of a generation number; version 4 indexes an alternate
+tag's rows in its primary's table, so a row's `lang` is no longer the table's
+tag, adds `language_pairs`, renames the `text` column to `document`, and adds
+`concept_name` and `concept_description` (§4.2). A reader MUST refuse a
+manifest whose `version` it does not read, or that records none, since it
 would serve that index wrongly. statcatlib raises `IncompatibleCatalogError`
 from `Product.view` and `Product.working_copy`, naming the version and the
 statcatlib release in `written_by`. Indexes of version 2 or lower exist only
 in layouts statcatlib 0.12 refuses (§1.4).
+
+statcatlib writes version 4 and reads versions 3 and 4. A version 3 index,
+written by statcatlib 0.20 or earlier, opens: its layout, row counts and
+carried vectors are read, and label, facet and query calls on the edition
+work. Every search over it raises `IncompatibleCatalogError`, naming the fix:
+open a working copy, call `build_index()`, and seal. A seal never keeps a
+version 3 index; it rebuilds it at version 4, also when no row changed. A
+version 3 manifest has no `language_pairs`, and its `languages` may list an
+alternate tag with a table of its own.
 
 ### 4.2 Tables and languages
 
@@ -457,6 +471,13 @@ Each language has its own table, because Tantivy takes one stemmer and one
 stopword list per full-text index. Per-language tables also give each
 language exact BM25 statistics. A query carries no language filter: the
 table it reads is the filter.
+
+A row's text is in one tag, and its `lang` column holds that tag. A row whose
+tag is an alternate in `language_pairs` MUST be written to its primary's
+table, so the `en` table of an open.canada.ca edition holds `en` and `en-t-fr`
+rows. A reader MUST route a query for an alternate tag to its primary's table.
+A producer writes one row per entity per tag its text holds, and none for
+`zxx`.
 
 A language with no Snowball stemmer in LanceDB, such as Chinese, Japanese,
 Korean or Catalan, MUST be indexed unstemmed, with `stemmer` `null`. A
@@ -471,10 +492,10 @@ Columns of other kinds hold an empty value.
 | --- | --- | --- |
 | `id` | string | every row |
 | `entity_type` | string | every row: `"code"`, `"concept"`, `"reference_metadata"`, or a dataset kind such as `"aggregate"` |
-| `lang` | string | every row: the table's language |
-| `text` | string | every row: the full-text target |
+| `lang` | string | every row: the stored tag of the row's text, the table's tag or one of its alternates |
+| `document` | string | every row: the full-text and embedding target, in the row's tag only |
 | `dimension_id` | string | code rows |
-| `dimension_label` | string | code rows |
+| `dimension_label` | string | code rows: the dimension's name in the row's tag, `""` when it has none |
 | `code_id` | string | code rows |
 | `code_label` | string | code rows |
 | `code_urn` | string | code rows |
@@ -484,16 +505,19 @@ Columns of other kinds hold an empty value.
 | `concept_urn` | string | concept rows |
 | `scheme_urn` | string | concept rows |
 | `concept_id` | string | concept rows |
+| `concept_name` | string | concept rows: the concept's name in the row's tag, `""` when it has none |
+| `concept_description` | string | concept rows: the concept's description in the row's tag, `""` when it has none |
 | `set_urn` | string | reference-metadata rows |
 | `attribute_path` | string | reference-metadata rows |
 | `section_title` | string | reference-metadata rows |
-| `text_sha256` | string | embedded rows: the SHA-256, lowercase hex, of the JSON array `[model, document_prefix, text]`; `NULL` for a row not embedded, or when no model name is known |
+| `text_sha256` | string | embedded rows: the SHA-256, lowercase hex, of the JSON array `[model, document_prefix, document]`; `NULL` for a row not embedded, or when no model name is known |
 | `embedding` | fixed-size list of float32 | every row, only when an embedding model is configured; `NULL` for a row not embedded |
 
 A producer MAY reuse a stored vector for a text whose `text_sha256` matches,
 in place of encoding it again; statcatlib's `build_index` does. A table
 written before the column was added has none, and a reader MUST accept it.
-Adding a column changes no existing field, so the manifest version stays 3.
+`text_sha256` keeps its name and value at version 4, so a producer reuses a
+version 3 table's vectors.
 
 ### 4.3 `embeddings.json`
 
@@ -595,7 +619,7 @@ and otherwise reports every finding:
 | datasets | `statcat.dataset` holds the section's `datasets` | continues |
 | dataflow links | every `sdmx_dataflow_urn` names a stored dataflow | continues, one finding per dataset |
 | search present | `search/` holds an index exactly when the section declares one, and `index.json` exists | continues |
-| index version | `index.json` records the version this build reads (§4.1) | skips the search rows below |
+| index version | `index.json` records a version this build reads, `3` or `4` (§4.1) | skips the search rows below |
 | declared version | the section's `index_version` is the version `index.json` records | continues |
 | languages | the index has exactly the declared languages | continues, one finding per language |
 | stemmers | each language's table uses the declared stemmer | continues |

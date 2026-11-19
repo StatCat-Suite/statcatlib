@@ -253,7 +253,9 @@ from CKAN resources. Language tags are kept as the portal sends them.
 open.canada.ca's `en-t-fr` and `fr-t-en` tags (English translated from French,
 French translated from English) stay separate from `en` and `fr`. Ingest
 records the pairs the portal declares, and `view.language_alternates()`
-lists them.
+lists them. `view.preference(lang="en")` gives `("en", "en-t-fr")`, a tag
+tuple a label call answers from either tag with, and search indexes
+`en-t-fr` text in the English table.
 
 ## 5. Direct lookup
 
@@ -413,14 +415,14 @@ matched entity as `hit.payload`; pass `kinds=("dataset",)` for datasets only.
 
 ```python
 wc.build_index()
-results = view.search("gross domestic product", kinds=("dataset",), limit=10)
+results = view.search("gross domestic product", kinds=("dataset",), lang="en", limit=10)
 for hit in results.items:
-    print(hit.score, hit.payload.title.get("en"))
+    print(hit.score, hit.lang, hit.payload.title.get(hit.lang))
 ```
 
-Each language is indexed separately, with its own stemmer. Pass `lang=` to
-search anything other than English — the default `"en"` will not match
-French text:
+Each language is indexed separately, with its own stemmer, and every search
+names its language with `lang=`. `hit.lang` is the tag of the text that
+matched. A French query searches the French table:
 
 ```python
 results = view.search("produit intérieur brut", lang="fr", limit=10)
@@ -433,7 +435,7 @@ To combine full-text search with structured filters, use `.search()` on a
 results = (
     view.query(sc.AggregateDataset)
     .filter(publisher="ESTAT")
-    .search("unemployment quarterly")
+    .search("unemployment quarterly", lang="en")
     .sort_by("modified", desc=True)
     .execute()
 )
@@ -518,7 +520,8 @@ rows = (
 )
 
 for row in rows:
-    print(row.identifier, row["title"])  # both access styles work
+    print(row.identifier, row["title"], row.title__lang)  # both access styles work
+print(rows.gaps)  # one Gap per dataset with no English title; its "title" is None
 
 # Single-column projection
 ids = view.query(sc.BaseDataset).scalars("identifier").values()
@@ -698,7 +701,7 @@ def discover(view: sc.EditionView) -> None:
     unemployment = (
         view.query(sc.AggregateDataset)
         .filter(q.has_code("geo", "DE"))
-        .search("unemployment")  # requires statcatlib[search]
+        .search("unemployment", lang="en")  # requires statcatlib[search]
         .all()
     )
 

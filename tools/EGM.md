@@ -2,11 +2,12 @@
 
 ## Overview
 
-`tools/` holds four stdlib-only Python scripts that `just ci` runs as gates.
-Each script prints its findings and exits 0 by default, and exits 1 on any
-finding under `--check`. The justfile runs each one as
-`uv run python tools/<script> --check`, and the `check` recipe runs all four
-with `lint`, `checkfmt` and `typecheck`.
+`tools/` holds four stdlib-only Python scripts that `just ci` runs as gates,
+and one script that builds a test fixture. Each gate prints its findings and
+exits 0 by default, and exits 1 on any finding under `--check`. The justfile
+runs each one as `uv run python tools/<script> --check`, and the `check`
+recipe runs all four with `lint`, `checkfmt` and `typecheck`.
+`make_v3_fixture.py` runs by hand and is no gate.
 
 ## Interface
 
@@ -38,6 +39,21 @@ with `lint`, `checkfmt` and `typecheck`.
   `any_baseline.txt`. Flags: `--check`, `--write`; with both, `--write` wins
   and the run exits 0. Public functions: `alias_names`, `count_file`,
   `survey`.
+- `make_v3_fixture.py` (GH-91, LL-D15 of `docs/design/label-lookup.md`):
+  writes `tests/fixtures/v3_catalog.tar.xz`, a catalog whose search indexes
+  are format 3, for `tests/test_index_v3.py`. It runs under statcatlib
+  0.20.0, the last release that writes format 3, from a directory outside
+  the repository so it cannot import this checkout's `src/`:
+  `env -u VIRTUAL_ENV uv run --no-project --isolated --with
+  "statcatlib[search]==0.20.0" python -I /path/to/tools/make_v3_fixture.py`.
+  The catalog holds product `sealed` (one live edition: an SDMX dataflow with
+  a coded dimension, its concepts and a reference-metadata set, and a
+  CKAN-shaped dataset with a publisher, spatial coverage and `en-t-fr` text)
+  and product `open` (a live edition and an unsealed working copy), indexed
+  with `StubEncoder`, a deterministic 8-dimension encoder, under the model
+  name `stub-encoder`, codes and reference metadata included, so the rows
+  carry vectors and `text_sha256`. It imports
+  statcatlib and is not stdlib-only.
 - `any_baseline.txt`: the `Any` ratchet baseline (currently `7`) after a
   3-line comment header.
 
@@ -70,7 +86,9 @@ with `lint`, `checkfmt` and `typecheck`.
 ## Side Effects
 
 - `count_any.py --write` overwrites `tools/any_baseline.txt`. No justfile recipe
-  passes `--write`. No other script writes a file.
+  passes `--write`. `make_v3_fixture.py` builds the catalog in a temporary
+  directory and replaces `tests/fixtures/v3_catalog.tar.xz`. No other script
+  writes a file.
 - `check_docstrings.py` runs `uv run pydoclint` as a subprocess, which may sync
   the uv environment.
 - `check_indexes.py` runs `git ls-files -z` and `git check-ignore -q uv.lock`,

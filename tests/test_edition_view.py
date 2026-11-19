@@ -102,15 +102,19 @@ class TestNameResolution:
 
     def test_a_scope_resolves_to_each_edition(self, two: tuple[sc.EditionView, sc.EditionView]) -> None:
         north, south = two
-        assert north.codelists[_CODELIST].label("en") == "Geography"
-        assert north.codelists[_CODELIST].batch_labels(["X"], lang="en") == {"X": "Nord"}
-        assert south.codelists[_CODELIST].batch_labels(["X"], lang="en") == {"X": "Sud"}
-        assert north.codelists.batch_labels([(_CODELIST, "X")], lang="en") == {(_CODELIST, "X"): "Nord"}
+        assert north.codelists[_CODELIST].label(lang="en") == sc.LocalisedString("Geography", "en")
+        assert dict(north.codelists[_CODELIST].batch_labels(["X"], lang="en")) == {
+            "X": sc.LocalisedString("Nord", "en")
+        }
+        assert dict(south.codelists[_CODELIST].batch_labels(["X"], lang="en")) == {"X": sc.LocalisedString("Sud", "en")}
+        assert dict(north.codelists.batch_labels([(_CODELIST, "X")], lang="en")) == {
+            (_CODELIST, "X"): sc.LocalisedString("Nord", "en")
+        }
 
     def test_code_map_resolves_to_each_edition(self, two: tuple[sc.EditionView, sc.EditionView]) -> None:
         north, south = two
-        assert north.code_map(_DATASET) == {"GEO": {"X": "Nord"}}
-        assert south.code_map(_DATASET) == {"GEO": {"X": "Sud"}}
+        assert dict(north.code_map(_DATASET, lang="en")["GEO"]) == {"X": sc.LocalisedString("Nord", "en")}
+        assert dict(south.code_map(_DATASET, lang="en")["GEO"]) == {"X": sc.LocalisedString("Sud", "en")}
 
     def test_annotation_fingerprint_resolves_to_each_edition(self, two: tuple[sc.EditionView, sc.EditionView]) -> None:
         north, south = two
@@ -138,9 +142,9 @@ class TestReadPath:
                 view = cat.product(product).view()
                 view.query(sc.BaseDataset).collect()
                 view.facets("publisher")
-                view.code_map(_DATASET)
+                view.code_map(_DATASET, lang="en")
                 if view.index_layout:
-                    view.search("north")
+                    view.search("north", lang="en")
                 cat.product(product).editions()
         assert _snapshot(root) == before
 
@@ -150,7 +154,7 @@ class TestReadPath:
         catalog.refresh()
         view = catalog.product("empty").view()
         assert view.index_layout == {}
-        assert view.search("anything").items == []
+        assert view.search("anything", lang="en").items == []
 
     def test_a_changed_manifest_is_refused(self, tmp_path: Path, catalog: sc.Catalog) -> None:
         edition = catalog.product("p").working_copy().seal()
@@ -200,11 +204,11 @@ class TestSearchAcrossEditions:
             )
         )
         b = wc.seal()
-        assert [d.identifier for d in old.query(sc.BaseDataset).search("aardvark").collect()] == ["a"]
-        assert old.query(sc.BaseDataset).search("badger").collect() == []
+        assert [d.identifier for d in old.query(sc.BaseDataset).search("aardvark", lang="en").collect()] == ["a"]
+        assert old.query(sc.BaseDataset).search("badger", lang="en").collect() == []
         catalog.refresh()
         new = catalog.product("p").view()
-        found = new.query(sc.BaseDataset).search("aardvark badger").collect()
+        found = new.query(sc.BaseDataset).search("aardvark badger", lang="en").collect()
         assert {d.identifier for d in found} == {"a", "b"}
         old_tables = {layout["table"] for layout in old.index_layout.values()}
         new_tables = {layout["table"] for layout in new.index_layout.values()}

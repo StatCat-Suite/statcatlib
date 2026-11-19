@@ -10,7 +10,11 @@
 from `store/blob.py`; `upload_edition`, `UploadReport` and `UploadCheckError` from `upload.py`; `WorkingCopyExistsError`,
 `WorkingCopyClosedError`, `SealCheckError`, `EditionCheckError` and `JournalError` from
 `store/working_copy.py`; `NotLoadedError` and `is_unloaded` from the store's
-sentinel module; and part of `expr` (listed below). It exposes `checks`,
+sentinel module; `Langs`, `Labels`, `RowList`, `ValueList`, `Gap`,
+`MissingTranslationError` and `UnknownCodeError` from `labels.py`;
+`LocalisedString`, `MissingTagError` and `InvalidTagError` from sdmxlib;
+`IncompatibleCatalogError` from `_errors.py`; and part of `expr` (listed
+below). It exposes `checks`,
 `query` and `urn` as submodules (`sc.checks`, `sc.query`, `sc.urn`). The
 top-level modules hold the parts that sit across subpackages: the catalog of
 products (`catalog.py`), the operational changes to its Inventory
@@ -20,8 +24,10 @@ checks behind `statcat verify-catalog` and `statcat doctor`
 (`diagnostics.py`), the copy of a sealed edition to object storage (`upload.py`), the
 jobs configuration the release and GC jobs read (`jobs.py`), the GC job (`gc.py`), the release job
 (`release.py`) and its access precondition (`access.py`), composable query filters
-(`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`)
-and test catalogs (`testing.py`).
+(`query.py`), traversal expressions (`expr.py`), SDMX URN builders (`urn.py`),
+test catalogs (`testing.py`), the label lookup types (`labels.py`), the SQL
+that picks a label over a tag tuple (`_lang_sql.py`) and the errors the store
+and the search index share (`_errors.py`).
 
 ## Interface
 
@@ -156,7 +162,10 @@ are imported from `statcatlib.admin`.
   change is made. `repr` shows `storage.location`. Direct construction raises
   `TypeError`.
 - Reads, each from a fresh `InventoryWriter.full()`: `embargo`,
-  `products()` (every recorded product, any state) and
+  `products()` (every recorded product, any state),
+  `lifecycle(product_id) -> Lifecycle | None` (the product's leaf
+  `lifecycle`, `None` for an unrecorded product; the re-index loop of
+  `docs/upgrading.md` passes it to `Product.working_copy`) and
   `editions(product_id) -> list[EditionEntry]` (every entry the newest version
   records, in id order; empty for an unrecorded product).
 - Changes, each requiring a non-blank `reason` (`ValueError` otherwise) and
@@ -554,19 +563,78 @@ read.
 
 - Filter constructors: `has_code`, `descendants_of`, `within`,
   `has_dimensions`, `distribution`, `has_service`, `publishes`, `serves`,
-  `has_spatial`, `has_spatial_uri`, `has_keyword`, `title_contains`,
-  `description_contains`. `has_spatial` also matches a region's concept
-  label; `has_spatial_uri` filters on a spatial facet key that is a URI.
+  `has_spatial`, `has_spatial_key`, `has_keyword`, `title_contains`,
+  `description_contains`. `has_spatial`, `has_keyword`, `title_contains`
+  and `description_contains` take a required `lang: Langs` and test the text
+  of the first tag the stored map holds (`_lang_sql.pick_map`).
+  `has_spatial` also matches a region's concept label. `has_spatial_key`
+  filters on a spatial facet key: a coverage's `uri`, or `sha256:` and the
+  hash of its label map (`_lang_sql.spatial_key_sql`); a `sha256:` key hashes
+  every `dataset_spatial` row the query reaches.
 - Filter nodes with `to_sql(ctx) -> (fragment, params)`: `MapFilter`,
   `ExistsFilter`, `SdmxCodelistFilter`, `SdmxCodeFilter`,
   `SdmxDimensionFilter`, `PositionalFilter`.
 - Data holders compiled by other nodes: `FieldFilter` (`field`, `op`,
   `value`), `MapCondition` (inside `ExistsFilter`), `CodeDescent` (inside
-  `SdmxCodeFilter`).
+  `SdmxCodeFilter`). `MapCondition.key` and `MapFilter.key` are tag tuples,
+  converted by `labels._as_langs`.
 - Outside `query.__all__`, used by `store/`: `CompileContext` (join state
   for filter compilation, subclassed as `_QueryContext` in `store/store.py`)
   and `label_norm_sql(expr)` (SQL that normalizes labels: accents,
   punctuation, whitespace).
+
+### `labels.py`
+
+The public module of label lookup types, exported from `statcatlib`
+(`docs/design/label-lookup.md`). A leaf: it imports sdmxlib, attrs and the
+standard library, and `Row` only under `TYPE_CHECKING`, so `query.py` and
+`store/` both import it without a cycle.
+
+- `type Langs = str | Sequence[str]`: a tag, or tags in order of preference.
+  `_as_langs(lang) -> tuple[str, ...]` (private) normalises each tag with
+  `sdmxlib.normalize_tag` and drops duplicates keeping the first; an empty
+  sequence raises `ValueError`, a non-`str` `TypeError`, a malformed tag
+  `InvalidTagError`.
+- `MissingTranslationError(entity, field, langs, held)`: a
+  `sdmxlib.MissingTagError`, so a `KeyError`; `__str__` is `no text for 'de'
+  in name of <urn>; held: 'en', 'fr'`; `__reduce__` keeps it picklable.
+- `UnknownCodeError(missing)`: a `KeyError`; `missing` holds the
+  `(codelist URN, code ID)` pairs in request order.
+- `Gap(key, entity, field, langs)`: frozen; `langs` is the `_as_langs` tuple.
+- `Labels[K]`: an immutable `Mapping[K, LocalisedString | None]` with
+  `gaps`; `RowList` (a `list[Row]`) and `ValueList` (a `list[object]`) with
+  `gaps`. Slicing, `copy()` and `+` return a plain `list`; `==` ignores
+  `gaps`.
+
+### `_lang_sql.py`
+
+Private SQL helpers for picking a label over a tag tuple. A leaf: attrs and
+the standard library only. Every helper uses positional `?` parameters and
+creates no macro, so it runs on a read-only connection.
+
+- `pick_map(column, langs) -> PickSql`: `text` is `COALESCE(col[?], …)` with
+  `text_params` the tags; `lang` is `CASE WHEN col[?] IS NOT NULL THEN ? …
+  END` with `lang_params` each tag twice. The first held tag answers; a held
+  `""` answers.
+- `localized_map(field) -> (sql, params)`: a subquery aggregating
+  `sdmx.localized_text` rows of *field* into one MAP per `owner_urn`
+  (column `m`), so codelist names go through `pick_map`.
+- `spatial_key(label) -> str | None`: the Python reference of the spatial
+  facet key (LL-D5). The map's non-`None` entries in ascending tag order,
+  each `<tag>=<utf-8 byte length>:<text>`, concatenated, UTF-8 encoded,
+  hashed with SHA-256: `sha256:<hex>`. `None` for `None`, an empty map or
+  all-`None` texts. `spatial_key_sql(alias)` is the same in DuckDB SQL,
+  `COALESCE(<alias>.uri, 'sha256:' || sha256(...))`; a test compares the
+  two over a corpus.
+- `SPATIAL_KEY_PREFIX = "sha256:"`.
+
+### `_errors.py`
+
+- `IncompatibleCatalogError(RuntimeError)`: a catalog or edition in a layout
+  or at a version this build does not read, or a search over a version 3
+  index. A leaf module importing nothing from statcatlib, so
+  `store/lance.py` can raise it; `statcatlib` and `store.store` re-export
+  it.
 
 ### `expr.py`
 
@@ -717,8 +785,14 @@ read.
   an unsealed edition or a seal journal entry, deletes only the directories
   of tombstoned editions, and deletes no Inventory root, leaf or tombstone.
   A dry run, the default, changes nothing.
-- `MapCondition`, `MapFilter` and `has_spatial` pass their language tag
-  through `sdmxlib.normalize_tag`.
+- `MapCondition`, `MapFilter` and every filter constructor taking `lang`
+  pass their tags through `labels._as_langs`, so each tag is normalised and
+  none defaults to English.
+- No `lang` parameter in `statcatlib` has a string default
+  (`tests/test_language_tags.py` walks the AST). Label calls take `Langs`;
+  search takes one tag.
+- `labels.py`, `_lang_sql.py` and `_errors.py` import nothing from
+  `statcatlib` at run time.
 - `Expr` nodes are frozen attrs objects and run no SQL themselves.
 
 ## Side Effects

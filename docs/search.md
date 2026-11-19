@@ -15,8 +15,10 @@ copy returns empty results until `wc.build_index()` runs.
 
 ## What is indexed
 
-`build_index()` writes one search row per entity per language, into the
-edition's search index, a LanceDB directory:
+`build_index()` writes one search row per entity per language tag its text
+holds, into the edition's search index, a LanceDB directory. Text under `zxx`,
+a code stored as text, gets no row. A row's document holds that tag's text
+only:
 
 | Entity kind | Row text | Searched by |
 | --- | --- | --- |
@@ -38,7 +40,11 @@ geography codelist index in seconds.
 
 ## One table per language
 
-Each language has its own table, with its own full-text index:
+Each language has its own table, with its own full-text index. A row under an
+alternate tag goes to its primary tag's table: with open.canada.ca's pairs,
+`en-t-fr` rows sit in the `en` table and `fr-t-en` rows in the `fr` table
+(`wc.add_language_alternates`). Each row keeps its own tag in its `lang`
+column.
 
 - **Each table uses its language's stemmer.** French text is stemmed with
   French rules, so a query for "canadien" matches "canadiennes"; English text
@@ -48,8 +54,16 @@ Each language has its own table, with its own full-text index:
 - **BM25 statistics are exact per language.** BM25 weighs a term by how rare it
   is. Pooled into one table, a term common in French looked rare beside the
   English documents, and ranked too high.
-- **The table is the language filter.** A query reads only the table for its
-  `lang`, which defaults to `"en"`. A French query needs `lang="fr"`.
+- **The table is the language filter.** Every search call takes one tag as
+  `lang`, with no default, and reads only that tag's table, or its primary's
+  for an alternate tag. A French query needs `lang="fr"`; `lang="en"` and
+  `lang="en-t-fr"` both read the `en` table.
+
+Each hit's `lang` is the stored tag of the row that matched, so a search with
+`lang="en"` can return a hit with `lang="en-t-fr"`. An entity held under two
+tags of one pair appears once, with the tag of its better-ranked row.
+`SearchResult.langs` maps each dataset identifier of a `query(...).search()`
+or `hybrid_search()` to the same tag.
 
 `EditionView.index_layout` reports each language's table, row count and stemmer:
 
@@ -102,12 +116,12 @@ with sc.Catalog.create("my-catalog", exist_ok=True) as cat:
     with cat.product("14100287").working_copy() as wc:
         ...  # ingest into wc
         wc.build_index(model)
-        hits = wc.view().datasets.find("people moving between provinces", mode="vector")
+        hits = wc.view().datasets.find("people moving between provinces", mode="vector", lang="en")
         wc.seal()  # rebuilds the index with the same model
 
 with sc.Catalog.open("my-catalog") as cat:
     view = cat.product("14100287").view(embedding_model=model)
-    hits = view.datasets.find("people moving between provinces", mode="vector")
+    hits = view.datasets.find("people moving between provinces", mode="vector", lang="en")
 ```
 
 `build_index()` records the model's name and its query and document prefixes
@@ -145,11 +159,13 @@ default (`rrf_k`).
 Fusion uses ranks only, so it needs no way to compare a BM25 score with a
 vector distance, and no weight between the two. A result near the top of both
 rankings outscores one that leads a single ranking. Each hit's `source` says
-which evidence found it: `"bm25"`, `"vector"`, or `"hybrid"` for both.
+which evidence found it: `"bm25"`, `"vector"`, or `"hybrid"` for both. An
+entity both rankings found keeps the row of the ranking that placed it higher,
+BM25 on a tie, and that row gives the hit's `lang`.
 
 ```python
-for hit in view.datasets.find("labour market monthly data", mode="hybrid", limit=20).items:
-    print(hit.score, hit.source, hit.payload.identifier)
+for hit in view.datasets.find("labour market monthly data", mode="hybrid", lang="en", limit=20).items:
+    print(hit.score, hit.source, hit.lang, hit.payload.identifier)
 ```
 
 `view.search()` uses the same fusion a second way: it runs BM25 over every
@@ -166,7 +182,7 @@ import statcatlib.query as q
 results = (
     view.query(sc.AggregateDataset)
     .filter(q.has_code("GEO", "ON"), status="current")
-    .hybrid_search("unemployment by region")
+    .hybrid_search("unemployment by region", lang="en")
     .limit(20)
     .execute()
 )
@@ -185,8 +201,8 @@ with no `.filter()` does, statcatlib sends no list. On a 50,000-dataset index a
 list of all 50,000 identifiers made a BM25 query take 140 ms, against 2 ms
 without one; a list of 1,000 took 6 ms.
 
-Both methods take `lang`, which names the table to search and defaults to
-`"en"`. A French query with filters needs `lang="fr"`:
+Both methods take `lang`, which names the table to search. A French query with
+filters needs `lang="fr"`:
 
 ```python
 view.query(sc.AggregateDataset).filter(q.has_code("GEO", "QC")).search("chômage", lang="fr")
@@ -214,4 +230,9 @@ of date until the next build. Opening an edition never rebuilds its index,
 because a sealed edition does not change.
 
 The format of the index directory is specified in the
-[Catalog Format](catalog-format.md#4-the-search-index).
+[Catalog Format](catalog-format.md#4-the-search-index). This release writes
+format 4. It opens a format 3 index, written by statcatlib 0.20 or earlier, for
+labels, facets and queries, and every search over it raises
+`IncompatibleCatalogError` until the product is re-indexed: open a working
+copy, call `build_index()` and seal
+([Upgrading](upgrading.md#stored-data)).

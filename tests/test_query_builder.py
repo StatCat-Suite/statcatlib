@@ -21,7 +21,7 @@ class TestChaining:
         which the `store` fixture does not build. Unlike `EditionView.search`,
         this yields the entities themselves, not `Hit` wrappers.
         """
-        result = indexed_store.query(sc.BaseDataset).filter(publisher="ECB").search("exchange").execute()
+        result = indexed_store.query(sc.BaseDataset).filter(publisher="ECB").search("exchange", lang="en").execute()
         assert any(ds.identifier == "EXR" for ds in result.items)
 
     def test_sort_by_identifier(self, store):
@@ -232,7 +232,7 @@ class TestScalarsProjection:
     def test_scalars_map_column(self, store):
         titles = store.query(sc.BaseDataset).scalars("title", lang="en").values()
         assert len(titles) > 0
-        assert all(isinstance(t, str) for t in titles)
+        assert all(isinstance(t, sc.LocalisedString) and t.lang == "en" for t in titles)
 
     def test_scalars_map_requires_lang(self, store):
         with pytest.raises(ValueError, match="lang is required"):

@@ -184,15 +184,15 @@ class TestAltLabelBlending:
         store = _store_with_sdmx()
         items = store._store._collect_code_texts()
         ontario = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
-        assert "Province of Ontario" in ontario["text"]
+        assert "Province of Ontario" in ontario["document"]
 
     def test_alt_label_suppressed_when_disabled(self) -> None:
         store = _store_with_sdmx()
         items = store._store._collect_code_texts(include_alt_labels=False)
         ontario = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
-        assert "Province of Ontario" not in ontario["text"]
+        assert "Province of Ontario" not in ontario["document"]
         # Base prefLabel still present.
-        assert "Ontario" in ontario["text"]
+        assert "Ontario" in ontario["document"]
 
     def test_untagged_title_still_reaches_every_language(self) -> None:
         """Back-compat: a title carries no language, so the only safe
@@ -202,8 +202,8 @@ class TestAltLabelBlending:
         items = store._store._collect_code_texts()
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
-        assert "Province of Ontario" in on_en["text"]
-        assert "Province of Ontario" in on_fr["text"]
+        assert "Province of Ontario" in on_en["document"]
+        assert "Province of Ontario" in on_fr["document"]
 
     def test_localised_alt_label_is_per_language_not_smeared(self) -> None:
         """A language-tagged synonym belongs to its own language's row
@@ -213,17 +213,17 @@ class TestAltLabelBlending:
         items = store._store._collect_code_texts()
         ca_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "CA")
         ca_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "CA")
-        assert "the Dominion" in ca_en["text"]
-        assert "le Dominion" in ca_fr["text"]
-        assert "le Dominion" not in ca_en["text"]
-        assert "the Dominion" not in ca_fr["text"]
+        assert "the Dominion" in ca_en["document"]
+        assert "le Dominion" in ca_fr["document"]
+        assert "le Dominion" not in ca_en["document"]
+        assert "the Dominion" not in ca_fr["document"]
 
     def test_localised_alt_labels_are_suppressed_when_disabled(self) -> None:
         store = _store_with_sdmx()
         items = store._store._collect_code_texts(include_alt_labels=False)
         ca_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "CA")
-        assert "le Dominion" not in ca_fr["text"]
-        assert "Canada" in ca_fr["text"]
+        assert "le Dominion" not in ca_fr["document"]
+        assert "Canada" in ca_fr["document"]
 
 
 def _attach_footnote(
@@ -299,11 +299,11 @@ class TestReferenceMetadataBlend:
         items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
-        assert "committed to protect privacy" in on_en["text"]
-        assert "engagé à protéger la vie privée" in on_fr["text"]
+        assert "committed to protect privacy" in on_en["document"]
+        assert "engagé à protéger la vie privée" in on_fr["document"]
         # The bug: the French row carried the English footnote verbatim.
-        assert "committed to protect privacy" not in on_fr["text"]
-        assert "engagé à protéger la vie privée" not in on_en["text"]
+        assert "committed to protect privacy" not in on_fr["document"]
+        assert "engagé à protéger la vie privée" not in on_en["document"]
 
     def test_scalar_blend_reaches_every_language(self) -> None:
         """Back-compat: a scalar carries no language, so the only safe
@@ -318,8 +318,8 @@ class TestReferenceMetadataBlend:
         items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
-        assert "https://example.org/notes/2021" in on_en["text"]
-        assert "https://example.org/notes/2021" in on_fr["text"]
+        assert "https://example.org/notes/2021" in on_en["document"]
+        assert "https://example.org/notes/2021" in on_fr["document"]
 
     def test_localised_value_does_not_also_contribute_its_scalar(self) -> None:
         """A value contributes to exactly one bucket — otherwise a
@@ -335,9 +335,9 @@ class TestReferenceMetadataBlend:
         items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
-        assert "localised note" in on_en["text"]
-        assert "stale fallback" not in on_en["text"]
-        assert "stale fallback" not in on_fr["text"]
+        assert "localised note" in on_en["document"]
+        assert "stale fallback" not in on_en["document"]
+        assert "stale fallback" not in on_fr["document"]
 
     def test_monolingual_catalog_indexes_as_before(self) -> None:
         """A value localised in one language only must still reach that
@@ -352,9 +352,9 @@ class TestReferenceMetadataBlend:
         items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
-        assert "english only note" in on_en["text"]
+        assert "english only note" in on_en["document"]
         # Not smeared into French just because French has no value.
-        assert "english only note" not in on_fr["text"]
+        assert "english only note" not in on_fr["document"]
 
     def test_max_chars_budget_applies_per_language(self) -> None:
         store = _store_with_sdmx()
@@ -368,9 +368,9 @@ class TestReferenceMetadataBlend:
         items = store._store._collect_code_texts(reference_metadata_blends=blends)
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
-        assert "A" * 10 in on_en["text"]
-        assert "A" * 11 not in on_en["text"]
-        assert "B" * 10 in on_fr["text"]
+        assert "A" * 10 in on_en["document"]
+        assert "A" * 11 not in on_en["document"]
+        assert "B" * 10 in on_fr["document"]
 
     def test_codes_without_reference_metadata_unaffected(self) -> None:
         store = _store_with_sdmx()
@@ -382,8 +382,8 @@ class TestReferenceMetadataBlend:
         )
         items = store._store._collect_code_texts(reference_metadata_blends=self._BLEND)
         ca_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "CA")
-        assert "ontario note" not in ca_en["text"]
-        assert "Canada" in ca_en["text"]
+        assert "ontario note" not in ca_en["document"]
+        assert "Canada" in ca_en["document"]
 
 
 class TestSearchContextBlending:
@@ -398,9 +398,9 @@ class TestSearchContextBlending:
         store = _store_with_sdmx()
         items = store._store._collect_code_texts()
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
-        assert "Geographic areas" in on_en["text"]
+        assert "Geographic areas" in on_en["document"]
         # Leaf label still leads the text (a bare "Ontario" query stays correct).
-        assert on_en["text"].index("Ontario") < on_en["text"].index("Geographic areas")
+        assert on_en["document"].index("Ontario") < on_en["document"].index("Geographic areas")
 
     def test_context_is_per_language_not_smeared(self) -> None:
         store = _store_with_sdmx()
@@ -408,26 +408,26 @@ class TestSearchContextBlending:
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
         on_fr = next(r for r in items if r["lang"] == "fr" and r["code_id"] == "ON")
         # Each language gets its OWN-language context, with no cross-leak.
-        assert "Régions géographiques" in on_fr["text"]
-        assert "Régions géographiques" not in on_en["text"]
-        assert "Geographic areas" not in on_fr["text"]
+        assert "Régions géographiques" in on_fr["document"]
+        assert "Régions géographiques" not in on_en["document"]
+        assert "Geographic areas" not in on_fr["document"]
 
     def test_context_suppressed_when_types_empty(self) -> None:
         store = _store_with_sdmx()
         items = store._store._collect_code_texts(context_annotation_types=())
         on_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "ON")
-        assert "Geographic areas" not in on_en["text"]
+        assert "Geographic areas" not in on_en["document"]
         # Base prefLabel + altLabel are unaffected.
-        assert "Ontario" in on_en["text"]
-        assert "Province of Ontario" in on_en["text"]
+        assert "Ontario" in on_en["document"]
+        assert "Province of Ontario" in on_en["document"]
 
     def test_codes_without_context_annotation_unaffected(self) -> None:
         store = _store_with_sdmx()
         items = store._store._collect_code_texts()
         # CA carries no searchContext — its text is just the label path.
         ca_en = next(r for r in items if r["lang"] == "en" and r["code_id"] == "CA")
-        assert "Canada" in ca_en["text"]
-        assert "Geographic areas" not in ca_en["text"]
+        assert "Canada" in ca_en["document"]
+        assert "Geographic areas" not in ca_en["document"]
 
 
 def _store_with_excluded_leaf() -> ScratchStore:
@@ -529,7 +529,7 @@ class TestCodesScopeSemantic:
     def test_vector_mode_requires_model(self, tmp_path: pathlib.Path) -> None:
         store = _store_with_sdmx(tmp_path)
         with pytest.raises(RuntimeError, match="embedding_model"):
-            store.codes.find("anything", mode="vector")
+            store.codes.find("anything", mode="vector", lang="en")
 
 
 class TestCodesScopeHybrid:
@@ -555,4 +555,4 @@ class TestCodesScopeHybrid:
     def test_hybrid_mode_requires_model(self, tmp_path: pathlib.Path) -> None:
         store = _store_with_sdmx(tmp_path)
         with pytest.raises(RuntimeError, match="embedding_model"):
-            store.codes.find("anything", mode="hybrid")
+            store.codes.find("anything", mode="hybrid", lang="en")

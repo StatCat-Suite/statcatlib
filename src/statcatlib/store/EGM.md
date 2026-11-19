@@ -54,12 +54,18 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
 - `EditionView`: built only by `Product.view` and `WorkingCopy.view`; direct
   construction raises `TypeError`. It has no write method.
   - Reads: `get(cls, id)`, `query(cls, **filters) -> QueryBuilder`,
-    `search(text, *, kinds=, lang=, limit=, offset=, operator=, fuzzy=,
-    rrf_k=, per_kind_oversample=) -> SearchResult`, `facets(*fields)`,
-    `agent_labels()`, `concept_labels()`, `spatial_labels()`,
-    `get_concept_scheme()`, `get_concept()`, `code_map()`, `codelist_for()`,
-    `get_structure()`, `metadata_for()`, `metadata_report()`,
-    `metadata_targets()`, `language_alternates() -> list[Row]`.
+    `search(text, *, kinds=, lang, limit=, offset=, operator=, fuzzy=,
+    rrf_k=, per_kind_oversample=) -> SearchResult` (`lang` one required
+    tag), `facets(*fields)`, `agent_labels(*, lang)`,
+    `concept_labels(*, lang, scheme_uri=None)`, `spatial_labels(*, lang)`
+    (each `-> Labels[str]`), `get_concept_scheme()`, `get_concept()`,
+    `code_map(dataset_id, *, lang) -> dict[str, Labels[str]]`,
+    `codelist_for()`, `get_structure()`, `metadata_for()`,
+    `metadata_report()`, `metadata_targets()`,
+    `language_alternates() -> list[Row]`, `preference(*, lang) ->
+    tuple[str, ...]` (the tag, its primary, then alternates in tag order) and
+    `language_counts() -> list[Row]` (`table`, `column`, `lang`, `texts` per
+    stored text column and tag). Label `lang` parameters take `Langs`.
   - Scope entry points: `themes`, `concept_schemes`, `codes`, `concepts`,
     `datasets`, `reference_metadata`, `codelists`, `dataset(id)`,
     `codelist(urn)`, `dimensions(ds)`.
@@ -73,17 +79,27 @@ constants, `IncompatibleCatalogError`, `IncompatibleIndexError`, `Row` and
   - `_cursor()` is private, for statcatlib's tests that run raw SQL.
 - `VIEW_ATTRIBUTES`: the public attribute names of `EditionView`.
   `Catalog.__getattr__` names them in its guided errors.
-- `QueryBuilder[T]` with modifiers `filter`, `from_ids`, `search`, `hybrid_search`, `include`, `full`, `sort_by`, `limit`, `offset`, `with_facets`, `select`, `scalars`, and terminals `execute`, `collect`, `all`, `first`, `one`, `rows`, `row`, `values`, `value`, `count`, `exists`.
-- `SearchResult[T]`, `Hit[T]`, `CodeHit`, `ConceptHit`, `ReferenceMetadataHit`.
-- `CodesScope`, `ConceptsScope`, `DatasetsScope`, `ReferenceMetadataScope`, each with `find(...)`; the first two also have `get(urn)`.
+- `QueryBuilder[T]` with modifiers `filter`, `from_ids`, `search`, `hybrid_search`, `include`, `full`, `sort_by`, `limit`, `offset`, `with_facets`, `select`, `scalars`, and terminals `execute`, `collect`, `all`, `first`, `one`, `rows`, `row`, `values`, `value`, `count`, `exists`. `search` and `hybrid_search` take one required tag; `select`, `scalars` and `sort_by` take `lang: Langs | None`, required for a MAP column. A selected MAP column gives `<col>` and `<col>__lang`; `rows()` returns a `RowList` and `values()` a `ValueList`, each with `gaps`; a MAP scalar is `LocalisedString | None`.
+- `SearchResult[T]` (`items`, `total`, `facets`, `offset`, `scores`, `langs`: identifier to matched tag for a `QueryBuilder` search), `Hit[T]` (`lang` required: the stored tag of the matched row), `CodeHit` (`code_label: LocalisedString`, `dimension_label: LocalisedString | None`, `document`), `ConceptHit` (`name`, `description`: `LocalisedString | None`, `document`), `ReferenceMetadataHit` (`document`). A hit reads `""` in a row column as `None`.
+- `CodesScope`, `ConceptsScope`, `DatasetsScope`, `ReferenceMetadataScope`, each with `find(..., lang)` (one required tag); the first two also have `get(urn, *, lang: Langs)`, which reads no search row and raises `MissingTranslationError` for a name with none of the tags.
 - `CodelistIndexPolicy`, `ReferenceMetadataBlend` configure `build_index`.
 - `EmbeddingMetadata` describes the model recorded in `embeddings.json`.
 - `VALID_INCLUDE_RELS`: the 18 relationship names accepted by `include()`.
 - `SEARCH_ANNOTATION_TYPES`, `SEARCH_CONTEXT_ANNOTATION_TYPE` (`statcat:searchContext`), `SEARCH_EXCLUDE_ANNOTATION_TYPE` (`statcat:searchExclude`).
-- `IncompatibleCatalogError` (`RuntimeError`): a legacy layout, a
+- `IncompatibleCatalogError` (`RuntimeError`, defined in
+  `../_errors.py` and re-exported here): a legacy layout, a
   `manifest.json` the Inventory did not record, another `statcat` schema
-  version, a search manifest of another version, or a filesystem without
-  hard links. `IncompatibleIndexError` (`ValueError`).
+  version, a search manifest of a version outside `lance._READABLE_VERSIONS`,
+  a search over a version 3 index, or a filesystem without hard links.
+  `IncompatibleIndexError` (`ValueError`).
+- `_Store._search_index()`: the `LanceIndex` every search entry point reads,
+  `None` without lancedb or an index; it calls `check_searchable()` first,
+  before any early return.
+- `_Store._id_labels(sql, params, langs, field_name) -> Labels[str]` backs
+  `agent_labels` and `concept_labels`; the facet key of `facets("spatial")`
+  and `spatial_labels` is `_lang_sql.spatial_key_sql("ds")`. `spatial_labels`
+  answers from the key's concept and every coverage under it, ordered by the
+  tag's position in `lang`, then concept before coverage, then text.
 - Module-level helpers used elsewhere in the package: `statcat_schema_mismatch(conn)`, `annotation_fingerprint(conn, types)`, `EmbeddingModel` protocol, `as_vector`, `as_vectors`, and `ASYMMETRIC_MODEL_PREFIXES` (default query/document prefixes per embedding model, read by `cli`).
 - Row `NamedTuple`s for batch hydration: `AgentRow`, `DataServiceRow`, `DistributionRow`, `DatasetRow`.
 
@@ -320,7 +336,8 @@ Imports only sdmxlib, so `inventory.py` can import it.
 ### `scopes.py`
 
 - `ThemesScope`, `SchemeScope` (`resolve`, `labels`, `datasets`, `enrich`, `filter`, `sort_by`), `ConceptScope`. `ConceptSchemesScope` is an alias of `ThemesScope`; `ConceptSchemeScope` is an alias of `SchemeScope`. New code should use the SKOS names.
-- `CodelistsScope` (`lang`, `filter(text_contains=)`, `collect`, `rows`, `batch_labels`, `enrich`), `CodelistScope` (`lang`, `collect`, `rows`, `count`, `label`, `batch_labels`, `enrich`, `datasets`), `CodeScope` (`dataset_count`, `datasets`).
+- `CodelistsScope` (`filter(text_contains=, lang=)`, `collect`, `rows(lang=)`, `batch_labels(pairs, lang=)`, `enrich`), `CodelistScope` (`collect`, `rows(lang=)`, `count`, `label(lang=)`, `batch_labels(code_ids, lang=)`, `enrich`, `datasets`), `CodeScope` (`dataset_count`, `datasets`). No codelist scope has a `.lang()` setter (LL-D4).
+- Label terminals: `label` returns `LocalisedString | None` (`None` for a codelist `sdmx.artefact` does not hold, or no `sdmx` schema) and raises `MissingTranslationError`; `batch_labels` returns `Labels` in request order and raises `UnknownCodeError` for codes not held; `rows` gives `label` and `label__lang` through `_label_rows`, which adds a `Gap` for each `None` label. Codelist names come through `_lang_sql.localized_map("name")`, code names from `sdmx.code.name`, both picked by `_lang_sql.pick_map`. An enrich alias equal to an entity column or a `__lang` column raises `ValueError`.
 - `DimensionsScope`, `DimensionScope` (`codelist`), `DimensionInfo`.
 - The lists above name the main methods; see each class for the full set.
 - `DatasetScope` (`codelists`, `themes`, `related(edge)`, `upstream()`, `downstream()`, `lineage_records()`).
@@ -337,8 +354,10 @@ Imports only sdmxlib, so `inventory.py` can import it.
 
 ### `lance.py`
 
-- `LanceIndex(path, *, edition_id=None)` routes by language over one `_LanguageIndex` table per language: `add`, `add_bulk`, `drop_carried`, `bm25_search`, `bm25_search_rows`, `search`, `search_rows`, `build_fts_index`, `build_index`, `carried_vectors`, `describe`, `languages`, `table_for`, `count_rows`, `orphan_tables`, `discard_orphans`, `unreadable_version` (static), and the properties `version` and `annotations`. *edition_id* names the edition whose tables a rebuild writes; `None` opens a sealed edition's index for reading only.
-- `text_sha256(model, prefix, text)`: the SHA-256 of the JSON array `[model, prefix, text]`, recorded in each embedded row's `text_sha256` column.
+- `LanceIndex(path, *, edition_id=None)` routes by language over one `_LanguageIndex` table per primary or unpaired tag: `add`, `add_bulk(rows, *, pairs, ...)`, `drop_carried`, `bm25_search`, `bm25_search_rows`, `search`, `search_rows`, `build_fts_index`, `build_index`, `carried_vectors`, `describe`, `languages`, `table_for`, `table_for_key`, `count_rows`, `orphan_tables`, `discard_orphans`, `check_searchable`, `unreadable_version` (static), and the properties `version`, `language_pairs` and `annotations`. *edition_id* names the edition whose tables a rebuild writes; `None` opens a sealed edition's index for reading only. Every search method takes one required `lang`; `bm25_search` and `search` return `(id, score, lang)` triples.
+- Format 4 (`_MANIFEST_VERSION = 4`, `_READABLE_VERSIONS = {3, 4}`): `index.json` records `language_pairs` (`{alternate: primary}`, normalised tags, `{}` when none) and keys `languages` by `tag_alias` of primary or unpaired tags. `_by_language(rows, pairs)` returns `alias -> (tag, rows)`, grouping an alternate's rows with its primary's; `_table_name` takes the tag and aliases it once. `_for(lang)` calls `check_searchable()`, normalises the tag (`InvalidTagError` for a malformed one), maps an alternate to its primary through `language_pairs`, and returns that table or `None`. `add()` routes through the stored pairs. `table_for_key(key)` takes an `index.json` key, for `bundle._check_language`. The table column `text` is `document` (`_DOCUMENT_COLUMN`), and concept rows carry `concept_name` and `concept_description`; a row's `lang` is its own tag.
+- `bm25_search_rows` and `search_rows` ask LanceDB for `limit × (1 + n)` rows, `n` the alternates of the table's primary, deduplicate on the entity without its tag (code `(id, dimension_id, code_urn or code_id)`, concept `concept_urn`, reference metadata `id`), keeping the best-ranked row, then cut to `limit`.
+- `text_sha256(model, prefix, text)`: the SHA-256 of the JSON array `[model, prefix, text]`, with *text* the row's `document`, recorded in each embedded row's `text_sha256` column.
 - `LanguageLayout`, `IndexAnnotations`, `SearchRow`, `Bm25HitRow`, `VectorHitRow` (TypedDicts), `make_schema(*, embedding_dim)`.
 
 ### Small modules
@@ -356,7 +375,8 @@ Imports only sdmxlib, so `inventory.py` can import it.
   (`IncompatibleCatalogError` when `statcat._meta` records another version
   than `SCHEMA_VERSION`, or none); with a `search_dir`,
   `_refuse_unreadable_index` (`IncompatibleCatalogError` when `index.json`
-  records a version other than `lance._MANIFEST_VERSION`, or none), opening
+  records a version outside `lance._READABLE_VERSIONS`, or none; the message
+  names the readable versions and the re-index steps), opening
   the LanceDB index, the annotation warning, and restoring the embedding
   metadata from `embeddings.json`. Before it, sdmxlib's
   `LocalRegistry.edition` (view) and `LocalRegistry.build` (working copy)
@@ -434,8 +454,11 @@ Imports only sdmxlib, so `inventory.py` can import it.
   also logs the WARNING, for an `InventoryRuleError` or an
   `EditionCheckError`).
 - Seal step 3 (`_search`) keeps the index when `_meta.index_built_from`
-  equals `_tables_fingerprint` and `search/index.json` exists: the index was
-  built, in this process or another, from the rows the edition seals. Otherwise it
+  equals `_tables_fingerprint`, `search/index.json` exists and
+  `LanceIndex.version == lance._MANIFEST_VERSION`: the index was built, in
+  this process or another, from the rows the edition seals, at the version
+  this build writes. A carried or resumed version 3 index is therefore
+  rebuilt. Otherwise it
   rebuilds with the last `WorkingCopy.build_index` call on that object
   (its encoder and progress callback), or with the options
   `_meta.index_options` records and the working copy's encoder, or with the
@@ -533,11 +556,13 @@ Imports only sdmxlib, so `inventory.py` can import it.
   written. `check_writable` refuses a 2.x `catalog.json` on blob as on disk.
 - Structural queries read sdmxlib's tables by JOIN, and this package keeps no copy of codes or hierarchies. The filter SQL, including hierarchy descent over `hierarchy_applicability`, is built in `../query.py`; `store.py` compiles it through `_QueryContext`. An absent `sdmx` reference is `NULL`, never `''`.
 - `include()` accepts only names in `VALID_INCLUDE_RELS` and raises `ValueError` otherwise. Unloaded fields hold a per-field cached sentinel whose `__bool__` is `False` and whose attribute, iteration, `len` or index access raises `NotLoadedError`. A NULL foreign key yields `None` regardless of `include()`. `get()` always loads every relationship.
-- Every public `lang` parameter and `.lang()` setter passes its tag through `sdmxlib.normalize_tag` once on entry; a malformed tag raises `sdmxlib.InvalidTagError`. Internal helpers trust the value. `add_language_alternates` stores each tag as `normalize_tag` spells it.
+- Every public `lang` parameter is keyword-only and has no string default. A label `lang` (`Langs`) passes through `labels._as_langs` once on entry; a search `lang` is one `str` through `sdmxlib.normalize_tag`, and a sequence raises `TypeError`. A malformed tag raises `sdmxlib.InvalidTagError`. Internal helpers trust the value. `add_language_alternates` stores each tag as `normalize_tag` spells it.
+- Read paths use only the tags the caller passes and the tags a stored map holds: no English or identifier fallback. Single lookups raise `MissingTranslationError` for a required label; bulk and paged calls return `None` and a `Gap`. SQL picks through `_lang_sql.pick_map` with positional `?` parameters and no macro, so it runs on read-only connections.
 - Entity terminals raise `ValueError` while `select()` or `scalars()` is active. `select()` accepts `_SELECTABLE_COLUMNS` plus the MAP columns `title` and `description`, which need `lang`.
 - SQL values are parameterized; clause structure is built from lists of strings.
-- Search uses one LanceDB table per language, each with its own Snowball stemmer and stopwords. Languages without a stemmer are indexed unstemmed. Queries carry no `lang` filter.
-- Tables are named `search_<lang>__<edition_id without hyphens>`, with `<lang>` as `sdmxlib.tag_alias` spells it, and `index.json` records the `edition_id` that wrote them. `index.json` is the commit point of a rebuild: `add_bulk` drops orphaned tables, writes the edition's tables, then replaces the manifest atomically with `Path.replace`. `drop_carried` then drops every table another edition wrote and rewrites the manifest when it named one. `_MANIFEST_VERSION` is 3; bump it only when an existing field changes meaning or shape.
+- Search uses one LanceDB table per primary or unpaired tag, each with its own Snowball stemmer and stopwords; an alternate tag's rows sit in its primary's table with their own `lang`. Languages without a stemmer are indexed unstemmed. Queries carry no `lang` filter. A search row exists for each tag its text holds, `zxx` excluded, and its document holds that tag's text only. In hybrid search an entity keeps the row of the ranking that placed it higher, BM25 on a tie, and `Hit.lang` is that row's tag.
+- A version 3 index opens for `describe`, `languages`, `count_rows`, `index_layout`, `orphan_tables`, `carried_vectors`, `table_for_key` and checks; `table_for` and the four search methods raise `IncompatibleCatalogError` through `check_searchable()`. `add_bulk` with no rows over a carried version 3 index drops the carried tables before it writes the manifest.
+- Tables are named `search_<lang>__<edition_id without hyphens>`, with `<lang>` as `sdmxlib.tag_alias` spells it, and `index.json` records the `edition_id` that wrote them. `index.json` is the commit point of a rebuild: `add_bulk` drops orphaned tables, writes the edition's tables, then replaces the manifest atomically with `Path.replace`. `drop_carried` then drops every table another edition wrote and rewrites the manifest when it named one. `_MANIFEST_VERSION` is 4, and `_write_manifest` sets `LanceIndex.version` to it; bump it only when an existing field changes meaning or shape.
 - Nothing on the view or search path writes to an edition. The FTS index is reused as found. A changed annotation fingerprint makes `_over` warn; the view still opens and nothing rebuilds automatically (GH-3).
 - `lance.py` imports `lancedb` only under `TYPE_CHECKING` and inside the methods that use it, so core statcatlib has no hard dependency on `lancedb` (the `statcatlib[search]` extra).
 
@@ -604,3 +629,12 @@ Imports only sdmxlib, so `inventory.py` can import it.
   resume, batch and repair): `tests/test_partials.py`. Views:
   `tests/test_edition_view.py`. Embedding reuse:
   `tests/test_embedding_reuse.py`.
+- Label lookup: `tests/test_labels.py` (the types and errors),
+  `tests/test_scopes.py`, `tests/test_filters.py`,
+  `tests/test_spatial_key.py` (the SQL key against `spatial_key` over a
+  corpus, and the pinned hash) and `tests/test_language_tags.py` (every
+  `lang` parameter refuses a malformed tag; no string default; `tag_alias`;
+  msgspec JSON order). Search format 4: `tests/test_search_tags.py`,
+  `tests/test_language_alternates.py`, and `tests/test_index_v3.py` over
+  the checked-in version 3 fixture `tests/fixtures/v3_catalog.tar.xz`
+  (built by `tools/make_v3_fixture.py`).

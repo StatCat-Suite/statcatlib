@@ -150,30 +150,37 @@ class TestLocalRegistry:
 class TestCodeMap:
     def test_returns_dict_of_dicts(self) -> None:
         _, store = _make_two_flow_registry()
-        result = store.code_map("TEST:DF_EXR(1.0)")
+        result = store.code_map("TEST:DF_EXR(1.0)", lang="en")
         assert isinstance(result, dict)
         assert "GEO" in result
         assert "FREQ" in result
 
     def test_geo_codes_present(self) -> None:
         _, store = _make_two_flow_registry()
-        result = store.code_map("TEST:DF_EXR(1.0)")
+        result = store.code_map("TEST:DF_EXR(1.0)", lang="en")
         assert set(result["GEO"].keys()) == {"CA", "US", "DE"}
 
     def test_labels_populated(self) -> None:
         _, store = _make_two_flow_registry()
-        result = store.code_map("TEST:DF_EXR(1.0)")
-        assert result["GEO"]["CA"] == "Canada"
+        result = store.code_map("TEST:DF_EXR(1.0)", lang="en")
+        assert result["GEO"]["CA"] == sc.LocalisedString("Canada", "en")
+        assert result["GEO"].gaps == ()
 
     def test_fr_labels(self) -> None:
         _, store = _make_two_flow_registry()
         result = store.code_map("TEST:DF_EXR(1.0)", lang="fr")
-        assert result["GEO"]["CA"] == "Canada"
-        assert result["GEO"]["US"] == "États-Unis"
+        assert result["GEO"]["CA"] == sc.LocalisedString("Canada", "fr")
+        assert result["GEO"]["US"] == sc.LocalisedString("États-Unis", "fr")
+
+    def test_a_missing_language_is_a_gap_per_dimension(self) -> None:
+        _, store = _make_two_flow_registry()
+        result = store.code_map("TEST:DF_EXR(1.0)", lang="de")
+        assert set(result["GEO"].values()) == {None}
+        assert {g.key for g in result["GEO"].gaps} == {"CA", "US", "DE"}
 
     def test_missing_dataset_returns_empty(self) -> None:
         _, store = _make_two_flow_registry()
-        result = store.code_map("NONEXISTENT:DATASET(1.0)")
+        result = store.code_map("NONEXISTENT:DATASET(1.0)", lang="en")
         assert result == {}
 
     def test_non_sdmx_dataset_returns_empty(self) -> None:
@@ -185,7 +192,7 @@ class TestCodeMap:
                 description=_i("No SDMX link"),
             )
         )
-        result = store.code_map("plain-1")
+        result = store.code_map("plain-1", lang="en")
         assert result == {}
 
 

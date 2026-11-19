@@ -32,9 +32,12 @@ import sdmxlib
 import sdmxlib.model.codelist
 import sdmxlib.model.datastructure
 from attrs import Factory, define, field
-from sdmxlib import InternationalString
+from sdmxlib import InternationalString, LocalisedString
 from sdmxlib.model.registry import artefact_urn
 
+from statcatlib._errors import IncompatibleCatalogError
+from statcatlib._lang_sql import pick_map, spatial_key_sql
+from statcatlib.labels import Gap, Labels, Langs, MissingTranslationError, RowList, ValueList, _as_langs
 from statcatlib.model.agents import Agent, ContactPoint
 from statcatlib.model.classification import Standard
 from statcatlib.model.dataset import (
@@ -164,20 +167,6 @@ class IncompatibleIndexError(ValueError):
     """
 
 
-class IncompatibleCatalogError(RuntimeError):
-    """Raised when a catalog or an edition is in a layout or at a version this build does not read.
-
-    The cases: a directory holding a statcatlib 0.11 catalog, a 0.72 bundle or
-    other files (`statcatlib.catalog`); an edition whose ``manifest.json`` is
-    not the one the Inventory recorded; a ``statcat`` schema written by a
-    statcatlib with another `schema.SCHEMA_VERSION`
-    (`_refuse_statcat_schema_mismatch`); a ``search/index.json`` at another
-    manifest version (`_refuse_unreadable_index`); and a filesystem without
-    hard links under `Catalog.create`. An edition on another sdmxlib store
-    schema is refused by sdmxlib itself, with `sdmxlib.StoreSchemaError`.
-    """
-
-
 def statcat_schema_mismatch(conn: duckdb.DuckDBPyConnection) -> str | None:
     """The ``statcat`` schema version *conn* records, when it is not this build's.
 
@@ -235,17 +224,19 @@ def _refuse_unreadable_index(search_dir: Path) -> None:
     Args:
         search_dir: The catalog's ``search/`` directory, which may not exist.
 
+    Version 3 opens: only a search over it raises (``docs/design/label-lookup.md``, LL-D15).
+
     Raises:
-        IncompatibleCatalogError: ``index.json`` records a version above
-            ``lance._MANIFEST_VERSION``, or none.
+        IncompatibleCatalogError: ``index.json`` records a version outside
+            ``lance._READABLE_VERSIONS`` (3 and 4), or none.
     """
     found = LanceIndex.unreadable_version(search_dir)
     if found is None:
         return
     msg = (
-        f"this catalog's search index cannot be read by this build of statcatlib: {found}. "
-        f"Open the catalog with that statcatlib release or a later one, or delete {search_dir} "
-        "and rebuild it with build_index()."
+        f"this catalog's search index cannot be read by this build of statcatlib: {found}; it reads index "
+        "versions 3 and 4. Open the catalog with that statcatlib release or a later one; to re-index, open "
+        "a working copy with a statcatlib that reads it, call build_index(), and seal it."
     )
     raise IncompatibleCatalogError(msg)
 
@@ -1054,7 +1045,7 @@ _AGENT_SPEC = _EntitySpec(
     table="agent",
     row_type=AgentRow,
     reconstruct=_reconstruct_agent,
-    filter_cols={"id": "id", "type": "type", "homepage": "homepage", "name": "name['en']"},
+    filter_cols={"id": "id", "type": "type", "homepage": "homepage"},
 )
 _DATA_SERVICE_SPEC = _EntitySpec(
     table="data_service",
@@ -1199,11 +1190,23 @@ _SORTABLE_COLUMNS: frozenset[str] = frozenset(
 _MAP_SORTABLE_COLUMNS: frozenset[str] = frozenset({"title"})
 
 #: The spatial facet key of a ``dataset_spatial ds`` row: its region
-#: identifier, such as a CKAN ``geographic_region`` concept URI (GH-83). A row
-#: with no identifier is keyed by its English label until English stops being
-#: a key (``docs/design/language-tags.md``, decision 9), else by its label in
-#: no declared language, ``und``, which CKAN free text is stored under.
-_SPATIAL_FACET_KEY = "COALESCE(ds.uri, ds.label['en'], ds.label['und'])"
+#: identifier, such as a CKAN ``geographic_region`` concept URI (GH-83), else
+#: a hash of its whole label map, so no language is a key
+#: (``docs/design/label-lookup.md``, LL-D5).
+_SPATIAL_FACET_KEY = spatial_key_sql("ds")
+
+#: The tag of a code or identifier stored as text (LT-3). It carries no
+#: language, so the search index gives it no table.
+_NO_LANGUAGE = "zxx"
+
+#: The text columns of the ``sdmx`` schema `EditionView.language_counts`
+#: counts. A constant, because that schema also holds MAP columns whose keys
+#: are not tags, such as ``dimension_column_map``.
+_SDMX_TEXT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("sdmx.code", "name"),
+    ("sdmx.concept", "description"),
+    ("sdmx.concept", "name"),
+)
 
 # Columns allowed in .select() / .scalars() lightweight projections
 _SELECTABLE_COLUMNS: frozenset[str] = frozenset(
@@ -1229,7 +1232,7 @@ class _SortSpec:
     field: str
     desc: bool = False
     nulls: str | None = None
-    lang: str | None = None
+    lang: tuple[str, ...] | None = None
 
 
 #: What a hit from `EditionView.search` can carry. The cross-kind search fans out
@@ -1258,6 +1261,7 @@ class _QueryResult:
     total: int
     rows: list[str]
     scores: dict[str, float] = Factory(dict)
+    langs: dict[str, str] = Factory(dict)
 
 
 # ---------------------------------------------------------------------------
@@ -1267,13 +1271,19 @@ class _QueryResult:
 
 @define
 class SearchResult[T]:
-    """Container for query results with pagination metadata."""
+    """Container for query results with pagination metadata.
+
+    For a `QueryBuilder` text or hybrid search, ``langs`` maps each item's
+    identifier to the stored tag of the search row that matched it; it is
+    empty otherwise.
+    """
 
     items: list[T]
     total: int
     facets: dict[str, dict[str, int]] = Factory(dict)
     offset: int = 0
     scores: dict[str, float] = Factory(dict)
+    langs: dict[str, str] = Factory(dict)
 
 
 @define(frozen=True)
@@ -1288,10 +1298,10 @@ class CodeHit:
 
     dataset_id: str
     dimension_id: str
-    dimension_label: str
+    dimension_label: LocalisedString | None
     code_id: str
-    code_label: str
-    text: str
+    code_label: LocalisedString
+    document: str
     code_urn: str = ""
     codelist_urn: str = ""
     parent_id: str = ""
@@ -1312,9 +1322,9 @@ class ConceptHit:
     concept_urn: str
     scheme_urn: str
     concept_id: str
-    name: str
-    description: str
-    text: str
+    name: LocalisedString | None
+    description: LocalisedString | None
+    document: str
 
 
 @define(frozen=True)
@@ -1335,12 +1345,14 @@ class Hit[T]:
       hybrid-search explainability and telemetry.
     - ``highlights`` — per-field snippet extracts when available.
     - ``matched_field`` — which indexed column drove the rank.
+    - ``lang`` — the stored tag of the matched row's text, which with
+      language pairs can be an alternate such as ``en-t-fr``.
     """
 
     kind: str
     score: float
     payload: T
-    lang: str = "en"
+    lang: str
     source: str = "bm25"
     highlights: Mapping[str, str] = Factory(dict)
     matched_field: str | None = None
@@ -1359,7 +1371,7 @@ _CODE_ROW_COLUMNS: tuple[str, ...] = (
     "codelist_urn",
     "parent_id",
     "depth",
-    "text",
+    "document",
     "lang",
 )
 
@@ -1369,74 +1381,75 @@ _CONCEPT_ROW_COLUMNS: tuple[str, ...] = (
     "concept_urn",
     "scheme_urn",
     "concept_id",
-    "text",
+    "concept_name",
+    "concept_description",
+    "document",
     "lang",
 )
+
+
+def _row_lang(row: SearchRow) -> str:
+    """The stored tag of a search row, which every row carries."""
+    lang = row.get("lang")
+    if not lang:
+        msg = f"search row {row.get('id')!r} has no lang"
+        raise ValueError(msg)
+    return lang
+
+
+def _tagged(text: str | None, lang: str) -> LocalisedString | None:
+    """*text* under *lang*, or ``None`` for an empty or absent text."""
+    return LocalisedString(text, lang) if text else None
 
 
 def _row_to_code_hit(
     row: SearchRow,
     *,
-    fallback_lang: str,
     score: float,
     source: str = "bm25",
 ) -> Hit[CodeHit]:
-    """Build a ``Hit[CodeHit]`` from a LanceDB row dict."""
+    """Build a ``Hit[CodeHit]`` from a LanceDB row dict; its labels carry the row's tag."""
+    lang = _row_lang(row)
     payload = CodeHit(
         dataset_id=row.get("id", "") or "",
         dimension_id=row.get("dimension_id", "") or "",
-        dimension_label=row.get("dimension_label", "") or "",
+        dimension_label=_tagged(row.get("dimension_label"), lang),
         code_id=row.get("code_id", "") or "",
-        code_label=row.get("code_label", "") or "",
-        text=row.get("text", "") or "",
+        code_label=LocalisedString(row.get("code_label", "") or "", lang),
+        document=row.get("document", "") or "",
         code_urn=row.get("code_urn", "") or "",
         codelist_urn=row.get("codelist_urn", "") or "",
         parent_id=row.get("parent_id", "") or "",
         depth=row.get("depth", 0) or 0,
     )
-    return Hit(
-        kind="code",
-        score=score,
-        payload=payload,
-        lang=row.get("lang", fallback_lang) or fallback_lang,
-        source=source,
-    )
+    return Hit(kind="code", score=score, payload=payload, lang=lang, source=source)
 
 
 def _row_to_concept_hit(
     row: SearchRow,
     *,
-    fallback_lang: str,
     score: float,
     source: str = "bm25",
 ) -> Hit[ConceptHit]:
     """Build a ``Hit[ConceptHit]`` from a LanceDB row dict.
 
-    The Lance ``text`` column is ``"<name> | <description>"``; for the
-    typed payload we split on the first ``" | "`` so callers can get
-    name and description back as separate fields without round-tripping
-    to SQL.
+    The name and description come from the row's ``concept_name`` and
+    ``concept_description`` columns, in the row's tag; ``""`` reads as
+    ``None``.
     """
-    text = row.get("text", "") or ""
-    if " | " in text:
-        name, _, description = text.partition(" | ")
-    else:
-        name, description = text, ""
+    text = row.get("document", "") or ""
+    name = row.get("concept_name") or ""
+    description = row.get("concept_description") or ""
+    lang = _row_lang(row)
     payload = ConceptHit(
         concept_urn=row.get("concept_urn", row.get("id", "")) or "",
         scheme_urn=row.get("scheme_urn", "") or "",
         concept_id=row.get("concept_id", "") or "",
-        name=name,
-        description=description,
-        text=text,
+        name=_tagged(name, lang),
+        description=_tagged(description, lang),
+        document=text,
     )
-    return Hit(
-        kind="concept",
-        score=score,
-        payload=payload,
-        lang=row.get("lang", fallback_lang) or fallback_lang,
-        source=source,
-    )
+    return Hit(kind="concept", score=score, payload=payload, lang=lang, source=source)
 
 
 @define(frozen=True)
@@ -1456,7 +1469,7 @@ class ReferenceMetadataHit:
     set_urn: str
     attribute_path: str
     section_title: str
-    text: str
+    document: str
     chunk_index: int = 0
 
 
@@ -1465,7 +1478,7 @@ _REFMETA_ROW_COLUMNS: tuple[str, ...] = (
     "set_urn",
     "attribute_path",
     "section_title",
-    "text",
+    "document",
     "lang",
 )
 
@@ -1473,7 +1486,6 @@ _REFMETA_ROW_COLUMNS: tuple[str, ...] = (
 def _row_to_reference_metadata_hit(
     row: SearchRow,
     *,
-    fallback_lang: str,
     score: float,
     source: str = "bm25",
 ) -> Hit[ReferenceMetadataHit]:
@@ -1492,16 +1504,10 @@ def _row_to_reference_metadata_hit(
         set_urn=row.get("set_urn", "") or "",
         attribute_path=row.get("attribute_path", "") or "",
         section_title=row.get("section_title", "") or "",
-        text=row.get("text", "") or "",
+        document=row.get("document", "") or "",
         chunk_index=chunk_index,
     )
-    return Hit(
-        kind="reference_metadata",
-        score=score,
-        payload=payload,
-        lang=row.get("lang", fallback_lang) or fallback_lang,
-        source=source,
-    )
+    return Hit(kind="reference_metadata", score=score, payload=payload, lang=_row_lang(row), source=source)
 
 
 # Reference-metadata chunking knobs. A section shorter than the floor is
@@ -1810,29 +1816,34 @@ def _rrf_merge_rows(
 
     Returns ``(representative_row, rrf_score, source)`` triples sorted by
     descending score. ``source`` is ``"hybrid"`` when both lists ranked
-    the same key, otherwise the list that contributed.
+    the same key, otherwise the list that contributed. The representative
+    row is the one from the list that ranks the key higher, BM25 on a tie.
 
     Keeping this as a free function lets every scope share one RRF
     implementation — duplicating it per scope ages badly the first time
     we tweak the formula or the tie-break.
     """
-    rep: dict[str, SearchRow] = {}
+    # The representative row comes from the ranking that places the entity
+    # higher, BM25 on a tie, so its tag is the one that matched best.
+    rep: dict[str, tuple[int, SearchRow]] = {}
     scores: dict[str, float] = {}
     sources: dict[str, set[str]] = {}
     for rank, row in enumerate(bm25_rows):
         k = key(row)
-        rep.setdefault(k, row)
+        if k not in rep:
+            rep[k] = (rank, row)
         scores[k] = scores.get(k, 0.0) + 1.0 / (rrf_k + rank + 1)
         sources.setdefault(k, set()).add("bm25")
     for rank, row in enumerate(vec_rows):
         k = key(row)
-        rep.setdefault(k, row)
+        if k not in rep or rank < rep[k][0]:
+            rep[k] = (rank, row)
         scores[k] = scores.get(k, 0.0) + 1.0 / (rrf_k + rank + 1)
         sources.setdefault(k, set()).add("vector")
     ordered = sorted(scores, key=lambda x: -scores[x])
     return [
         (
-            rep[k],
+            rep[k][1],
             scores[k],
             "hybrid" if len(sources[k]) > 1 else next(iter(sources[k])),
         )
@@ -1887,13 +1898,13 @@ class QueryBuilder[T]:
         hybrid_text: str | None = None,
         search_operator: str = "or",
         search_fuzziness: int = 0,
-        search_lang: str = "en",
+        search_lang: str | None = None,
         sort_fields: list[_SortSpec] | None = None,
         limit: int | None = None,
         offset: int = 0,
         facet_fields: list[str] | None = None,
         select_cols: tuple[str, ...] | None = None,
-        select_lang: str | None = None,
+        select_lang: tuple[str, ...] | None = None,
         scalar_col: str | None = None,
         include_rels: frozenset[str] | None = None,
     ) -> None:
@@ -1965,15 +1976,16 @@ class QueryBuilder[T]:
         """Restrict results to a pre-computed list of identifiers."""
         return self._clone(from_ids=ids)
 
-    def search(self, text: str, *, lang: str = "en", operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]:
+    def search(self, text: str, *, lang: str, operator: str = "or", fuzzy: int = 0) -> QueryBuilder[T]:
         """Add full-text search. Requires LanceDB.
 
         Args:
             text: The search text. Tokenised and stemmed with *lang*'s rules
                 before matching.
-            lang: The language whose search table answers the query. Each
+            lang: The one tag whose search table answers the query. Each
                 language has its own table, so a French query needs
-                ``lang="fr"``. A language with no table matches nothing.
+                ``lang="fr"``; an alternate tag such as ``en-t-fr`` reads its
+                primary's table. A language with no table matches nothing.
             operator: How to join multi-term queries: ``"or"`` (default) matches any term; ``"and"``
                 requires all terms.
             fuzzy: Levenshtein edit distance for fuzzy matching: ``0`` (default, exact match), ``1``, or
@@ -1986,7 +1998,7 @@ class QueryBuilder[T]:
         lang = sdmxlib.normalize_tag(lang)
         return self._clone(text=text, search_lang=lang, search_operator=operator, search_fuzziness=fuzzy)
 
-    def hybrid_search(self, text: str, *, lang: str = "en") -> QueryBuilder[T]:
+    def hybrid_search(self, text: str, *, lang: str) -> QueryBuilder[T]:
         """Add hybrid BM25 + semantic search. Requires LanceDB.
 
         Args:
@@ -2006,17 +2018,17 @@ class QueryBuilder[T]:
         *,
         desc: bool = False,
         nulls: str | None = None,
-        lang: str | None = None,
+        lang: Langs | None = None,
     ) -> QueryBuilder[T]:
         """Add a sort criterion.
 
-        For MAP columns like ``title``, pass ``lang`` to specify the
-        language key (e.g. ``lang="en"``).  Raises ``ValueError`` if
-        ``lang`` is omitted for a MAP column.
+        For MAP columns like ``title``, pass ``lang``, a tag or tags in order
+        of preference: rows sort on the first held tag's text, so one order
+        can mix languages. Raises ``ValueError`` if ``lang`` is omitted for a
+        MAP column.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
-        new_sorts = [*self._sort_fields, _SortSpec(field=field, desc=desc, nulls=nulls, lang=lang)]
+        langs = None if lang is None else _as_langs(lang)
+        new_sorts = [*self._sort_fields, _SortSpec(field=field, desc=desc, nulls=nulls, lang=langs)]
         return self._clone(sort_fields=new_sorts)
 
     def limit(self, n: int) -> QueryBuilder[T]:
@@ -2069,40 +2081,43 @@ class QueryBuilder[T]:
 
     # -- projection modifiers (SA2-style) --
 
-    def select(self, *columns: str, lang: str | None = None) -> QueryBuilder[T]:
+    def select(self, *columns: str, lang: Langs | None = None) -> QueryBuilder[T]:
         """Set dict projection mode. Terminals return dicts instead of objects.
 
-        ``lang`` is required when selecting MAP columns (``title``,
-        ``description``).  Raises ``ValueError`` for unknown column names.
+        ``lang``, a tag or tags in order of preference, is required when
+        selecting MAP columns (``title``, ``description``). Each MAP column
+        gives two `Row` keys: ``title``, the first held tag's text or
+        ``None``, and ``title__lang``, that tag. Raises ``ValueError`` for
+        unknown column names.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
+        langs = None if lang is None else _as_langs(lang)
         all_allowed = _SELECTABLE_COLUMNS | _MAP_SELECTABLE_COLUMNS
         for col in columns:
             if col not in all_allowed:
                 msg = f"Invalid select column: {col!r}. Allowed: {sorted(all_allowed)}"
                 raise ValueError(msg)
         map_cols = _MAP_SELECTABLE_COLUMNS & set(columns)
-        if map_cols and lang is None:
+        if map_cols and langs is None:
             msg = f"lang is required when selecting MAP columns: {sorted(map_cols)}"
             raise ValueError(msg)
-        return self._clone(select_cols=columns, select_lang=lang)
+        return self._clone(select_cols=columns, select_lang=langs)
 
-    def scalars(self, column: str, *, lang: str | None = None) -> QueryBuilder[T]:
+    def scalars(self, column: str, *, lang: Langs | None = None) -> QueryBuilder[T]:
         """Set single-column flat projection mode.
 
-        Terminals return bare values instead of objects or dicts.
+        Terminals return bare values instead of objects or dicts. A MAP
+        column (``title``, ``description``) needs ``lang``, a tag or tags in
+        order of preference, and yields `sdmxlib.LocalisedString` or ``None``.
         """
-        if lang is not None:
-            lang = sdmxlib.normalize_tag(lang)
+        langs = None if lang is None else _as_langs(lang)
         all_allowed = _SELECTABLE_COLUMNS | _MAP_SELECTABLE_COLUMNS
         if column not in all_allowed:
             msg = f"Invalid scalar column: {column!r}. Allowed: {sorted(all_allowed)}"
             raise ValueError(msg)
-        if column in _MAP_SELECTABLE_COLUMNS and lang is None:
+        if column in _MAP_SELECTABLE_COLUMNS and langs is None:
             msg = f"lang is required when selecting MAP column {column!r}"
             raise ValueError(msg)
-        return self._clone(scalar_col=column, select_lang=lang)
+        return self._clone(scalar_col=column, select_lang=langs)
 
     # -- projection guards --
 
@@ -2219,12 +2234,12 @@ class QueryBuilder[T]:
 
     # -- row projection terminals --
 
-    def rows(self) -> list[Row]:
-        """Execute and return ``Row`` objects (requires ``.select()``)."""
+    def rows(self) -> RowList:
+        """Execute and return ``Row`` objects (requires ``.select()``), with the page's gaps."""
         select_cols = self._require_select_cols("rows")
         ranked_ids = self._resolve_search_ids()
         if ranked_ids is not None and not ranked_ids:
-            return []
+            return RowList()
         return self._store._execute_projection(
             self._cls,
             select_cols,
@@ -2239,22 +2254,22 @@ class QueryBuilder[T]:
         )
 
     def row(self) -> Row | None:
-        """Execute with limit=1 and return the first ``Row`` or None."""
+        """Execute with limit=1 and return the first ``Row`` or None; use `rows` to read gaps."""
         items = self.limit(1).rows()
         return items[0] if items else None
 
     # -- scalar projection terminals --
 
-    def values(self) -> list[object]:
-        """Execute and return flat scalar values (requires ``.scalars()``)."""
+    def values(self) -> ValueList:
+        """Execute and return flat scalar values (requires ``.scalars()``), with the page's gaps."""
         scalar_col = self._require_scalar_col("values")
         ranked_ids = self._resolve_search_ids()
         if ranked_ids is not None:
             if not ranked_ids:
-                return []
+                return ValueList()
             # Fast path: scalar("identifier") returns ranked IDs directly
             if scalar_col == "identifier":
-                return [*ranked_ids]
+                return ValueList(ranked_ids)
         return self._store._execute_scalar_projection(
             self._cls,
             scalar_col,
@@ -2269,7 +2284,11 @@ class QueryBuilder[T]:
         )
 
     def value(self) -> object | None:
-        """Execute with limit=1 and return the first scalar value or None."""
+        """Execute with limit=1 and return the first scalar value or None.
+
+        ``None`` means no row or no text in the requested tags; `values` tells
+        them apart through its gaps.
+        """
         items = self.limit(1).values()
         return items[0] if items else None
 
@@ -2345,7 +2364,7 @@ class CodesScope:
         codelist_urn: str | Sequence[str] | None = None,
         dataset_ids: Sequence[str] | None = None,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 20,
         offset: int = 0,
         operator: str = "or",
@@ -2362,7 +2381,8 @@ class CodesScope:
         """
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
         codelist_urns = _as_seq(codelist_urn)
         id_filter = list(dataset_ids) if dataset_ids is not None else None
@@ -2370,7 +2390,7 @@ class CodesScope:
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(
+            bm25_rows = lance.bm25_search_rows(
                 query,
                 columns=_CODE_ROW_COLUMNS,
                 lang=lang,
@@ -2386,7 +2406,7 @@ class CodesScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_rows = store._lance.search_rows(
+            vec_rows = lance.search_rows(
                 qvec,
                 columns=_CODE_ROW_COLUMNS,
                 lang=lang,
@@ -2404,59 +2424,67 @@ class CodesScope:
 
         if mode == "hybrid":
             merged = _rrf_merge_rows(bm25_rows, vec_rows, rrf_k=rrf_k, key=_key)
-            hits = [_row_to_code_hit(row, fallback_lang=lang, score=score, source=src) for row, score, src in merged]
+            hits = [_row_to_code_hit(row, score=score, source=src) for row, score, src in merged]
         elif mode == "vector":
             hits = [
                 _row_to_code_hit(
                     r,
-                    fallback_lang=lang,
                     score=1.0 / (1.0 + r.get("_distance", 0.0) or 0.0),
                     source="vector",
                 )
                 for r in vec_rows
             ]
         else:  # bm25
-            hits = [_row_to_code_hit(r, fallback_lang=lang, score=r["_score"], source="bm25") for r in bm25_rows]
+            hits = [_row_to_code_hit(r, score=r["_score"], source="bm25") for r in bm25_rows]
 
         total = len(hits)
         page = hits[offset : offset + limit]
         scores = {h.payload.code_urn or h.payload.code_id: h.score for h in page}
         return SearchResult(items=page, total=total, offset=offset, scores=scores)
 
-    def get(self, code_urn: str) -> CodeHit | None:
+    def get(self, code_urn: str, *, lang: Langs) -> CodeHit | None:
         """Direct SQL lookup of a single code by URN — no Lance index involved.
 
-        Resolves the code's labels in any one language present
-        (default: prefer ``en``, fall back to whichever language has
-        the label). For multi-language access, fetch the underlying
-        ``sdmx.code`` row directly.
+        Args:
+            code_urn: The code's URN.
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The code, with ``code_label`` its name in the first of *lang* it
+            holds; ``dataset_id``, ``dimension_id`` and ``document`` are
+            empty and ``dimension_label`` is ``None``, since no search row is
+            read. ``None`` for an unknown code or no ``sdmx`` schema.
+
+        Raises:
+            MissingTranslationError: The code's name holds none of the tags.
         """
+        langs = _as_langs(lang)
+        pick = pick_map("c.name", langs)
         store = self._store
         try:
             row = store._c.execute(
-                """
+                f"""
                 SELECT c.code_urn, c.codelist_urn, c.code_id, c.parent_id, c.depth,
-                       c.name
+                       {pick.text}, {pick.lang}, map_keys(c.name)
                 FROM sdmx.code c
-                WHERE c.code_urn = $code_urn
+                WHERE c.code_urn = ?
                 """,
-                {"code_urn": code_urn},
+                [*pick.text_params, *pick.lang_params, code_urn],
             ).fetchone()
         except duckdb.Error:
             return None
         if row is None:
             return None
-        c_urn, cl_urn, code_id, parent_id, depth, name_map = row
-        name = ""
-        if name_map:
-            name = name_map.get("en") or next(iter(name_map.values()), "")
+        c_urn, cl_urn, code_id, parent_id, depth, text, tag, held = row
+        if text is None:
+            raise MissingTranslationError(code_urn, "name", langs, sorted(held or ()))
         return CodeHit(
             dataset_id="",
             dimension_id="",
-            dimension_label="",
+            dimension_label=None,
             code_id=str(code_id or ""),
-            code_label=str(name or ""),
-            text=str(name or ""),
+            code_label=LocalisedString(text, tag),
+            document="",
             code_urn=str(c_urn or ""),
             codelist_urn=str(cl_urn or ""),
             parent_id=str(parent_id or ""),
@@ -2483,7 +2511,7 @@ class ConceptsScope:
         *,
         scheme_urn: str | Sequence[str] | None = None,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 20,
         offset: int = 0,
         operator: str = "or",
@@ -2494,14 +2522,15 @@ class ConceptsScope:
         """Search concept rows; returns `Hit` objects wrapping `ConceptHit`."""
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
         scheme_urns = _as_seq(scheme_urn)
 
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(
+            bm25_rows = lance.bm25_search_rows(
                 query,
                 columns=_CONCEPT_ROW_COLUMNS,
                 lang=lang,
@@ -2516,7 +2545,7 @@ class ConceptsScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_rows = store._lance.search_rows(
+            vec_rows = lance.search_rows(
                 qvec,
                 columns=_CONCEPT_ROW_COLUMNS,
                 lang=lang,
@@ -2530,56 +2559,70 @@ class ConceptsScope:
 
         if mode == "hybrid":
             merged = _rrf_merge_rows(bm25_rows, vec_rows, rrf_k=rrf_k, key=_key)
-            hits = [_row_to_concept_hit(row, fallback_lang=lang, score=score, source=src) for row, score, src in merged]
+            hits = [_row_to_concept_hit(row, score=score, source=src) for row, score, src in merged]
         elif mode == "vector":
             hits = [
                 _row_to_concept_hit(
                     r,
-                    fallback_lang=lang,
                     score=1.0 / (1.0 + r.get("_distance", 0.0) or 0.0),
                     source="vector",
                 )
                 for r in vec_rows
             ]
         else:
-            hits = [_row_to_concept_hit(r, fallback_lang=lang, score=r["_score"], source="bm25") for r in bm25_rows]
+            hits = [_row_to_concept_hit(r, score=r["_score"], source="bm25") for r in bm25_rows]
 
         total = len(hits)
         page = hits[offset : offset + limit]
         scores = {h.payload.concept_urn: h.score for h in page}
         return SearchResult(items=page, total=total, offset=offset, scores=scores)
 
-    def get(self, concept_urn: str) -> ConceptHit | None:
-        """Direct SQL lookup of a single concept by URN."""
+    def get(self, concept_urn: str, *, lang: Langs) -> ConceptHit | None:
+        """Direct SQL lookup of a single concept by URN.
+
+        The name and the description are each picked over *lang*, so the
+        two can answer in different tags; each one's ``lang`` says which.
+
+        Args:
+            concept_urn: The concept's URN.
+            lang: A tag, or tags in order of preference.
+
+        Returns:
+            The concept, with ``document`` empty; ``description`` is ``None``
+            when it holds none of the tags. ``None`` for an unknown concept
+            or no ``sdmx`` schema.
+
+        Raises:
+            MissingTranslationError: The concept's name holds none of the tags.
+        """
+        langs = _as_langs(lang)
+        name = pick_map("c.name", langs)
+        desc = pick_map("c.description", langs)
         store = self._store
         try:
             row = store._c.execute(
-                """
-                SELECT c.concept_urn, c.scheme_urn, c.concept_id, c.name, c.description
+                f"""
+                SELECT c.concept_urn, c.scheme_urn, c.concept_id,
+                       {name.text}, {name.lang}, map_keys(c.name), {desc.text}, {desc.lang}
                 FROM sdmx.concept c
-                WHERE c.concept_urn = $concept_urn
+                WHERE c.concept_urn = ?
                 """,
-                {"concept_urn": concept_urn},
+                [*name.text_params, *name.lang_params, *desc.text_params, *desc.lang_params, concept_urn],
             ).fetchone()
         except duckdb.Error:
             return None
         if row is None:
             return None
-        c_urn, sc_urn, c_id, name_map, desc_map = row
-        name = ""
-        desc = ""
-        if name_map:
-            name = name_map.get("en") or next(iter(name_map.values()), "")
-        if desc_map:
-            desc = desc_map.get("en") or next(iter(desc_map.values()), "")
-        text = f"{name} | {desc}" if (name and desc) else (name or desc)
+        c_urn, sc_urn, c_id, name_text, name_tag, held, desc_text, desc_tag = row
+        if name_text is None:
+            raise MissingTranslationError(concept_urn, "name", langs, sorted(held or ()))
         return ConceptHit(
             concept_urn=str(c_urn),
             scheme_urn=str(sc_urn or ""),
             concept_id=str(c_id or ""),
-            name=name,
-            description=desc,
-            text=text,
+            name=LocalisedString(name_text, name_tag),
+            description=None if desc_text is None else LocalisedString(desc_text, desc_tag),
+            document="",
         )
 
 
@@ -2607,7 +2650,7 @@ class ReferenceMetadataScope:
         *,
         target_urn: str | None = None,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 20,
         offset: int = 0,
         operator: str = "or",
@@ -2626,7 +2669,8 @@ class ReferenceMetadataScope:
         """
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
 
         set_urn_filter: list[str] | None = None
@@ -2638,7 +2682,7 @@ class ReferenceMetadataScope:
         bm25_rows: list[Bm25HitRow] = []
         vec_rows: list[VectorHitRow] = []
         if mode in ("bm25", "hybrid"):
-            bm25_rows = store._lance.bm25_search_rows(
+            bm25_rows = lance.bm25_search_rows(
                 query,
                 columns=_REFMETA_ROW_COLUMNS,
                 lang=lang,
@@ -2653,7 +2697,7 @@ class ReferenceMetadataScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_rows = store._lance.search_rows(
+            vec_rows = lance.search_rows(
                 qvec,
                 columns=_REFMETA_ROW_COLUMNS,
                 lang=lang,
@@ -2667,25 +2711,18 @@ class ReferenceMetadataScope:
 
         if mode == "hybrid":
             merged = _rrf_merge_rows(bm25_rows, vec_rows, rrf_k=rrf_k, key=_key)
-            hits = [
-                _row_to_reference_metadata_hit(row, fallback_lang=lang, score=score, source=src)
-                for row, score, src in merged
-            ]
+            hits = [_row_to_reference_metadata_hit(row, score=score, source=src) for row, score, src in merged]
         elif mode == "vector":
             hits = [
                 _row_to_reference_metadata_hit(
                     r,
-                    fallback_lang=lang,
                     score=1.0 / (1.0 + r.get("_distance", 0.0) or 0.0),
                     source="vector",
                 )
                 for r in vec_rows
             ]
         else:
-            hits = [
-                _row_to_reference_metadata_hit(r, fallback_lang=lang, score=r["_score"], source="bm25")
-                for r in bm25_rows
-            ]
+            hits = [_row_to_reference_metadata_hit(r, score=r["_score"], source="bm25") for r in bm25_rows]
 
         total = len(hits)
         page = hits[offset : offset + limit]
@@ -2710,7 +2747,7 @@ class DatasetsScope:
         query: str,
         *,
         mode: str = "bm25",
-        lang: str = "en",
+        lang: str,
         limit: int = 50,
         offset: int = 0,
         operator: str = "or",
@@ -2721,13 +2758,14 @@ class DatasetsScope:
         """Search datasets; returns `Hit` objects wrapping `BaseDataset`."""
         lang = sdmxlib.normalize_tag(lang)
         store = self._store
-        if store._lance is None:
+        lance = store._search_index()
+        if lance is None:
             return SearchResult(items=[], total=0, offset=offset)
 
-        bm25_pairs: list[tuple[str, float]] = []
-        vec_pairs: list[tuple[str, float]] = []
+        bm25_pairs: list[tuple[str, float, str]] = []
+        vec_pairs: list[tuple[str, float, str]] = []
         if mode in ("bm25", "hybrid"):
-            bm25_pairs = store._lance.bm25_search(
+            bm25_pairs = lance.bm25_search(
                 query,
                 lang=lang,
                 limit=oversample if mode == "hybrid" else limit + offset,
@@ -2740,7 +2778,7 @@ class DatasetsScope:
                 msg = f"mode={mode!r} requires an embedding_model; pass it to view(embedding_model=...)"
                 raise RuntimeError(msg)
             qvec = as_vector(store._embedding_model.encode(store._query_prefix + query))
-            vec_pairs = store._lance.search(
+            vec_pairs = lance.search(
                 qvec,
                 lang=lang,
                 limit=oversample if mode == "hybrid" else limit + offset,
@@ -2748,10 +2786,12 @@ class DatasetsScope:
             )
 
         if mode == "hybrid":
-            bm25_rank = {ident: i for i, (ident, _) in enumerate(bm25_pairs)}
-            vec_rank = {ident: i for i, (ident, _) in enumerate(vec_pairs)}
+            bm25_rank = {ident: i for i, (ident, _, _) in enumerate(bm25_pairs)}
+            vec_rank = {ident: i for i, (ident, _, _) in enumerate(vec_pairs)}
+            bm25_lang = {ident: tag for ident, _, tag in bm25_pairs}
+            vec_lang = {ident: tag for ident, _, tag in vec_pairs}
             all_ids = set(bm25_rank) | set(vec_rank)
-            scored: dict[str, tuple[float, str]] = {}
+            scored: dict[str, tuple[float, str, str]] = {}
             for ident in all_ids:
                 s = 0.0
                 srcs: set[str] = set()
@@ -2761,12 +2801,15 @@ class DatasetsScope:
                 if ident in vec_rank:
                     s += 1.0 / (rrf_k + vec_rank[ident] + 1)
                     srcs.add("vector")
-                scored[ident] = (s, "hybrid" if len(srcs) > 1 else next(iter(srcs)))
+                # The tag of the ranking that places the dataset higher, BM25 on a tie.
+                bm25_wins = ident in bm25_rank and (ident not in vec_rank or bm25_rank[ident] <= vec_rank[ident])
+                tag = bm25_lang[ident] if bm25_wins else vec_lang[ident]
+                scored[ident] = (s, "hybrid" if len(srcs) > 1 else next(iter(srcs)), tag)
             ranked = sorted(scored.items(), key=lambda kv: -kv[1][0])
         elif mode == "vector":
-            ranked = [(ident, (1.0 / (1.0 + d), "vector")) for ident, d in vec_pairs]
+            ranked = [(ident, (1.0 / (1.0 + d), "vector", tag)) for ident, d, tag in vec_pairs]
         else:
-            ranked = [(ident, (score, "bm25")) for ident, score in bm25_pairs]
+            ranked = [(ident, (score, "bm25", tag)) for ident, score, tag in bm25_pairs]
 
         total = len(ranked)
         page = ranked[offset : offset + limit]
@@ -2774,12 +2817,12 @@ class DatasetsScope:
         datasets = store._fetch_by_identifiers(identifiers)
         by_id = {ds.identifier: ds for ds in datasets}
         hits: list[Hit[BaseDataset]] = []
-        for ident, (score, src) in page:
+        for ident, (score, src, tag) in page:
             ds = by_id.get(ident)
             if ds is None:
                 continue
-            hits.append(Hit(kind="dataset", score=score, payload=ds, lang=lang, source=src))
-        scores = {ident: score for ident, (score, _) in page}
+            hits.append(Hit(kind="dataset", score=score, payload=ds, lang=tag, source=src))
+        scores = {ident: score for ident, (score, _, _) in page}
         return SearchResult(items=hits, total=total, offset=offset, scores=scores)
 
 
@@ -3118,24 +3161,24 @@ class _Store:
 
     @property
     def codes(self) -> CodesScope:
-        """Typed search and lookup over SDMX codes — ``cat.codes.find("Toronto")``."""
+        """Typed search and lookup over SDMX codes — ``cat.codes.find("Toronto", lang="en")``."""
         return CodesScope(store=self)
 
     @property
     def concepts(self) -> ConceptsScope:
-        """Typed search and lookup over SDMX Concepts — ``cat.concepts.find("Gini")``."""
+        """Typed search and lookup over SDMX Concepts — ``cat.concepts.find("Gini", lang="en")``."""
         return ConceptsScope(store=self)
 
     @property
     def datasets(self) -> DatasetsScope:
-        """Typed dataset search — ``cat.datasets.find(q, mode="hybrid")``."""
+        """Typed dataset search — ``cat.datasets.find(q, mode="hybrid", lang="en")``."""
         return DatasetsScope(store=self)
 
     @property
     def reference_metadata(self) -> ReferenceMetadataScope:
         """Typed search over indexed SDMX reference-metadata sections.
 
-        ``cat.reference_metadata.find("data quality for income")`` — the
+        ``cat.reference_metadata.find("data quality for income", lang="en")`` — the
         semantic-search counterpart to `metadata_for` (which resolves
         by target URN). Requires the index to have been built with
         ``include_reference_metadata=True``.
@@ -3539,19 +3582,40 @@ class _Store:
     # Semantic & hybrid search
     # ------------------------------------------------------------------
 
+    def _search_index(self) -> LanceIndex | None:
+        """The search index, or ``None`` without one; every search entry point calls it first.
+
+        Called before any early return, so a search over a version 3 index
+        raises whatever its filters match (``docs/design/label-lookup.md``,
+        LL-D15).
+
+        A version 3 index raises `IncompatibleCatalogError`
+        (`LanceIndex.check_searchable`).
+
+        Returns:
+            The index, or ``None`` when lancedb or the index is absent.
+        """
+        if self._lance is not None:
+            self._lance.check_searchable()
+        return self._lance
+
     def _rrf_rank(
         self,
         text: str,
         *,
-        lang: str = "en",
+        lang: str,
         rrf_k: int = 60,
         oversample: int = 200,
         operator: str = "or",
         fuzziness: int = 0,
         entity_type: Sequence[str] = _DATASET_ENTITY_TYPES,
         id_filter: Sequence[str] | None = None,
-    ) -> dict[str, float]:
-        """Compute RRF-merged identifier ranking from vector + BM25 hits."""
+    ) -> dict[str, tuple[float, str]]:
+        """Compute RRF-merged identifier ranking from vector + BM25 hits.
+
+        Each identifier maps to its fused score and the tag of its matched
+        row, taken from the ranking that places it higher, BM25 on a tie.
+        """
         assert self._lance is not None  # noqa: S101
         assert self._embedding_model is not None  # noqa: S101
 
@@ -3559,7 +3623,8 @@ class _Store:
         vec_hits = self._lance.search(
             query_vec, lang=lang, limit=oversample, entity_type=entity_type, id_filter=id_filter
         )
-        vec_rank: dict[str, int] = {ident: i + 1 for i, (ident, _) in enumerate(vec_hits)}
+        vec_rank: dict[str, int] = {ident: i + 1 for i, (ident, _, _) in enumerate(vec_hits)}
+        vec_lang = {ident: tag for ident, _, tag in vec_hits}
 
         bm25_hits = self._lance.bm25_search(
             text,
@@ -3570,17 +3635,19 @@ class _Store:
             entity_type=entity_type,
             id_filter=id_filter,
         )
-        bm25_rank: dict[str, int] = {ident: i + 1 for i, (ident, _) in enumerate(bm25_hits)}
+        bm25_rank: dict[str, int] = {ident: i + 1 for i, (ident, _, _) in enumerate(bm25_hits)}
+        bm25_lang = {ident: tag for ident, _, tag in bm25_hits}
 
         all_ids = set(vec_rank) | set(bm25_rank)
-        rrf: dict[str, float] = {}
+        rrf: dict[str, tuple[float, str]] = {}
         for ident in all_ids:
             score = 0.0
             if ident in vec_rank:
                 score += 1.0 / (rrf_k + vec_rank[ident])
             if ident in bm25_rank:
                 score += 1.0 / (rrf_k + bm25_rank[ident])
-            rrf[ident] = score
+            bm25_wins = ident in bm25_rank and (ident not in vec_rank or bm25_rank[ident] <= vec_rank[ident])
+            rrf[ident] = (score, bm25_lang[ident] if bm25_wins else vec_lang[ident])
 
         return rrf
 
@@ -3630,10 +3697,16 @@ class _Store:
         theme_maps: list[dict[str, str]] | None,
         dim_maps: list[dict[str, str]] | None,
     ) -> list[tuple[str, str, str, str]]:
-        """Build ``(id, kind, lang, text)`` tuples for one dataset row."""
-        langs = set(title_map or {}) | set(desc_map or {})
-        if not langs:
-            langs = {"en"}
+        """Build ``(id, kind, lang, text)`` tuples for one dataset row.
+
+        One tuple per tag any of the dataset's indexed maps holds, ``und``
+        included and ``zxx`` (codes stored as text) left out; the document of
+        a tag holds that tag's text only.
+        """
+        langs: set[str] = set()
+        for m in [title_map, desc_map, *(kw_maps or []), *(theme_maps or []), *(dim_maps or [])]:
+            langs.update(m or {})
+        langs.discard(_NO_LANGUAGE)
         result: list[tuple[str, str, str, str]] = []
         for lang in sorted(langs):
             parts = [
@@ -3648,7 +3721,7 @@ class _Store:
                 result.append((ident, kind, lang, text))
         return result
 
-    def _collect_code_texts(  # noqa: C901
+    def _collect_code_texts(
         self,
         *,
         max_codes_per_codelist: int = 500,
@@ -3806,10 +3879,8 @@ class _Store:
             parent_id,
             depth,
         ) in rows:
-            # Determine languages from the dataset title
-            langs = set(title_map or {})
-            if not langs:
-                langs = {"en"}
+            # One row per tag the code's label holds; ``zxx`` text is a code, not language.
+            langs = set(code_label_map or {}) - {_NO_LANGUAGE}
             alt_by_lang = alt_by_code.get(str(code_urn), {})
             blend_by_lang = blend_text_by_code.get(str(code_urn), {})
             context_by_lang = context_by_code.get(str(code_urn), {})
@@ -3846,7 +3917,7 @@ class _Store:
                         "id": ident,
                         "entity_type": "code",
                         "lang": lang,
-                        "text": text,
+                        "document": text,
                         "dimension_id": dim_id or "",
                         "dimension_label": dim_label,
                         "code_id": code_id or "",
@@ -3858,6 +3929,8 @@ class _Store:
                         "concept_urn": "",
                         "scheme_urn": "",
                         "concept_id": "",
+                        "concept_name": "",
+                        "concept_description": "",
                         "set_urn": "",
                         "attribute_path": "",
                         "section_title": "",
@@ -3922,7 +3995,7 @@ class _Store:
 
         items: list[SearchRow] = []
         for concept_urn, scheme_urn, concept_id, name_map, desc_map in rows:
-            langs = set(name_map or {}) | set(desc_map or {})
+            langs = (set(name_map or {}) | set(desc_map or {})) - {_NO_LANGUAGE}
             if not langs:
                 continue
             for lang in sorted(langs):
@@ -3936,7 +4009,7 @@ class _Store:
                         "id": str(concept_urn),
                         "entity_type": "concept",
                         "lang": lang,
-                        "text": text,
+                        "document": text,
                         "dimension_id": "",
                         "dimension_label": "",
                         "code_id": "",
@@ -3951,6 +4024,8 @@ class _Store:
                         "concept_urn": str(concept_urn),
                         "scheme_urn": str(scheme_urn or ""),
                         "concept_id": str(concept_id or ""),
+                        "concept_name": name,
+                        "concept_description": desc,
                     }
                 )
         return items
@@ -4039,7 +4114,7 @@ class _Store:
                             # Lead with the section title so a section-name
                             # query ("data quality") matches on BM25 even
                             # when the body doesn't repeat the heading.
-                            "text": f"{section_title} | {chunk}",
+                            "document": f"{section_title} | {chunk}",
                             "dimension_id": "",
                             "dimension_label": "",
                             "code_id": "",
@@ -4051,6 +4126,8 @@ class _Store:
                             "concept_urn": "",
                             "scheme_urn": "",
                             "concept_id": "",
+                            "concept_name": "",
+                            "concept_description": "",
                             "set_urn": str(set_urn),
                             "attribute_path": str(attribute_path),
                             "section_title": section_title,
@@ -4075,7 +4152,7 @@ class _Store:
         if not refmeta_rows or self._embedding_model is None:
             return
         if embed_reference_metadata:
-            items = [(r["id"], r["entity_type"], r["lang"], r["text"]) for r in refmeta_rows]
+            items = [(r["id"], r["entity_type"], r["lang"], r["document"]) for r in refmeta_rows]
             encoded = self._batch_encode(items, progress=progress, reuse=reuse)
             for row, enc in zip(refmeta_rows, encoded, strict=True):
                 row["embedding"] = enc.get("embedding")
@@ -4102,7 +4179,7 @@ class _Store:
         if not concept_rows or self._embedding_model is None:
             return
         if embed_concepts:
-            items = [(r["id"], r["entity_type"], r["lang"], r["text"]) for r in concept_rows]
+            items = [(r["id"], r["entity_type"], r["lang"], r["document"]) for r in concept_rows]
             encoded = self._batch_encode(items, progress=progress, reuse=reuse)
             for row, enc in zip(concept_rows, encoded, strict=True):
                 row["embedding"] = enc.get("embedding")
@@ -4601,8 +4678,10 @@ class _Store:
             if include_alt_labels:
                 annotation_types.add(_ALT_LABEL_ANNOTATION_TYPE)
         types = sorted(annotation_types)
+        pairs = dict(self._c.execute("SELECT alternate_tag, primary_tag FROM language_alternate").fetchall())
         self._lance.add_bulk(
             dataset_rows + code_rows + concept_rows + refmeta_rows,
+            pairs=pairs,
             embedding_dim=embedding_dim,
             annotations={"types": types, "fingerprint": annotation_fingerprint(self._c, types)},
         )
@@ -4665,7 +4744,7 @@ class _Store:
                 "id": item[0],
                 "entity_type": item[1],
                 "lang": item[2],
-                "text": item[3],
+                "document": item[3],
                 "dimension_id": "",
                 "dimension_label": "",
                 "code_id": "",
@@ -4677,6 +4756,8 @@ class _Store:
                 "concept_urn": "",
                 "scheme_urn": "",
                 "concept_id": "",
+                "concept_name": "",
+                "concept_description": "",
                 "set_urn": "",
                 "attribute_path": "",
                 "section_title": "",
@@ -4713,7 +4794,7 @@ class _Store:
                     code_rows[i]["id"],
                     code_rows[i]["entity_type"],
                     code_rows[i]["lang"],
-                    code_rows[i]["text"],
+                    code_rows[i]["document"],
                 )
                 for i in encode_idx
             ]
@@ -4848,7 +4929,7 @@ class _Store:
                 "id": item[0],
                 "entity_type": item[1],
                 "lang": item[2],
-                "text": item[3],
+                "document": item[3],
                 "embedding": vec,
                 "text_sha256": h,
                 "dimension_id": "",
@@ -4862,6 +4943,8 @@ class _Store:
                 "concept_urn": "",
                 "scheme_urn": "",
                 "concept_id": "",
+                "concept_name": "",
+                "concept_description": "",
                 "set_urn": "",
                 "attribute_path": "",
                 "section_title": "",
@@ -6004,7 +6087,7 @@ class _Store:
         text: str,
         *,
         kinds: Sequence[str] = ("dataset", "concept", "code"),
-        lang: str = "en",
+        lang: str,
         limit: int = 50,
         offset: int = 0,
         operator: str = "or",
@@ -6021,10 +6104,10 @@ class _Store:
 
         For type-narrowed search restrict to one kind:
 
-        - `datasets` — ``cat.datasets.find(text, mode=...)``
-        - `concepts` — ``cat.concepts.find(text, mode=...)``
-        - `codes`    — ``cat.codes.find(text, mode=...)``
-        - `reference_metadata` — ``cat.reference_metadata.find(text, ...)``
+        - `datasets` — ``cat.datasets.find(text, lang=..., mode=...)``
+        - `concepts` — ``cat.concepts.find(text, lang=..., mode=...)``
+        - `codes`    — ``cat.codes.find(text, lang=..., mode=...)``
+        - `reference_metadata` — ``cat.reference_metadata.find(text, lang=..., ...)``
 
         ``kinds`` defaults to dataset/concept/code; pass
         ``"reference_metadata"`` explicitly to fold methodology-document
@@ -6059,7 +6142,7 @@ class _Store:
                 a kind that ranks poorly overall still gets considered.
         """
         lang = sdmxlib.normalize_tag(lang)
-        if self._lance is None:
+        if self._search_index() is None:
             return SearchResult(items=[], total=0, offset=offset)
         # Each kind delegates to its typed scope's bm25 ranking; vector
         # evidence is opt-in per-scope (narrow to one kind, mode="hybrid").
@@ -6168,73 +6251,128 @@ class _Store:
             return {}
         return {row[0]: row[1] for row in rows}
 
-    def agent_labels(self, lang: str = "en") -> dict[str, str]:
-        """Return ``{agent_id: display_name}`` for the publisher facet sidebar."""
-        lang = sdmxlib.normalize_tag(lang)
-        rows = self._c.execute(
-            "SELECT id, name[?] FROM agent WHERE name[?] IS NOT NULL",
-            [lang, lang],
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
+    def _id_labels(self, sql: str, params: list[object], langs: tuple[str, ...], field_name: str) -> Labels[str]:
+        """A `Labels` from rows of (key, text, tag), each key its own entity."""
+        rows = self._c.execute(sql, params).fetchall()
+        return Labels(
+            ((r[0], None if r[1] is None else LocalisedString(r[1], r[2])) for r in rows),
+            (Gap(key=r[0], entity=r[0], field=field_name, langs=langs) for r in rows if r[1] is None),
+        )
 
-    def concept_labels(self, lang: str = "en", *, scheme_uri: str | None = None) -> dict[str, str]:
-        """Return ``{concept_uri: display_label}`` for the theme/subject facet sidebar."""
-        lang = sdmxlib.normalize_tag(lang)
-        if scheme_uri is not None:
-            rows = self._c.execute(
-                "SELECT uri, label[?] FROM concept WHERE label[?] IS NOT NULL AND in_scheme = ?",
-                [lang, lang, scheme_uri],
-            ).fetchall()
-        else:
-            rows = self._c.execute(
-                "SELECT uri, label[?] FROM concept WHERE label[?] IS NOT NULL",
-                [lang, lang],
-            ).fetchall()
-        return {row[0]: row[1] for row in rows}
+    def agent_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each agent's name in the first of *lang* it holds, by agent id, for the publisher facet."""
+        langs = _as_langs(lang)
+        pick = pick_map("name", langs)
+        return self._id_labels(
+            f"SELECT id, {pick.text}, {pick.lang} FROM agent ORDER BY id",
+            [*pick.text_params, *pick.lang_params],
+            langs,
+            "name",
+        )
 
-    def spatial_labels(self, lang: str = "en") -> dict[str, str]:
-        """Return ``{facet_key: display_label}`` for the spatial facet sidebar.
+    def concept_labels(self, *, lang: Langs, scheme_uri: str | None = None) -> Labels[str]:
+        """Each concept's label in the first of *lang* it holds, by URI, for the theme facet."""
+        langs = _as_langs(lang)
+        pick = pick_map("label", langs)
+        where = "" if scheme_uri is None else " WHERE in_scheme = ?"
+        return self._id_labels(
+            f"SELECT uri, {pick.text}, {pick.lang} FROM concept{where} ORDER BY uri",
+            [*pick.text_params, *pick.lang_params, *([] if scheme_uri is None else [scheme_uri])],
+            langs,
+            "label",
+        )
 
-        A spatial facet key is the region's ``uri`` when it has one, else its
-        English label, else its ``und`` label (`facets`). A ``uri`` key is
-        labelled from the concept with that URI, such as a CKAN
-        ``geographic_region`` code (GH-83), then from the stored label; it is
-        left out when neither has *lang*. A label key is labelled in *lang*,
-        falling back to the key, and only for a language other than English,
-        where an English key already reads as its label. A key whose rows
-        carry different labels gets the least, so the result is the same on
-        every call.
+    def spatial_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each spatial facet key's label in the first of *lang* any of its sources holds.
+
+        A key is a region's ``uri``, else a hash of its label map (`facets`).
+        Its sources are the concept whose URI is the key, then every coverage
+        under the key. The first requested tag any source holds answers;
+        within that tag the concept wins over a coverage, then the least text.
         """
-        lang = sdmxlib.normalize_tag(lang)
-        # The inner SELECT names the COALESCE results so the outer GROUP BY
-        # aggregates plain columns: DuckDB rejects a COALESCE built from
-        # grouped MAP-indexed expressions.
+        langs = _as_langs(lang)
         rows = self._c.execute(
-            """SELECT key, min(label) FROM (
-                SELECT ds.uri AS key, COALESCE(c.label[?], ds.label[?]) AS label
+            f"""WITH keyed AS (
+                SELECT {_SPATIAL_FACET_KEY} AS key, ds.uri, ds.label
                 FROM dataset_spatial ds
-                LEFT JOIN concept c ON c.uri = ds.uri
-                WHERE ds.uri IS NOT NULL
+                WHERE {_SPATIAL_FACET_KEY} IS NOT NULL
+            ),
+            cand AS (
+                SELECT k.key, 0 AS source, e.key AS lang, e.value AS text
+                FROM (SELECT DISTINCT key, uri FROM keyed WHERE uri IS NOT NULL) k
+                JOIN concept c ON c.uri = k.uri,
+                LATERAL (SELECT unnest(map_entries(c.label)) AS e)
+                UNION ALL
+                SELECT k.key, 1 AS source, e.key AS lang, e.value AS text
+                FROM keyed k, LATERAL (SELECT unnest(map_entries(k.label)) AS e)
             )
-            WHERE label IS NOT NULL
-            GROUP BY key""",
-            [lang, lang],
+            SELECT k.key,
+                first({{'text': cand.text, 'lang': cand.lang}}
+                      ORDER BY list_position($langs, cand.lang), cand.source, cand.text)
+                    FILTER (WHERE cand.text IS NOT NULL AND list_contains($langs, cand.lang))
+            FROM (SELECT DISTINCT key FROM keyed) k
+            LEFT JOIN cand ON cand.key = k.key
+            GROUP BY k.key
+            ORDER BY k.key""",
+            {"langs": list(langs)},
         ).fetchall()
-        labels: dict[str, str] = {row[0]: row[1] for row in rows}
-        if lang != "en":
-            rows = self._c.execute(
-                """SELECT key, min(label) FROM (
-                    SELECT COALESCE(label['en'], label['und']) AS key,
-                        COALESCE(label[?], label['en'], label['und']) AS label
-                    FROM dataset_spatial
-                    WHERE uri IS NULL
-                )
-                WHERE key IS NOT NULL
-                GROUP BY key""",
-                [lang],
-            ).fetchall()
-            labels.update({row[0]: row[1] for row in rows})
-        return labels
+        return Labels(
+            ((r[0], None if r[1] is None else LocalisedString(r[1]["text"], r[1]["lang"])) for r in rows),
+            (Gap(key=r[0], entity=r[0], field="label", langs=langs) for r in rows if r[1] is None),
+        )
+
+    def preference(self, *, lang: str) -> tuple[str, ...]:
+        """*lang*, then the tags recorded as its pair partners.
+
+        For a primary tag: the tag, then its alternates in tag order. For an
+        alternate: the tag, its primary, then the primary's other alternates.
+        For a tag in no pair: the tag alone.
+
+        Args:
+            lang: A tag.
+
+        Returns:
+            The tags, normalised, in that order.
+        """
+        tag = sdmxlib.normalize_tag(lang)
+        pairs = self._c.execute("SELECT alternate_tag, primary_tag FROM language_alternate").fetchall()
+        primary = next((p for a, p in pairs if a == tag), tag)
+        others = sorted(a for a, p in pairs if p == primary and a != tag)
+        return (tag, *([primary] if primary != tag else []), *others)
+
+    def language_counts(self) -> list[Row]:
+        """How many texts each tag holds, per multilingual column.
+
+        Returns:
+            One `Row` per ``table``, ``column`` and ``lang`` with ``texts``,
+            the number of non-NULL texts under that tag, ordered by table,
+            column and tag. The columns are every ``MAP(VARCHAR, VARCHAR)``
+            column of the ``statcat`` schema except ``dataset.extras``, then
+            `_SDMX_TEXT_COLUMNS`, then ``sdmx.localized_text`` by ``field``.
+        """
+        cols = self._c.execute(
+            """SELECT table_name, column_name FROM information_schema.columns
+            WHERE table_catalog = current_database() AND table_schema = 'statcat'
+              AND data_type = 'MAP(VARCHAR, VARCHAR)'
+              AND NOT (table_name = 'dataset' AND column_name = 'extras')
+            ORDER BY table_name, column_name"""
+        ).fetchall()
+        targets = [(f"statcat.{t}", c) for t, c in cols] + list(_SDMX_TEXT_COLUMNS)
+        parts = [
+            f"""SELECT '{table}' AS tbl, '{column}' AS col, e.key AS lang, count(*) AS texts
+            FROM (SELECT unnest(map_entries({column})) AS e FROM {table})
+            WHERE e.value IS NOT NULL GROUP BY e.key"""
+            for table, column in targets
+        ]
+        parts.append(
+            """SELECT 'sdmx.localized_text', field, lang, count(*) FROM sdmx.localized_text
+            WHERE text IS NOT NULL GROUP BY field, lang"""
+        )
+        try:
+            rows = self._c.execute(" UNION ALL ".join(parts) + " ORDER BY 1, 2, 3").fetchall()
+        except duckdb.CatalogException:
+            rows = self._c.execute(" UNION ALL ".join(parts[: len(cols)]) + " ORDER BY 1, 2, 3").fetchall()
+        return [Row(table=t, column=c, lang=lang, texts=n) for t, c, lang, n in rows]
 
     # ------------------------------------------------------------------
     # Internal query execution
@@ -6257,7 +6395,7 @@ class _Store:
         facet_fields: list[str],
         *,
         include_rels: frozenset[str] | None = None,
-        search_lang: str = "en",
+        search_lang: str | None = None,
     ) -> SearchResult[T]:
         # Entity types (Agent, DataService, Distribution) use flat-column queries
         if cls in _ENTITY_SPECS:
@@ -6327,7 +6465,9 @@ class _Store:
         for ff in facet_fields:
             computed_facets[ff] = self._compute_facet_in_context(ff, fsql)
 
-        return SearchResult(items=items, total=qr.total, facets=computed_facets, offset=offset, scores=qr.scores)
+        return SearchResult(
+            items=items, total=qr.total, facets=computed_facets, offset=offset, scores=qr.scores, langs=qr.langs
+        )
 
     def _execute_entity_query[T](
         self,
@@ -6345,9 +6485,11 @@ class _Store:
         params: list[object] = []
         for key, val in filters.items():
             col = spec.filter_cols.get(key)
-            if col:
-                wheres.append(f"{col} = ?")
-                params.append(val)
+            if col is None:
+                msg = f"{cls.__name__} has no filter {key!r}; the filters are {sorted(spec.filter_cols)}"
+                raise ValueError(msg)
+            wheres.append(f"{col} = ?")
+            params.append(val)
 
         # Entity queries (Agent, DataService, Distribution) don't bind to
         # the ``d.identifier`` outer alias that exists_filters expect. We
@@ -6399,7 +6541,7 @@ class _Store:
         from_ids: list[str] | None = None,  # noqa: ARG002
         operator: str = "or",
         fuzziness: int = 0,
-        lang: str = "en",
+        lang: str | None = None,
         kinds: Sequence[str] = _DATASET_ENTITY_TYPES,
     ) -> _QueryResult:
         """Execute a search query using LanceDB.
@@ -6421,7 +6563,11 @@ class _Store:
         empty-results case, and a soft failure is friendlier than a
         hard ``RuntimeError`` mid-request.
         """
-        if self._lance is None:
+        if lang is None:
+            msg = "search needs lang, the tag whose table answers it"
+            raise ValueError(msg)
+        lance = self._search_index()
+        if lance is None:
             return _QueryResult(total=0, rows=[], scores={})
 
         id_filter: list[str] | None = None
@@ -6450,10 +6596,11 @@ class _Store:
                 entity_type=kinds,
                 id_filter=id_filter,
             )
-            search_ids = sorted(rrf_scores, key=lambda i: rrf_scores[i], reverse=True)
-            scores = rrf_scores
+            search_ids = sorted(rrf_scores, key=lambda i: rrf_scores[i][0], reverse=True)
+            scores = {i: score for i, (score, _) in rrf_scores.items()}
+            langs = {i: tag for i, (_, tag) in rrf_scores.items()}
         else:
-            bm25_hits = self._lance.bm25_search(
+            bm25_hits = lance.bm25_search(
                 text,
                 lang=lang,
                 limit=pool,
@@ -6464,6 +6611,7 @@ class _Store:
             )
             search_ids = [h[0] for h in bm25_hits]
             scores = {h[0]: h[1] for h in bm25_hits}
+            langs = {h[0]: h[2] for h in bm25_hits}
 
         if not search_ids:
             return _QueryResult(total=0, rows=[], scores={})
@@ -6488,7 +6636,10 @@ class _Store:
 
         page_start = offset
         page_end = (offset + limit) if limit is not None else None
-        return _QueryResult(total=len(ordered), rows=ordered[page_start:page_end], scores=filtered_scores)
+        page = ordered[page_start:page_end]
+        return _QueryResult(
+            total=len(ordered), rows=page, scores=filtered_scores, langs={k: langs[k] for k in page if k in langs}
+        )
 
     def _ranked_ids_from_search(
         self,
@@ -6504,7 +6655,7 @@ class _Store:
         limit: int | None,
         offset: int,
         *,
-        search_lang: str = "en",
+        search_lang: str | None = None,
     ) -> list[str]:
         """Run a search query with relational filters and return ranked IDs."""
         search_text = hybrid_text if hybrid_text is not None else text
@@ -6560,8 +6711,9 @@ class _Store:
                     if spec.lang is None:
                         msg = f"lang is required when sorting by MAP column {spec.field!r}"
                         raise ValueError(msg)
-                    col_expr = f"d.{spec.field}[?]"
-                    order_params.append(spec.lang)
+                    pick = pick_map(f"d.{spec.field}", spec.lang)
+                    col_expr = pick.text
+                    order_params.extend(pick.text_params)
                 else:
                     col_expr = f"d.{spec.field}"
                 clause = f"{col_expr} {'DESC' if spec.desc else 'ASC'}"
@@ -6612,7 +6764,7 @@ class _Store:
         self,
         cls: type,
         select_cols: tuple[str, ...],
-        select_lang: str | None,
+        select_lang: tuple[str, ...] | None,
         filters: dict[str, object],
         exists_filters: list[PositionalFilter],
         map_filters: list[MapFilter],
@@ -6620,7 +6772,7 @@ class _Store:
         sort_fields: list[_SortSpec],
         limit: int | None,
         offset: int,
-    ) -> list[Row]:
+    ) -> RowList:
         """Lightweight Row projection — single SQL, no store.get()."""
         fsql = self._build_filter_sql(cls, filters)
         for ef in exists_filters:
@@ -6630,19 +6782,25 @@ class _Store:
             mf_sql, mf_params = mf.to_sql(fsql)
             fsql.add_where(mf_sql, *mf_params)
         if from_ids is not None and not from_ids:
-            return []
+            return RowList()
         if from_ids is not None:
             placeholders = ", ".join("?" * len(from_ids))
             fsql.add_where(f"d.identifier IN ({placeholders})", *from_ids)
 
+        # The identifier comes last, for the gaps; it is not a Row key unless selected.
+        keys: list[str] = []
         col_exprs: list[str] = []
         col_params: list[object] = []
         for col in select_cols:
-            if col in _MAP_SELECTABLE_COLUMNS:
-                col_exprs.append(f"d.{col}[?] AS {col}")
-                col_params.append(select_lang)
+            if col in _MAP_SELECTABLE_COLUMNS and select_lang is not None:
+                pick = pick_map(f"d.{col}", select_lang)
+                col_exprs.extend([pick.text, pick.lang])
+                col_params.extend([*pick.text_params, *pick.lang_params])
+                keys.extend([col, f"{col}__lang"])
             else:
                 col_exprs.append(f"d.{col}")
+                keys.append(col)
+        col_exprs.append("d.identifier")
 
         order_clause, order_params = self._build_order_clause(sort_fields, from_ids)
 
@@ -6659,13 +6817,20 @@ class _Store:
             all_params = [*all_params, *order_params]
 
         rows = self._c.execute(sql, all_params).fetchall()
-        return [Row({col: row[i] for i, col in enumerate(select_cols)}) for row in rows]
+        out = [Row(zip(keys, row, strict=False)) for row in rows]
+        gaps = [
+            Gap(key=row[-1], entity=row[-1], field=col, langs=select_lang)
+            for row, item in zip(rows, out, strict=True)
+            for col in select_cols
+            if col in _MAP_SELECTABLE_COLUMNS and select_lang is not None and item[col] is None
+        ]
+        return RowList(out, gaps)
 
     def _execute_scalar_projection(
         self,
         cls: type,
         scalar_col: str,
-        select_lang: str | None,
+        select_lang: tuple[str, ...] | None,
         filters: dict[str, object],
         exists_filters: list[PositionalFilter],
         map_filters: list[MapFilter],
@@ -6673,7 +6838,7 @@ class _Store:
         sort_fields: list[_SortSpec],
         limit: int | None,
         offset: int,
-    ) -> list[object]:
+    ) -> ValueList:
         """Single-column flat projection — returns list of bare values."""
         fsql = self._build_filter_sql(cls, filters)
         for ef in exists_filters:
@@ -6683,15 +6848,17 @@ class _Store:
             mf_sql, mf_params = mf.to_sql(fsql)
             fsql.add_where(mf_sql, *mf_params)
         if from_ids is not None and not from_ids:
-            return []
+            return ValueList()
         if from_ids is not None:
             placeholders = ", ".join("?" * len(from_ids))
             fsql.add_where(f"d.identifier IN ({placeholders})", *from_ids)
 
         col_params: list[object] = []
-        if scalar_col in _MAP_SELECTABLE_COLUMNS:
-            col_expr = f"d.{scalar_col}[?]"
-            col_params.append(select_lang)
+        is_map = scalar_col in _MAP_SELECTABLE_COLUMNS and select_lang is not None
+        if is_map and select_lang is not None:
+            pick = pick_map(f"d.{scalar_col}", select_lang)
+            col_expr = f"{pick.text}, {pick.lang}, d.identifier"
+            col_params.extend([*pick.text_params, *pick.lang_params])
         else:
             col_expr = f"d.{scalar_col}"
 
@@ -6710,7 +6877,12 @@ class _Store:
             all_params = [*all_params, *order_params]
 
         rows = self._c.execute(sql, all_params).fetchall()
-        return [r[0] for r in rows]
+        if not is_map or select_lang is None:
+            return ValueList(r[0] for r in rows)
+        return ValueList(
+            (None if r[0] is None else LocalisedString(r[0], r[1]) for r in rows),
+            (Gap(key=r[2], entity=r[2], field=scalar_col, langs=select_lang) for r in rows if r[0] is None),
+        )
 
     def _execute_exists(
         self,
@@ -6880,17 +7052,19 @@ class _Store:
             return None
         return row[0] if row else None
 
-    def code_map(self, dataset_id: str, lang: str = "en") -> dict[str, dict[str, str]]:
-        """Return ``{dimension_id: {code_id: label}}`` for a dataset.
+    def code_map(self, dataset_id: str, *, lang: Langs) -> dict[str, Labels[str]]:
+        """Return each dimension's code names for a dataset, by dimension and code ID.
 
         Joins catalog ``dataset`` -> ``sdmx.dataflow`` -> ``sdmx.dsd_component`` ->
-        ``sdmx.code`` entirely in SQL.
+        ``sdmx.code`` entirely in SQL. Each dimension's `Labels` holds its
+        codes in codelist order and its own gaps.
         """
-        lang = sdmxlib.normalize_tag(lang)
+        langs = _as_langs(lang)
+        pick = pick_map("c.name", langs)
         try:
             rows = self._c.execute(
-                """
-                SELECT dc.component_id, c.code_id, c.name[?]
+                f"""
+                SELECT dc.component_id, c.code_id, {pick.text}, {pick.lang}, dc.codelist_urn
                 FROM statcat.dataset d
                 JOIN sdmx.dataflow df ON df.urn = d.sdmx_dataflow_urn
                 JOIN sdmx.dsd_component dc ON dc.dsd_urn = df.dsd_urn
@@ -6899,14 +7073,25 @@ class _Store:
                   AND dc.component_type = 'Dimension'
                 ORDER BY dc.position, c.position
                 """,
-                [lang, dataset_id],
+                [*pick.text_params, *pick.lang_params, dataset_id],
             ).fetchall()
         except duckdb.CatalogException:
             return {}
-        result: dict[str, dict[str, str]] = {}
-        for dim_id, code_id, label in rows:
-            result.setdefault(dim_id, {})[code_id] = label or code_id
-        return result
+        # The tag is NULL exactly when the text is.
+        by_dim: dict[str, list[tuple[str, str | None, str, str]]] = {}
+        for dim_id, code_id, text, tag, cl_urn in rows:
+            by_dim.setdefault(dim_id, []).append((code_id, text, tag, cl_urn))
+        return {
+            dim_id: Labels(
+                ((code_id, None if text is None else LocalisedString(text, tag)) for code_id, text, tag, _ in codes),
+                (
+                    Gap(key=code_id, entity=cl_urn, field="name", langs=langs)
+                    for code_id, text, _, cl_urn in codes
+                    if text is None
+                ),
+            )
+            for dim_id, codes in by_dim.items()
+        }
 
     def codelist_for(self, dataset_id: str, dimension: str) -> sdmxlib.model.codelist.Codelist | None:
         """Return the Codelist for a specific dimension of a dataset.
@@ -7212,17 +7397,17 @@ class EditionView:
 
     @property
     def codes(self) -> CodesScope:
-        """Typed search and lookup over SDMX codes: ``view.codes.find("Toronto")``."""
+        """Typed search and lookup over SDMX codes: ``view.codes.find("Toronto", lang="en")``."""
         return self._s().codes
 
     @property
     def concepts(self) -> ConceptsScope:
-        """Typed search and lookup over SDMX concepts: ``view.concepts.find("Gini")``."""
+        """Typed search and lookup over SDMX concepts: ``view.concepts.find("Gini", lang="en")``."""
         return self._s().concepts
 
     @property
     def datasets(self) -> DatasetsScope:
-        """Typed dataset search: ``view.datasets.find(q, mode="hybrid")``."""
+        """Typed dataset search: ``view.datasets.find(q, mode="hybrid", lang="en")``."""
         return self._s().datasets
 
     @property
@@ -7299,7 +7484,7 @@ class EditionView:
         text: str,
         *,
         kinds: Sequence[str] = ("dataset", "concept", "code"),
-        lang: str = "en",
+        lang: str,
         limit: int = 50,
         offset: int = 0,
         operator: str = "or",
@@ -7346,39 +7531,65 @@ class EditionView:
         """
         return self._s().facets(*fields)
 
-    def agent_labels(self, lang: str = "en") -> dict[str, str]:
-        """Each agent's name in *lang*, by agent id.
+    def agent_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each agent's name in the first of *lang* it holds, by agent id.
 
         Args:
-            lang: The language tag.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            The labels, by agent id.
+            Every agent, ordered by id; an agent whose name holds none of the
+            tags maps to ``None`` and is a gap.
         """
-        return self._s().agent_labels(lang)
+        return self._s().agent_labels(lang=lang)
 
-    def concept_labels(self, lang: str = "en", *, scheme_uri: str | None = None) -> dict[str, str]:
-        """Each concept's label in *lang*, by concept URI.
+    def concept_labels(self, *, lang: Langs, scheme_uri: str | None = None) -> Labels[str]:
+        """Each concept's label in the first of *lang* it holds, by concept URI.
 
         Args:
-            lang: The language tag.
+            lang: A tag, or tags in order of preference.
             scheme_uri: Restrict to one concept scheme.
 
         Returns:
-            The labels, by concept URI.
+            Every concept, ordered by URI, with its gaps.
         """
-        return self._s().concept_labels(lang, scheme_uri=scheme_uri)
+        return self._s().concept_labels(lang=lang, scheme_uri=scheme_uri)
 
-    def spatial_labels(self, lang: str = "en") -> dict[str, str]:
-        """Each spatial facet key's label in *lang*.
+    def spatial_labels(self, *, lang: Langs) -> Labels[str]:
+        """Each spatial facet key's label in the first of *lang* its sources hold.
 
         Args:
-            lang: The language tag.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            The labels, by facet key.
+            Every key of ``facets("spatial")``, ordered by key, with its gaps.
         """
-        return self._s().spatial_labels(lang)
+        return self._s().spatial_labels(lang=lang)
+
+    def preference(self, *, lang: str) -> tuple[str, ...]:
+        """*lang*, then the tags its recorded language pairs join it with.
+
+        Pass the result as ``lang=`` to a label call, adding ``"und"`` and
+        ``"zxx"`` last to show untagged text and code labels too.
+
+        Args:
+            lang: A tag.
+
+        Returns:
+            For a primary tag, the tag and its alternates in tag order; for an
+            alternate, the tag, its primary and the primary's other
+            alternates; for a tag in no pair, the tag alone.
+        """
+        return self._s().preference(lang=lang)
+
+    def language_counts(self) -> list[Row]:
+        """How many texts each tag holds, per multilingual column.
+
+        Returns:
+            One `Row` per ``table``, ``column`` and ``lang``, with ``texts``,
+            ordered by table, column and tag.
+        """
+        return self._s().language_counts()
 
     def get_concept_scheme(self, uri: str) -> ConceptScheme | None:
         """A concept scheme with its concepts, or ``None``.
@@ -7402,17 +7613,18 @@ class EditionView:
         """
         return self._s().get_concept(uri)
 
-    def code_map(self, dataset_id: str, lang: str = "en") -> dict[str, dict[str, str]]:
-        """``{dimension_id: {code_id: label}}`` for a dataset.
+    def code_map(self, dataset_id: str, *, lang: Langs) -> dict[str, Labels[str]]:
+        """Each dimension's code names for a dataset, by dimension and code ID.
 
         Args:
             dataset_id: The dataset's identifier.
-            lang: The language of the labels.
+            lang: A tag, or tags in order of preference.
 
         Returns:
-            The labels, by dimension and code.
+            One `Labels` per dimension, holding its codes in codelist order and
+            its gaps.
         """
-        return self._s().code_map(dataset_id, lang)
+        return self._s().code_map(dataset_id, lang=lang)
 
     def codelist_for(self, dataset_id: str, dimension: str) -> sdmxlib.model.codelist.Codelist | None:
         """The codelist of one dimension of a dataset, or ``None``.

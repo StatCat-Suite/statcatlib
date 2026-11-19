@@ -82,6 +82,7 @@ from statcatlib.store.store import IncompatibleCatalogError
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
 
+    from sdmxlib.edition import Lifecycle
     from sdmxlib.inventory import EventKind, FullInventory, Leaf, LeafEntry, State, Tombstone
 
     from statcatlib.model.catalog import CatalogDescription
@@ -414,6 +415,25 @@ class CatalogAdmin:
         """Every product the newest Inventory version records, in any state, sorted."""
         full = self._writer.full()
         return [] if full is None else full.products()
+
+    def lifecycle(self, product_id: str) -> Lifecycle | None:
+        """The lifecycle the newest Inventory version records for the product.
+
+        Pass it to `Product.working_copy`, which refuses another lifecycle
+        than the recorded one, as a re-index over every product does
+        (``docs/upgrading.md``, 0.21.0).
+
+        Args:
+            product_id: The product.
+
+        Returns:
+            ``revisable`` or ``final``; ``None`` for a product the Inventory
+            does not record.
+        """
+        full = self._writer.full()
+        if full is None or product_id not in full.products():
+            return None
+        return full.leaf(product_id).lifecycle
 
     def editions(self, product_id: str) -> list[EditionEntry]:
         """The product's editions in every state, as the newest Inventory version records them.

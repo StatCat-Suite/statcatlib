@@ -96,7 +96,7 @@ def test_collect_row_shape(tmp_path: pathlib.Path) -> None:
     assert row["entity_type"] == "reference_metadata"
     assert row["section_title"] == "Data Quality Topic"
     assert (row["set_urn"] or "").endswith("MS_RG_004(1.0)")
-    assert row["text"].startswith("Data Quality Topic | ")
+    assert row["document"].startswith("Data Quality Topic | ")
 
 
 def test_metadataflow_filter(tmp_path: pathlib.Path) -> None:
@@ -142,11 +142,11 @@ def test_xhtml_section_is_down_converted_to_markdown(tmp_path: pathlib.Path) -> 
     cat.registry.add_all([msd, mdf, ms])
 
     row = next(r for r in cat._store._collect_reference_metadata_texts() if r["lang"] == "en")
-    assert "<table>" not in row["text"]  # tags gone
-    assert "<p>" not in row["text"]
-    assert "| Geo | Rate |" in row["text"]  # table recovered as markdown
-    assert "**Table 1 Rates**" in row["text"]
-    assert "Non-response was 2.0 percent." in row["text"]
+    assert "<table>" not in row["document"]  # tags gone
+    assert "<p>" not in row["document"]
+    assert "| Geo | Rate |" in row["document"]  # table recovered as markdown
+    assert "**Table 1 Rates**" in row["document"]
+    assert "Non-response was 2.0 percent." in row["document"]
 
 
 # ── search ──────────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ def test_xhtml_section_is_down_converted_to_markdown(tmp_path: pathlib.Path) -> 
 
 def test_find_returns_section(tmp_path: pathlib.Path) -> None:
     cat, _ = _indexed_catalog(tmp_path)
-    hits = cat.reference_metadata.find("non-response rate income imputation", limit=5).items
+    hits = cat.reference_metadata.find("non-response rate income imputation", limit=5, lang="en").items
     assert hits, "expected a reference_metadata hit"
     top = hits[0]
     assert top.kind == "reference_metadata"
@@ -164,19 +164,20 @@ def test_find_returns_section(tmp_path: pathlib.Path) -> None:
 
 def test_find_scoped_to_target(tmp_path: pathlib.Path) -> None:
     cat, code = _indexed_catalog(tmp_path)
-    assert cat.reference_metadata.find("income imputation", target_urn=str(code)).items
+    assert cat.reference_metadata.find("income imputation", target_urn=str(code), lang="en").items
     # A code with no attached metadata yields nothing.
     other = str(_topic_urn("999"))
-    assert cat.reference_metadata.find("income imputation", target_urn=other).items == []
+    assert cat.reference_metadata.find("income imputation", target_urn=other, lang="en").items == []
 
 
 def test_search_includes_reference_metadata_only_when_requested(tmp_path: pathlib.Path) -> None:
     cat, _ = _indexed_catalog(tmp_path)
-    default = cat.search("non-response rate income")
+    default = cat.search("non-response rate income", lang="en")
     assert all(h.kind != "reference_metadata" for h in default.items)
     with_refmeta = cat.search(
         "non-response rate income",
         kinds=("dataset", "concept", "code", "reference_metadata"),
+        lang="en",
     )
     assert any(h.kind == "reference_metadata" for h in with_refmeta.items)
 
@@ -201,6 +202,6 @@ def test_metadata_report_is_typed(tmp_path: pathlib.Path) -> None:
 def test_metadata_targets_closes_the_loop(tmp_path: pathlib.Path) -> None:
     # A search hit's set_urn resolves back to the artefacts it describes.
     cat, code = _indexed_catalog(tmp_path)
-    hit = cat.reference_metadata.find("income imputation").items[0]
+    hit = cat.reference_metadata.find("income imputation", lang="en").items[0]
     targets = cat.metadata_targets(hit.payload.set_urn)
     assert str(code) in targets

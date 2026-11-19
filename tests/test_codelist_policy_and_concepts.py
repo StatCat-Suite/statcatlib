@@ -18,6 +18,7 @@ import pathlib
 import warnings
 
 import pytest
+from sdmxlib import LocalisedString
 from sdmxlib.model.codelist import Code, Codelist
 from sdmxlib.model.concept import Concept, ConceptScheme
 from sdmxlib.model.dataflow import Dataflow
@@ -256,7 +257,7 @@ class TestCodelistIndexPolicy:
         # Vector search never sees the NULL rows; BM25 still finds them.
         nearest = tbl.search(model.encode("Canada"), vector_column_name="embedding").limit(100).to_list()
         assert all(r["codelist_urn"] != geo_urn for r in nearest)
-        assert any(h.payload.code_label == "Canada" for h in store.codes.find("Canada", lang="en").items)
+        assert any(h.payload.code_label.text == "Canada" for h in store.codes.find("Canada", lang="en").items)
 
 
 class TestConceptIndexing:
@@ -265,7 +266,7 @@ class TestConceptIndexing:
         ingest_sdmx(store, _make_registry_with_concepts())
         items = store._store._collect_concept_texts()
         assert len(items) > 0
-        labels = {r["text"] for r in items if r["lang"] == "en"}
+        labels = {r["document"] for r in items if r["lang"] == "en"}
         assert any("Gross Domestic Product" in t for t in labels)
         assert any("basket of consumer goods" in t for t in labels)
 
@@ -311,7 +312,7 @@ class TestConceptIndexing:
         # "Consumer Price Index" appears in a concept row but in no dataset row.
         # cat.search now spans all kinds — to keep dataset results dataset-shaped,
         # use cat.datasets.find which is type-narrowed.
-        result = store.datasets.find("Consumer Price Index", limit=10)
+        result = store.datasets.find("Consumer Price Index", limit=10, lang="en")
         assert all(hit.kind == "dataset" for hit in result.items)
         assert all(":Concept=" not in hit.payload.identifier for hit in result.items)
 
@@ -324,7 +325,7 @@ class TestSearchAnythingMode:
         ingest_sdmx(store, _make_registry_with_concepts())
         store.build_index(include_codes=True, include_concepts=True)
 
-        result = store.search("Annual", limit=20)
+        result = store.search("Annual", limit=20, lang="en")
         # The token "Annual" appears in both a code row (CL_FREQ:A) and a
         # dataset row (via dim labels). Anything-mode must surface both.
         kinds = {hit.kind for hit in result.items}
@@ -336,7 +337,7 @@ class TestSearchAnythingMode:
         ingest_sdmx(store, _make_registry_with_concepts())
         store.build_index(include_codes=True, include_concepts=True)
 
-        result = store.search("Annual", kinds=("code",), limit=20)
+        result = store.search("Annual", kinds=("code",), limit=20, lang="en")
         assert all(hit.kind == "code" for hit in result.items)
 
 
@@ -347,11 +348,14 @@ class TestScopeGet:
         # build_index not required for .get() — it reads sdmx.concept directly.
         row = cursor_of(store).execute("SELECT concept_urn FROM sdmx.concept WHERE concept_id = 'GDP'").fetchone()
         assert row is not None
-        gdp = store.concepts.get(row[0])
+        gdp = store.concepts.get(row[0], lang="en")
         assert gdp is not None
         assert gdp.concept_id == "GDP"
-        assert "Gross Domestic Product" in gdp.name
-        assert "monetary value" in gdp.description
+        assert gdp.name is not None
+        assert gdp.name.lang == "en"
+        assert "Gross Domestic Product" in gdp.name.text
+        assert gdp.description is not None
+        assert "monetary value" in gdp.description.text
 
     def test_codes_get_returns_payload(self, tmp_path: pathlib.Path) -> None:
         store = open_scratch(tmp_path / "catalog")
@@ -359,10 +363,10 @@ class TestScopeGet:
         ingest_sdmx(store, registry)
         row = cursor_of(store).execute("SELECT code_urn FROM sdmx.code WHERE code_id = 'CA'").fetchone()
         assert row is not None
-        ca = store.codes.get(row[0])
+        ca = store.codes.get(row[0], lang="en")
         assert ca is not None
         assert ca.code_id == "CA"
-        assert ca.code_label == "Canada"
+        assert ca.code_label == LocalisedString("Canada", "en")
 
 
 class TestSidecarV4:

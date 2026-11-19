@@ -117,6 +117,7 @@ nav:
     - Scopes: reference/scopes.md
     - Domain Model: reference/model.md
     - Query: reference/query.md
+    - Labels: reference/labels.md
     - Sources: reference/sources.md
     - Bundles: reference/bundle.md
     - Checks: reference/checks.md
@@ -130,6 +131,7 @@ nav:
     - Testing: reference/testing.md
   - Design:
     - Sitemap: design/SITEMAP.md
+    - 'Label lookup: return LocalisedString, require `lang`, add language pairs to search': design/label-lookup.md
     - "Inventory history stage 2: the catalog lock, opt-in, expiry and restores": design/inventory-history-stage-2.md
     - "Phase 5: the release job and garbage collection": design/release-job.md
     - "Phase 4: the catalog on blob storage": design/catalog-on-blob-storage.md

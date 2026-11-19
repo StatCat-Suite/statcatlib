@@ -5,6 +5,155 @@ statcatlib is pre-1.0, so a minor version may break; the
 [CHANGELOG](https://github.com/StatCat-Suite/statcatlib/blob/main/CHANGELOG.md)
 lists every change.
 
+## Next release: labels carry their language, and search index format 4
+
+This release requires a `lang` on every label, filter and search call, returns
+each label as an `sdmxlib.LocalisedString` that carries the tag that answered,
+and writes search index format 4, which indexes text under an alternate tag
+such as `en-t-fr` in its primary tag's table
+([GH-91](https://github.com/StatCat-Suite/statcatlib/issues/91), and the
+design [Label lookup](design/label-lookup.md)). The `statcat` schema, the
+`statcat` section format and the Inventory do not change, so no catalog is
+re-ingested. Each product is re-indexed once.
+
+### Stored data
+
+**Upgrade readers and producers first.** statcatlib 0.20 refuses a version 4
+index when it opens a view or a working copy, and its `check_catalog` reports
+one. This release opens versions 3 and 4. Upgrade every reader of a catalog
+(`EmbargoReader` services, the release job, `statcat verify-catalog` runs,
+`statcat upload`) and every producer of a product to this release before any
+product seals a version 4 edition. Without lancedb, upload and the release
+fold read no `index.json`, so those two run unchanged there.
+
+**Search over a version 3 index raises.** `Product.view` and
+`EmbargoReader.view` open a version 3 edition, and every label, facet and
+query call works on it. Each search call (`view.search`, every scope's `find`,
+`QueryBuilder.search` and `hybrid_search`, `LanceIndex.table_for` and its
+search methods) raises `IncompatibleCatalogError`, naming the re-index, until
+the product has a version 4 edition. A rollback to a retained version 3
+edition behaves the same.
+
+**Re-index each product.** Open a working copy, call `build_index`, seal, and
+release the edition when the catalog's embargo is on. The seal rebuilds a
+version 3 index even when no row changed, including in a working copy resumed
+from 0.20. Pass `model_name` to `build_index` to reuse the stored vectors: a
+new edition does not carry `index_options`, so a seal without it encodes every
+text again. A BM25-only catalog calls `build_index()` with no model.
+
+A product whose newest edition is embargoed, or which has no live edition,
+waits: a working copy starts from the live edition, so a re-index sealed beside
+an embargoed edition forks the product. Release or cancel the embargoed edition
+first, or let the release job release it, then re-index. This loop re-indexes
+every product of a catalog directory, with the lifecycle the Inventory records
+for each (`CatalogAdmin.lifecycle`, new in this release):
+
+```python
+import statcatlib as sc
+
+catalog = sc.Catalog.create(path, exist_ok=True)
+admin = sc.CatalogAdmin.open(path)
+waiting = []
+for product_id in admin.products():
+    states = {e.state for e in admin.editions(product_id)}
+    if "embargoed" in states or "live" not in states:
+        waiting.append(product_id)  # re-index once it has a live edition and no embargoed one
+        continue
+    product = catalog.product(product_id)
+    lifecycle = admin.lifecycle(product_id)  # "revisable" or "final"
+    try:
+        wc = product.working_copy(lifecycle=lifecycle)
+    except sc.WorkingCopyExistsError:
+        # An unsealed working copy exists. Resume it when its changes are
+        # meant to ship; otherwise discard it and start again.
+        wc = product.working_copy(lifecycle=lifecycle, resume=True)
+    wc.build_index(model, model_name="intfloat/multilingual-e5-small")
+    edition = wc.seal()
+    if admin.embargo:
+        # The edition holds the live edition's rows, so releasing it now
+        # makes nothing new public.
+        admin.release(product_id, edition.edition_id, reason="re-index for statcatlib 0.21")
+```
+
+To discard an existing working copy instead of resuming it, call
+`product.working_copy(lifecycle=lifecycle, resume=True).discard()`, then
+`product.working_copy(lifecycle=lifecycle)`. For one product,
+`statcat build-index CATALOG PRODUCT` followed by a seal does the same.
+
+**CKAN text moves.** Text under open.canada.ca's `en-t-fr` and `fr-t-en` moves
+into the `en` and `fr` tables at that rebuild, so a search with `lang="en"`
+finds it. `index.json` records the pairs as `language_pairs`, and its
+`languages` lists primary and unpaired tags only
+([the format](catalog-format.md#41-indexjson)).
+
+**`IncompatibleCatalogError` moved** to the private module
+`statcatlib._errors`. Import it from `statcatlib`; `statcatlib.store.store`
+still re-exports it.
+
+### Behaviour that changes without an error
+
+- **Spatial facet keys.** A coverage with no `uri` is keyed `sha256:` followed
+  by the SHA-256 of its whole label map, where it was keyed by its English or
+  `und` text. Coverages that differ in any translation get separate keys, so
+  `{en: "Ontario"}` and `{en: "Ontario", fr: "Ontario"}` give two facet entries
+  where the English key gave one. A coverage's key changes when a later
+  edition adds or edits one of its translations. Code that stores facet keys
+  maps them again after each such edition. Display a key with
+  `view.spatial_labels(lang=...)`.
+- **Bulk labels.** A label with none of the requested tags is `None`, and the
+  result's `gaps` lists it. Before, the call left it out or put the code ID or
+  URN in its place.
+- **Search hits.** `hit.lang` is the stored tag of the matched text, so a
+  search with `lang="en"` can return a hit with `lang="en-t-fr"`. A code or
+  concept held under two tags of one pair appears once. A dataset is indexed
+  under each tag its text holds, and no `en` row is added for a dataset with
+  no English text.
+- **SDMX ingest.** An agency name or a dimension's concept name drops each
+  empty or whitespace text; a name with no text left is the entity's ID under
+  `zxx`, as an absent name is.
+
+### Caller code
+
+Every `lang` is keyword-only and required. A label call takes a tag or a
+sequence of tags (`sc.Langs`), and the first tag the stored text holds
+answers; a search takes one tag, and a sequence raises `TypeError`. A malformed
+tag raises `sdmxlib.InvalidTagError`. `view.preference(lang="en")` gives a tag
+with its language pairs, such as `("en", "en-t-fr")`, to pass as a label
+call's `lang`; `view.language_counts()` counts the texts held under each tag.
+
+| 0.20 | This release |
+| --- | --- |
+| `view.codelist(urn).label("en") -> str` | `view.codelist(urn).label(lang="en") -> LocalisedString \| None`; `None` for an unknown codelist; raises `MissingTranslationError` when the name holds none of the tags |
+| `view.codelist(urn).batch_labels(ids, lang=None) -> dict[str, str]`, code ID fallback | `batch_labels(ids, lang="en") -> Labels[str]`; `None` and a `Gap` for an untranslated code; raises `UnknownCodeError` naming every code the codelist does not hold |
+| `view.codelists.batch_labels(pairs, lang=None)` | `batch_labels(pairs, lang="en") -> Labels[tuple[str, str]]`, same rules |
+| `.lang("fr")` on `view.codelists`, `view.codelist(urn)` and `view.dataset(id).codelists` | removed; pass `lang="fr"` to the terminal |
+| `.enrich(...).rows()` on a codelist scope, `label` with an ID or URN fallback | `.enrich(...).rows(lang="en") -> RowList`, with `label` and `label__lang`, `None` and a gap where the name holds none of the tags |
+| `view.codelists.filter(text_contains="geo")` | `filter(text_contains="geo", lang="en")` |
+| `view.themes[uri].labels("en") -> dict[str, str]` | `labels(lang="en") -> Labels[str]`, every concept, ordered by notation; `rows(lang="en")` gives `label` and `label__lang` |
+| `view.agent_labels("en")`, `concept_labels("en")`, `spatial_labels("en")` | `agent_labels(lang="en")` and the others, each `-> Labels[str]` |
+| `view.code_map(dataset_id, "en") -> dict[str, dict[str, str]]` | `code_map(dataset_id, lang="en") -> dict[str, Labels[str]]` |
+| `view.codes.get(urn)`, `view.concepts.get(urn)`, English first | `get(urn, lang="en")`; raises `MissingTranslationError` when the code's or concept's name holds none of the tags |
+| `.select("title", lang="en")` gives `title` | gives `title` and `title__lang`; `.rows()` returns a `RowList` with `gaps` |
+| `.scalars("title", lang="en").values()` yields `str` | yields `LocalisedString \| None`; `.values()` returns a `ValueList` with `gaps` |
+| `q.has_spatial(label)`, `has_keyword(kw)`, `title_contains(text)`, `description_contains(text)`, defaulting to `"en"` | each takes `lang=`, matched against the first tag the stored map holds |
+| `q.has_spatial_uri(uri)` | `q.has_spatial_key(key)`, which takes a URI or a `sha256:` key |
+| `view.query(sc.Agent, name=...)` | raises `ValueError`; filter agents by `id` |
+| `view.search(text)`, `datasets.find`, `codes.find`, `concepts.find`, `reference_metadata.find`, `QueryBuilder.search`, `hybrid_search`, `lang="en"` by default | `lang=` required, one tag |
+| `Hit.lang` defaulting to `"en"` | the stored tag of the matched row; `SearchResult.langs` maps each identifier of a `QueryBuilder` search to it |
+| `CodeHit.code_label: str`, `dimension_label: str`, `text` | `code_label: LocalisedString`, `dimension_label: LocalisedString \| None`, `document` |
+| `ConceptHit.name: str`, `description: str`, `text` | `name` and `description` as `LocalisedString \| None`, `document` |
+| `ReferenceMetadataHit.text` | `document` |
+| `LanceIndex.bm25_search`, `search -> list[tuple[str, float]]` | `-> list[tuple[str, float, str]]`, the third item the row's tag |
+
+Read a label's text as `.text` and its tag as `.lang`. Catch
+`MissingTranslationError` and `UnknownCodeError` by name: both are `KeyError`s,
+so `except KeyError` catches both. `json.dumps` and `msgspec.json.encode`
+both refuse a `Labels`: encode `dict(labels)` with `msgspec.json.encode`, which
+writes each `LocalisedString` as `{"text": …, "lang": …}`. For one label,
+`msgspec.structs.asdict(label)` gives that dict. New names in `statcatlib`: `Langs`, `Labels`, `RowList`,
+`ValueList`, `Gap`, `MissingTranslationError`, `UnknownCodeError`, and
+sdmxlib's `LocalisedString`, `MissingTagError` and `InvalidTagError`.
+
 ## 0.20.0: sdmxlib 0.89, and the seal keeps the index `build_index` built
 
 statcatlib requires `sdmxlib>=0.89,<0.90`. No catalog is rebuilt, and no statcatlib
