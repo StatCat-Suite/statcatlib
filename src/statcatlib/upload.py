@@ -46,8 +46,8 @@ from statcatlib.store.blob import (
     _is_plain_name,
     _is_safe_path,
     _load_obstore,
+    _signs,
     _statcat_check,
-    _token_identity,
 )
 
 if TYPE_CHECKING:
@@ -315,7 +315,8 @@ def upload_edition(edition_dir: Path, location: BlobLocation, *, release_at: dat
         edition_dir: The sealed edition's directory, with the shared ``data/``
             where its manifest's ``data_path`` names it.
         location: The catalog, on an `AzureStore` whose credential provider is
-            a `TokenIdentity`.
+            a `TokenIdentity`, or whose config holds a ``sas_key`` with read,
+            create and write on the container.
         release_at: When the edition may be released; time-zone aware. ``None``
             schedules no release.
 
@@ -325,7 +326,7 @@ def upload_edition(edition_dir: Path, location: BlobLocation, *, release_at: dat
     Raises:
         TypeError: The store is not an `AzureStore`. Upload is Azure-only in
             Phase 4 (W3), since `obstore` cannot set or read CRC32C.
-        ValueError: The store has no `TokenIdentity` or no ``account_name``, or
+        ValueError: The store has neither a `TokenIdentity` nor a SAS, no ``account_name``, or
             *release_at* has no time zone.
     """
     _load_obstore()
@@ -337,8 +338,11 @@ def upload_edition(edition_dir: Path, location: BlobLocation, *, release_at: dat
             f"this store is a {type(location.store).__name__}"
         )
         raise TypeError(msg)
-    if _token_identity(location.store) is None:
-        msg = "upload reads digests with a bearer token: give the AzureStore credential_provider=TokenIdentity(...)"
+    if not _signs(location.store):
+        msg = (
+            "upload reads digests under the store's signature: give the AzureStore "
+            "credential_provider=TokenIdentity(...), or a sas_key in its config"
+        )
         raise ValueError(msg)
     with AzureBlobRest(location) as rest:
         return _upload(edition_dir, location, release_at=release_at, rest=rest)

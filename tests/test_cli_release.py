@@ -24,7 +24,7 @@ from pytest_httpx import HTTPXMock
 from sdmxlib.inventory import CATALOG_NAME
 from typer.testing import CliRunner
 
-from statcatlib.access import ARM_SCOPE
+from statcatlib.access import ARM_SCOPE, AzureReaderListing
 from statcatlib.cli import app
 from statcatlib.store.blob import BlobInventoryStorage, BlobLocation, BlobStoreError
 from tests._fakes import ACCOUNT, SENTINEL, RecordingRest, grant
@@ -234,6 +234,37 @@ class TestARun:
         assert "This dry run wrote nothing." in result.stderr
         assert cat.ops.called("put") == []
         assert not cat.writer.has_version()
+
+
+class TestUnderASas:
+    """``STATCAT_UNSAFE_AZURE_SAS``: the fold runs; the access check, needing Resource Manager, holds the release."""
+
+    def test_the_fold_runs_and_the_release_is_held_as_unchecked(
+        self, cat: ReleaseCatalog, config: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("STATCAT_UNSAFE_AZURE_SAS", "sp=racwl&sig=x")
+        monkeypatch.setenv("STATCAT_ACTOR", "publisher")
+        # The real listing: it asks for the Resource Manager token before any request.
+        monkeypatch.setattr("statcatlib.cli.AzureReaderListing", AzureReaderListing)
+        due = cat.upload("p", release_at=cat.now)
+
+        result = _release("az://catalogs/stc", "--config", str(config))
+
+        assert result.exit_code == 0, result.output
+        assert _ASKED == []
+        unchecked = [line for line in _lines(result) if line["event"] == "access.unchecked"]
+        assert len(unchecked) == 1
+        assert "STATCAT_UNSAFE_AZURE_SAS" in json.dumps(unchecked[0])
+        assert cat.states("p") == {due: "embargoed"}
+
+    def test_no_actor_exits_2(self, cat: ReleaseCatalog, config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("STATCAT_UNSAFE_AZURE_SAS", "sp=racwl&sig=x")
+        monkeypatch.delenv("STATCAT_ACTOR", raising=False)
+
+        result = _release("az://catalogs/stc", "--config", str(config))
+
+        assert result.exit_code == 2
+        assert "STATCAT_ACTOR" in result.output
 
 
 class TestExit1:

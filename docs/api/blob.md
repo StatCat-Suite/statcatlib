@@ -68,7 +68,40 @@ check that the `oid` is the identity you meant.
 |---|---|
 | 0 | The edition is uploaded, or already registered with the same bytes. |
 | 1 | A finding, printed as `FAIL <file>: <detail>`, or a store, manifest or credential failure, printed as `ERROR <message>`. |
-| 2 | A usage error, a refused variable, or a missing `blob` extra. |
+| 2 | A usage error, a refused variable, a SAS that `STATCAT_REFUSE_SAS` refuses, or a missing `blob` extra. |
+
+## Signing with a SAS (unsafe)
+
+!!! danger "This bypasses the identity model"
+    Spec §10.1 gives the publish job an identity and no SAS. A SAS breaks that:
+    anyone holding it writes the catalog until it expires, no write is tied to
+    an identity, and the release job cannot check who reads embargoed bytes.
+    Use it only when the publisher cannot get Storage Blob Data Contributor on
+    the container, keep it short-lived, and move to an identity when one exists.
+
+`STATCAT_UNSAFE_AZURE_SAS` opts in. `statcat upload`, `admin`, `release` and `gc`
+then sign every request with that container SAS, and build no
+`DefaultAzureCredential`. The refused `AZURE_STORAGE_SAS_*` variables stay refused:
+`obstore` reads no `STATCAT_` name.
+
+| Variable | Value |
+|---|---|
+| `STATCAT_UNSAFE_AZURE_SAS` | The SAS query string, with or without a leading `?`. `statcat upload` needs read, create, write and list (`sp=rcwl`) on the container; `gc` also delete. |
+| `STATCAT_ACTOR` | Who acts. Required by every command that writes the Inventory, since a SAS names nobody. The Inventory records it as `event.actor` `sas:<actor>`, unverified, so a SAS write stands out from an identity's `oid`. |
+| `STATCAT_REFUSE_SAS` | Any value but empty, `0`, `false` or `no` refuses `STATCAT_UNSAFE_AZURE_SAS`: the command exits 2 before any request. |
+
+Each SAS run prints a `WARNING` on standard error before its first request, and
+`statcat upload` prints `identity none` in place of an `oid`. `statcat release`
+reaches no Azure Resource Manager under a SAS, so its access check reports
+`access.unchecked` and holds the release. The fold still records each registration
+as `embargoed`, and [`statcat admin release`](admin.md) makes one live by hand.
+
+**Refusing it.** Set `STATCAT_REFUSE_SAS=1` in the release and GC job images,
+CI and any pod that runs `statcat`, so a stray SAS fails closed. That guards only
+`statcat`. To refuse every key-signed SAS to every tool, set
+`allowSharedKeyAccess=false` on the storage account: Azure then rejects an account
+key and every SAS signed with one. A user delegation SAS is signed by an identity
+and stays valid, so expire or revoke those separately.
 
 ## What an upload does
 

@@ -56,7 +56,7 @@ from sdmxlib.inventory import InventoryError
 
 import statcatlib as sc
 from statcatlib import diagnostics
-from statcatlib.access import ARM_SCOPE, AzureReaderListing
+from statcatlib.access import ARM_SCOPE, AccessListingError, AzureReaderListing
 from statcatlib.gc import GcReport, GcStoppedError, collect_garbage
 from statcatlib.jobs import _EVENT_ATTRIBUTE, JobsConfigError, _emit, _stamp, load_jobs_config
 from statcatlib.release import ReleaseJob, ReleaseReport
@@ -104,6 +104,28 @@ _REFUSED_VARIABLES = (
     "AZURE_USE_FABRIC_ENDPOINT",
     "AZURE_SKIP_SIGNATURE",
     "AZURE_STORAGE_ENCRYPTION_KEY",
+)
+
+#: The publisher's opt-in to sign with a container SAS instead of `DefaultAzureCredential`, for an identity that holds
+#: no data role on the container. It departs from spec §10.1, hence the name: anyone holding the SAS writes the
+#: catalog, no write is tied to an identity, and the release job's access check cannot run. obstore reads no
+#: ``STATCAT_`` name, so the refused variables stay refused.
+_SAS_VARIABLE = "STATCAT_UNSAFE_AZURE_SAS"
+
+#: Set to any value but ``""``, ``0``, ``false`` or ``no``, it refuses `_SAS_VARIABLE`: a job image, CI or a pod
+#: sets it so a stray SAS exits 2 before any request. Only ``allowSharedKeyAccess=false`` on the storage account
+#: refuses a key-signed SAS to every tool.
+_REFUSE_SAS_VARIABLE = "STATCAT_REFUSE_SAS"
+
+#: Who acts under that SAS, which carries no identity; an Inventory write records it as ``sas:<value>``.
+_ACTOR_VARIABLE = "STATCAT_ACTOR"
+
+#: What every command signed with `_SAS_VARIABLE` prints on standard error before its first request.
+_SAS_WARNING = (
+    f"WARNING {_SAS_VARIABLE}: this run signs with a container SAS. Anyone holding it can write this catalog, "
+    f"no write is tied to an identity (the Inventory records {_ACTOR_VARIABLE} as sas:<actor>, unverified), and "
+    "statcat release cannot run its access check. Prefer an identity with Storage Blob Data Contributor; set "
+    f"{_REFUSE_SAS_VARIABLE}=1 where a SAS must never be used."
 )
 
 #: The refused names as `MicrosoftAzureBuilder::from_env` compares them: it reads each variable whose name starts
@@ -699,6 +721,36 @@ def _azure_account(command: str = "upload") -> str:
     return account
 
 
+def _sas_refused() -> bool:
+    """Whether ``STATCAT_REFUSE_SAS`` is set to anything but blank, ``0``, ``false`` or ``no``."""
+    return os.environ.get(_REFUSE_SAS_VARIABLE, "").strip().lower() not in {"", "0", "false", "no"}
+
+
+def _sas(command: str = "upload") -> str | None:
+    """``STATCAT_UNSAFE_AZURE_SAS`` without a leading ``?``, or ``None`` when unset or blank.
+
+    A SAS set where ``STATCAT_REFUSE_SAS`` refuses it exits 2.
+    """
+    sas = os.environ.get(_SAS_VARIABLE, "").strip().removeprefix("?")
+    if sas and _sas_refused():
+        _usage(f"{command}: {_SAS_VARIABLE} is set, and {_REFUSE_SAS_VARIABLE} refuses signing with a SAS here")
+    return sas or None
+
+
+def _actor(command: str) -> str | None:
+    """``sas:<STATCAT_ACTOR>`` when the command signs with a SAS, else ``None``; a SAS without an actor exits 2.
+
+    A SAS carries no identity, so a command that writes the Inventory under one records the actor it is told,
+    marked so the Inventory shows the write was not signed by an identity.
+    """
+    if _sas(command) is None:
+        return None
+    actor = os.environ.get(_ACTOR_VARIABLE, "").strip()
+    if not actor:
+        _usage(f"{command} signs with {_SAS_VARIABLE}, which carries no identity: set {_ACTOR_VARIABLE} to who acts")
+    return f"sas:{actor}"
+
+
 def _azure_location(uri: str, account: str, *, command: str = "upload", timeout: str = _UPLOAD_TIMEOUT) -> BlobLocation:
     """The catalog at *uri*, reached with `DefaultAzureCredential`, each request allowed *timeout*.
 
@@ -711,11 +763,12 @@ def _azure_location(uri: str, account: str, *, command: str = "upload", timeout:
 
 def _azure_clients(
     uri: str, account: str, *, command: str, timeout: str
-) -> tuple[BlobLocation, DefaultAzureCredential]:
+) -> tuple[BlobLocation, DefaultAzureCredential | None]:
     """`_azure_location`'s catalog, with the `DefaultAzureCredential` its store asks for tokens.
 
     ``statcat release`` asks the same credential for its Azure Resource Manager token, so one identity reads the
-    store and lists the role assignments.
+    store and lists the role assignments. With ``STATCAT_UNSAFE_AZURE_SAS`` set the store signs every request with
+    that SAS instead, there is no credential (``None``), and `_SAS_WARNING` goes to standard error first.
     """
     try:
         from azure.identity import DefaultAzureCredential  # noqa: PLC0415
@@ -724,14 +777,22 @@ def _azure_clients(
         from obstore.store import from_url  # noqa: PLC0415
     except ImportError:
         _usage(f"{command} needs the blob extra: uv add 'statcatlib[blob]' (or pip install 'statcatlib[blob]')")
-    credential = DefaultAzureCredential()
+    sas = _sas(command)
+    credential: DefaultAzureCredential | None = None
     try:
-        store = from_url(
-            uri.removesuffix("/"),
-            account_name=account,
-            credential_provider=TokenIdentity(AzureCredentialProvider(credential)),
-            client_options={"timeout": timeout},
-        )
+        if sas is not None:
+            _tell(_SAS_WARNING, style="yellow")
+            store = from_url(
+                uri.removesuffix("/"), account_name=account, sas_key=sas, client_options={"timeout": timeout}
+            )
+        else:
+            credential = DefaultAzureCredential()
+            store = from_url(
+                uri.removesuffix("/"),
+                account_name=account,
+                credential_provider=TokenIdentity(AzureCredentialProvider(credential)),
+                client_options={"timeout": timeout},
+            )
     except GenericError as exc:
         _usage(_store_build_message(exc))
     return BlobLocation(uri, store), credential
@@ -797,6 +858,20 @@ def upload(
     ``AZURE_SKIP_SIGNATURE`` and ``AZURE_STORAGE_ENCRYPTION_KEY``. Any case
     after ``AZURE_`` counts, such as ``AZURE_storage_endpoint``, since
     ``obstore`` reads that spelling too.
+
+    **Unsafe:** ``STATCAT_UNSAFE_AZURE_SAS`` opts in to signing with a
+    container SAS (read, create and write) instead of `DefaultAzureCredential`,
+    for a publisher whose identity holds no data role on the container. It
+    departs from spec §10.1: anyone holding the SAS writes the catalog, and no
+    write is tied to an identity. Every such run prints a WARNING on standard
+    error. ``statcat admin``, ``release`` and ``gc`` take it too, and then need
+    ``STATCAT_ACTOR``, recorded unverified as ``event.actor`` ``sas:<actor>``.
+    ``statcat release`` under a SAS reaches no Azure Resource Manager, so its
+    access check reports ``access.unchecked`` and holds the release; the fold
+    still runs, and ``statcat admin release`` releases by hand.
+    ``STATCAT_REFUSE_SAS=1`` refuses a SAS, exit 2, before any request; set it
+    in job images, CI and pods. ``allowSharedKeyAccess=false`` on the storage
+    account refuses a key-signed SAS to every tool.
     """
     when = _release_time(release_at)
     uri = _catalog_uri(az_url)
@@ -816,7 +891,10 @@ def upload(
         raise typer.Exit(code=1) from None
     except ImportError as exc:
         _usage(str(exc))
-    _say(f"identity {oid or 'unknown: the token has no oid claim'}")
+    if identity is None:
+        _say(f"identity none: signed with {_SAS_VARIABLE}")
+    else:
+        _say(f"identity {oid or 'unknown: the token has no oid claim'}")
     state = "registered in pending/" if report.registered else "already registered in pending/"
     _say(f"{report.product_id} {report.edition_id}: {len(report.sent)} sent, {len(report.kept)} kept, {state}.")
 
@@ -876,10 +954,12 @@ def _admin_call[T](url: str, command: str, action: Callable[[sc.CatalogAdmin], T
         location = _azure_location(uri, _azure_account(command), command=command, timeout=_ADMIN_TIMEOUT)
         auth_error = _auth_error()
         target: Path | BlobLocation = location
+        actor = _actor(command)
     else:
         target = Path(url)
+        actor = None
     try:
-        return action(sc.CatalogAdmin.open(target))
+        return action(sc.CatalogAdmin.open(target, actor=actor))
     except _ADMIN_ERRORS as exc:
         _say(f"ERROR {exc}", style="red")
         raise typer.Exit(code=1) from None
@@ -951,7 +1031,7 @@ def admin_create(
     _require_azure(location, "admin create")
     auth_error = _auth_error()
     try:
-        catalog_id = sc.CatalogAdmin.create(location).catalog_id
+        catalog_id = sc.CatalogAdmin.create(location, actor=_actor("admin create")).catalog_id
     except (FileExistsError, IncompatibleCatalogError, InventoryError, BlobStoreError, auth_error) as exc:
         _tell(f"ERROR {exc}", style="red")
         raise typer.Exit(code=1) from None
@@ -1211,7 +1291,7 @@ def gc(
     location = _azure_location(uri, _azure_account("gc"), command="gc", timeout=_ADMIN_TIMEOUT)
     _require_azure(location, "gc")
     auth_error = _auth_error()
-    storage = BlobInventoryStorage(location)
+    storage = BlobInventoryStorage(location, actor=_actor("gc"))
     at: datetime | None = None
     with _events(_GC_LOGGER) as events:
         try:
@@ -1330,14 +1410,21 @@ def release(
     location, credential = _azure_clients(uri, _azure_account("release"), command="release", timeout=_ADMIN_TIMEOUT)
     _require_azure(location, "release")
     auth_error = _auth_error()
-    storage = BlobInventoryStorage(location)
+    storage = BlobInventoryStorage(location, actor=_actor("release"))
     at: datetime | None = None
+
+    def arm_token() -> str:
+        if credential is None:
+            msg = f"{_SAS_VARIABLE} signs the store and reaches no Azure Resource Manager, so no listing ran"
+            raise AccessListingError(msg)
+        return credential.get_token(ARM_SCOPE).token
+
     with _events(_RELEASE_LOGGER) as events, AzureBlobRest(location) as rest:
         try:
             listing = AzureReaderListing(
                 access.storage_account,
                 access.container,
-                arm_token=lambda: credential.get_token(ARM_SCOPE).token,
+                arm_token=arm_token,
                 scopes=access.scopes,
             )
             job = ReleaseJob(location, jobs, rest=rest, listing=listing, storage=storage)
