@@ -16,7 +16,8 @@ over an `obstore` store. It differs from `LocalInventoryStorage` in these ways:
   than `MAX_CLOCK_SKEW` ahead of it is refused.
 - **The actor** is the ``oid`` of the storage identity's token
   (`TokenIdentity`), else the value given to `BlobInventoryStorage`, else a
-  refusal.
+  refusal. A store signed with a SAS carries no identity, so its writer names
+  the actor.
 
 `AzureBlobRest` reads the digest Azure keeps for a single-shot Put, since
 `obstore` reads no ``Content-MD5``. `statcatlib.upload` uses it.
@@ -54,7 +55,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Self, cast, override
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -107,6 +108,35 @@ _AZURE_VERSION = "2023-11-03"
 
 #: How long `AzureBlobRest` waits for one ``Get Blob Properties``, in seconds.
 _REST_TIMEOUT = 30.0
+
+#: The value of a SAS signature in a URL's query, which `_RedactSas` replaces.
+_SAS_SIGNATURE = re.compile(r"(?i)([?&]sig=)[^&\s\"']+")
+
+
+class _RedactSas(logging.Filter):
+    """Replace a SAS signature in a log record's message with ``REDACTED``.
+
+    httpx logs each request's full URL at INFO, and `AzureBlobRest` signs with a
+    SAS in that URL's query. `obstore` writes ``REDACTED`` in place of its URLs
+    itself.
+    """
+
+    @override
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Rewrite *record*'s message with the signature redacted, and keep the record."""
+        message = record.getMessage()
+        redacted = _SAS_SIGNATURE.sub(r"\1REDACTED", message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+def _redact_httpx_log() -> None:
+    """Attach one `_RedactSas` to the ``httpx`` logger, the logger its request lines go to."""
+    logger = logging.getLogger("httpx")
+    if not any(isinstance(found, _RedactSas) for found in logger.filters):
+        logger.addFilter(_RedactSas())
+
 
 #: What a catalog, product or edition id may be where it names a directory. It
 #: starts with a letter or digit, so no id can be a dot path or a staged name.
@@ -316,6 +346,18 @@ def _token_identity(store: ObjectStore) -> TokenIdentity | None:
     return provider if isinstance(provider, TokenIdentity) else None
 
 
+def _sas(store: ObjectStore) -> str | None:
+    """The SAS query *store* signs its requests with (``config["sas_key"]``), without a leading ``?``, or ``None``."""
+    found = getattr(store, "config", None)
+    sas = found.get("sas_key") if isinstance(found, Mapping) else None
+    return sas.removeprefix("?") if isinstance(sas, str) and sas.strip("?") else None
+
+
+def _signs(store: ObjectStore) -> bool:
+    """Whether *store* signs each request as `AzureBlobRest` can: a `TokenIdentity`, or a SAS."""
+    return _token_identity(store) is not None or _sas(store) is not None
+
+
 def _endpoint(store: ObjectStore) -> str:
     """The URL *store* answers at, from its configuration.
 
@@ -350,11 +392,13 @@ def _endpoint(store: ObjectStore) -> str:
 
 
 class AzureBlobRest:
-    """Azure's ``Get Blob Properties`` under the identity's bearer token, for the digest `obstore` cannot read.
+    """Azure's ``Get Blob Properties`` under the store's own signature, for the digest `obstore` cannot read.
 
     The call needs ``blobs/read`` and nothing else. Azure keeps an MD5 for a
-    single-shot Put, and this class reads it back. A tokenless store has no route
-    here, since no deployment uses a key.
+    single-shot Put, and this class reads it back. It signs with the bearer token
+    of the store's `TokenIdentity`, else with the store's SAS (``sas_key``), the
+    publisher's opt-in for an identity holding no data role. A store with neither
+    has no route here, since no deployment uses an account key.
     """
 
     def __init__(self, location: BlobLocation) -> None:
@@ -368,6 +412,7 @@ class AzureBlobRest:
         prefix = getattr(self._store, "prefix", None)
         parts = [_endpoint(self._store).rstrip("/"), quote(str(config["container_name"]))]
         self._base = "/".join([*parts, *([quote(prefix)] if prefix else [])])
+        _redact_httpx_log()
         self._client = httpx.Client(timeout=_REST_TIMEOUT)
 
     def __enter__(self) -> Self:
@@ -385,12 +430,16 @@ class AzureBlobRest:
 
     def _send(self, path: str) -> httpx.Response:
         """Send the ``HEAD``. The account-key test path overrides this one method."""
-        identity = _token_identity(self._store)
-        if identity is None:
-            msg = "AzureBlobRest needs a store whose credential_provider is a TokenIdentity"
+        headers = {"x-ms-version": _AZURE_VERSION}
+        url = self._url(path)
+        if (identity := _token_identity(self._store)) is not None:
+            headers["Authorization"] = f"Bearer {identity.token()}"
+        elif (sas := _sas(self._store)) is not None:
+            url = f"{url}?{sas}"
+        else:
+            msg = "AzureBlobRest needs a store with a TokenIdentity credential_provider, or a sas_key in its config"
             raise ValueError(msg)
-        headers = {"Authorization": f"Bearer {identity.token()}", "x-ms-version": _AZURE_VERSION}
-        return self._client.head(self._url(path), headers=headers)
+        return self._client.head(url, headers=headers)
 
     def head(self, path: str) -> RemoteFile | None:
         """The size and kept digest of the blob at *path* under the catalog root.
