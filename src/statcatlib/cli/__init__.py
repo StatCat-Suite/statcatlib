@@ -69,6 +69,7 @@ from statcatlib.store.blob import (
     _load_obstore,
     _token_identity,
 )
+from statcatlib.store.blob import _sas as _store_sas
 from statcatlib.store.store import ASYMMETRIC_MODEL_PREFIXES, IncompatibleCatalogError
 from statcatlib.upload import UploadCheckError, upload_edition
 
@@ -878,7 +879,8 @@ def upload(
     location = _azure_location(uri, _azure_account())
     auth_error = _auth_error()
 
-    identity = _token_identity(location.store)
+    signed_with_sas = _store_sas(location.store) is not None
+    identity = None if signed_with_sas else _token_identity(location.store)
     try:
         oid = identity.object_id() if identity is not None else None
         report = upload_edition(edition_dir, location, release_at=when)
@@ -891,7 +893,7 @@ def upload(
         raise typer.Exit(code=1) from None
     except ImportError as exc:
         _usage(str(exc))
-    if identity is None:
+    if signed_with_sas:
         _say(f"identity none: signed with {_SAS_VARIABLE}")
     else:
         _say(f"identity {oid or 'unknown: the token has no oid claim'}")

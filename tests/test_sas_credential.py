@@ -278,11 +278,14 @@ class TestTheGuards:
             lambda: SimpleNamespace(get_token=lambda *_a, **_k: pytest.fail("no token is asked for")),
         )
         monkeypatch.setattr(cli, "upload_edition", lambda *_a, **_k: UploadReport("e", "p", (), (), registered=True))
-        monkeypatch.setattr(cli, "_token_identity", lambda _store: None)
+        monkeypatch.setattr(cli, "_token_identity", lambda _store: SimpleNamespace(object_id=lambda: "oid-1"))
 
         result = runner.invoke(app, ["upload", str(tmp_path), "az://catalogs"])
 
+        assert result.exit_code == 0, result.output
+        assert "identity oid-1" in result.output
         assert "WARNING" not in result.output
+        assert "signed with" not in result.output
 
     @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
     @pytest.mark.parametrize("args", [["upload", ".", "az://catalogs"], ["advance-current", "az://catalogs"]])

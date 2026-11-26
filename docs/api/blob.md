@@ -86,9 +86,21 @@ then sign every request with that container SAS, and build no
 
 | Variable | Value |
 |---|---|
-| `STATCAT_UNSAFE_AZURE_SAS` | The SAS query string, with or without a leading `?`. `statcat upload` needs read, create, write and list (`sp=rcwl`) on the container; `gc` also delete. |
+| `STATCAT_UNSAFE_AZURE_SAS` | The SAS query string, with or without a leading `?`, granting the container permissions the table below lists for the command. |
 | `STATCAT_ACTOR` | Who acts. Required by every command that writes the Inventory, since a SAS names nobody. The Inventory records it as `event.actor` `sas:<actor>`, unverified, so a SAS write stands out from an identity's `oid`. |
 | `STATCAT_REFUSE_SAS` | Any value but empty, `0`, `false` or `no` refuses `STATCAT_UNSAFE_AZURE_SAS`: the command exits 2 before any request. |
+
+Each command needs these permissions on the container:
+
+| Command | `sp=` | Why |
+|---|---|---|
+| `statcat upload` | `rcw` | It reads and creates files, and registers the edition in `pending/`. |
+| `statcat admin` | `rcw` | It reads the Inventory, creates a root, writes its leaf and moves `CURRENT`. `admin create` also lists (`rcwl`) to check the prefix is empty. |
+| `statcat advance-current` | `rw` | It reads the roots and moves `CURRENT`. |
+| `statcat release` | `rcwl` | `admin`'s writes, and it lists `pending/`. |
+| `statcat gc` | `rld` | It lists `pending/` and `products/` and deletes what it collects. It writes nothing. |
+
+One SAS with `sp=rcwld` covers every command; a publisher that only uploads needs `rcw`.
 
 Each SAS run prints a `WARNING` on standard error before its first request, and
 `statcat upload` prints `identity none` in place of an `oid`. `statcat release`
