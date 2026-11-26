@@ -55,7 +55,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Self, cast, override
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -108,6 +108,35 @@ _AZURE_VERSION = "2023-11-03"
 
 #: How long `AzureBlobRest` waits for one ``Get Blob Properties``, in seconds.
 _REST_TIMEOUT = 30.0
+
+#: The value of a SAS signature in a URL's query, which `_RedactSas` replaces.
+_SAS_SIGNATURE = re.compile(r"(?i)([?&]sig=)[^&\s\"']+")
+
+
+class _RedactSas(logging.Filter):
+    """Replace a SAS signature in a log record's message with ``REDACTED``.
+
+    httpx logs each request's full URL at INFO, and `AzureBlobRest` signs with a
+    SAS in that URL's query. `obstore` writes ``REDACTED`` in place of its URLs
+    itself.
+    """
+
+    @override
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Rewrite *record*'s message with the signature redacted, and keep the record."""
+        message = record.getMessage()
+        redacted = _SAS_SIGNATURE.sub(r"\1REDACTED", message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+def _redact_httpx_log() -> None:
+    """Attach one `_RedactSas` to the ``httpx`` logger, the logger its request lines go to."""
+    logger = logging.getLogger("httpx")
+    if not any(isinstance(found, _RedactSas) for found in logger.filters):
+        logger.addFilter(_RedactSas())
+
 
 #: What a catalog, product or edition id may be where it names a directory. It
 #: starts with a letter or digit, so no id can be a dot path or a staged name.
@@ -383,6 +412,7 @@ class AzureBlobRest:
         prefix = getattr(self._store, "prefix", None)
         parts = [_endpoint(self._store).rstrip("/"), quote(str(config["container_name"]))]
         self._base = "/".join([*parts, *([quote(prefix)] if prefix else [])])
+        _redact_httpx_log()
         self._client = httpx.Client(timeout=_REST_TIMEOUT)
 
     def __enter__(self) -> Self:

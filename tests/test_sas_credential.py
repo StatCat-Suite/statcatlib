@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import http.server
+import logging
 import os
+import threading
+from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import obstore
 import pytest
+from obstore.exceptions import GenericError
 from obstore.store import AzureStore
 from pytest_httpx import HTTPXMock
 from sdmxlib.edition import RemoteFile
@@ -15,7 +22,14 @@ from typer.testing import CliRunner
 import statcatlib as sc
 from statcatlib import cli
 from statcatlib.cli import app
-from statcatlib.store.blob import AzureBlobRest, BlobInventoryStorage, BlobLocation, TokenIdentity
+from statcatlib.store.blob import (
+    AzureBlobRest,
+    BlobInventoryStorage,
+    BlobLocation,
+    BlobStoreError,
+    TokenIdentity,
+    _store_faults,
+)
 from statcatlib.upload import UploadReport, upload_edition
 
 pytestmark = pytest.mark.unit
@@ -62,6 +76,106 @@ class TestTheDigestRead:
         assert BlobInventoryStorage(_sas_location(), actor="publisher").actor() == "publisher"
         with pytest.raises(sc.InventoryWriteRefusedError, match="actor="):
             BlobInventoryStorage(_sas_location()).actor()
+
+
+class _Forbidden(http.server.BaseHTTPRequestHandler):
+    """Answer every request 403, with Azure's ``AuthenticationFailed`` body."""
+
+    def __getattr__(self, name: str) -> Callable[[], None]:
+        # BaseHTTPRequestHandler dispatches each method to `do_<METHOD>`.
+        if name.startswith("do_"):
+            return self._refuse
+        raise AttributeError(name)
+
+    def _refuse(self) -> None:
+        body = b'<?xml version="1.0"?><Error><Code>AuthenticationFailed</Code></Error>'
+        self.send_response(403)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+
+@pytest.fixture
+def forbidden() -> Iterator[str]:
+    """The endpoint of a loopback server that refuses every request with 403."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Forbidden)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _sas_store(endpoint: str) -> AzureStore:
+    return AzureStore(
+        "catalogs",
+        account_name="acct",
+        sas_key=_SAS,
+        endpoint=endpoint,
+        client_options={"allow_http": True},
+        retry_config={"max_retries": 0, "retry_timeout": timedelta(seconds=2)},
+    )
+
+
+_REQUESTS: list[tuple[str, Callable[[AzureStore], object]]] = [
+    ("read", lambda store: obstore.get(store, "catalog.json").bytes()),
+    ("read the properties of", lambda store: obstore.head(store, "catalog.json")),
+    ("create", lambda store: obstore.put(store, "catalog.json", b"{}", mode="create")),
+    ("list", lambda store: obstore.list(store, "inventory/").collect()),
+]
+
+
+class TestTheSignatureStaysOutOfMessages:
+    """No message or log line carries the SAS signature (``sig=abc%2Bdef%3D``)."""
+
+    def test_the_digest_reads_log_line_redacts_it(
+        self, httpx_mock: HTTPXMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        httpx_mock.add_response(method="HEAD", url=f"{_URL}?{_SAS}", headers={"Content-Length": "1"})
+
+        with caplog.at_level(logging.INFO, logger="httpx"), AzureBlobRest(_sas_location()) as rest:
+            rest.head("products/p/e/manifest.json")
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "HTTP Request: HEAD" in logged
+        assert "sig=REDACTED" in logged
+        assert "abc%2Bdef" not in logged
+
+    def test_a_refused_digest_read_names_the_status_alone(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(method="HEAD", url=f"{_URL}?{_SAS}", status_code=403)
+
+        with AzureBlobRest(_sas_location()) as rest, pytest.raises(BlobStoreError) as raised:
+            rest.head("products/p/e/manifest.json")
+
+        assert str(raised.value) == "read the properties of products/p/e/manifest.json: HTTP 403"
+
+    @pytest.mark.parametrize(("action", "call"), _REQUESTS)
+    def test_obstore_redacts_the_url_of_a_refused_request(
+        self, forbidden: str, action: str, call: Callable[[AzureStore], object]
+    ) -> None:
+        # obstore 0.12.1 writes REDACTED in place of the URL; this pins it across an obstore bump.
+        with pytest.raises(BlobStoreError) as raised, _store_faults(action, "catalog.json"):
+            call(_sas_store(forbidden))
+
+        assert "403" in str(raised.value)
+        assert "REDACTED" in str(raised.value)
+        assert "abc%2Bdef" not in str(raised.value)
+
+    def test_obstore_redacts_the_url_of_an_unreachable_store(self) -> None:
+        with pytest.raises(BlobStoreError) as raised, _store_faults("read", "catalog.json"):
+            obstore.head(_sas_store("http://127.0.0.1:9"), "catalog.json")
+
+        assert "REDACTED" in str(raised.value)
+        assert "abc%2Bdef" not in str(raised.value)
+
+    def test_obstore_never_quotes_a_sas_it_cannot_parse(self) -> None:
+        with pytest.raises(GenericError, match="Missing component in SAS query pair") as raised:
+            AzureStore("catalogs", account_name="acct", sas_key="sigabc%2Bdef")
+
+        assert "abc%2Bdef" not in str(raised.value)
 
 
 class _Untouched:
