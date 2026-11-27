@@ -89,8 +89,9 @@ fmt:
 xdist_workers := env("XDIST_WORKERS", "auto")
 xdist := "-n " + xdist_workers + " --dist loadfile"
 
-# Each stores worker starts its own Azurite container. One test takes about
-# 85 s, so more than four workers make the tier no faster.
+# Each stores worker starts its own Azurite container. `test_release_job.py`
+# takes about 50 s on one worker, so more than four workers make the tier no
+# faster.
 stores_workers := env("XDIST_STORES_WORKERS", "4")
 
 # Run unit tests
