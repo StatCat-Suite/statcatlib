@@ -123,6 +123,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "pytest-httpx>=0.35",
+    "pytest-xdist>=3.8",
     "rich>=15.0",
     "ruff>=0.17.1,<0.18",
     "sentence-transformers>=3.0",

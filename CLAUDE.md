@@ -904,8 +904,16 @@ stores` in `tests/stores`), so **every test file needs a `pytestmark`**: a file
 without one never runs in `just ci` (GH-8). `live` (network) is the only tier
 left out.
 
-The `stores` tier runs Azurite in a container, from the image digest sdmxlib's
-tier pins. A push therefore needs a container runtime (Docker, or colima with
+Each tier runs on pytest-xdist with `--dist loadfile` (GH-166): unit and
+integration on `-n auto` (`XDIST_WORKERS`), stores on `-n 4`
+(`XDIST_STORES_WORKERS`). `loadfile` keeps a file on one worker, so a
+module-scoped fixture is built once. A test therefore shares nothing with
+another file's tests: it writes under `tmp_path` or `tmp_path_factory`, binds
+no fixed port, and on the stores tier writes under its own prefix.
+`XDIST_WORKERS=0` runs a tier in one process.
+
+The `stores` tier runs Azurite in a container, one per worker, from the image
+digest sdmxlib's tier pins. A push therefore needs a container runtime (Docker, or colima with
 the docker CLI): with none, the tier fails and names the fix, where sdmxlib's
 skips, because the pre-push hook is statcatlib's only gate.
 
