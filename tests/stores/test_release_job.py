@@ -18,6 +18,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -109,8 +110,9 @@ class PoolOps(RecordingOps):
             self._active += 1
             self.most = max(self.most, self._active)
         try:
-            # Long enough that reads sent from a pool overlap whatever the emulator's latency.
-            time.sleep(0.02)
+            # Long enough that reads sent from a pool overlap whatever the emulator's latency. The 200-table
+            # release sends about 400 reads, so each millisecond here costs it about 0.4 s.
+            time.sleep(0.005)
             return super().read(path)
         finally:
             with self._lock:
@@ -195,8 +197,12 @@ class TestThe200TableRelease:
     ) -> None:
         assert sum(_TABLES.values()) == 200
         release_at = clock.now + 10 * _MINUTE
-        for edition_dir in mix.values():
-            _stores.upload(catalog, edition_dir, release_at=release_at)
+        # The 25 products upload eight at a time, as concurrent publishers would; one after another they took
+        # about 13 s.
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(
+                pool.map(lambda edition_dir: _stores.upload(catalog, edition_dir, release_at=release_at), mix.values())
+            )
 
         # 08:00, the pre-flight run: every upload is folded in one `seal` version, and nothing is due.
         folding = attrs.evolve(catalog, ops=PoolOps(catalog.store))

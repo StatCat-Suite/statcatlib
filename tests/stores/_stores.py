@@ -30,12 +30,14 @@ import base64
 import hashlib
 import hmac
 import http.client
+import multiprocessing
 import shutil
 import socket
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Generator, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -68,7 +70,14 @@ from statcatlib.store.blob import (
 )
 from statcatlib.store.inventory import InventoryWriter
 from statcatlib.store.working_copy import Edition, edition_kind, fold_lifecycle, recorded_routing
-from statcatlib.testing import STRUCTURE_PRODUCTS, CodrShape, CorpusGroup, codr_corpus
+from statcatlib.testing import (
+    STRUCTURE_PRODUCTS,
+    CodrShape,
+    CorpusGroup,
+    codr_product,
+    codr_structures,
+    corpus_product_id,
+)
 from statcatlib.upload import _upload
 from tests._fakes import FakeListing, grant
 
@@ -501,15 +510,36 @@ HELD_BACK = CorpusGroup(1, tables=12)
 _MIX_SHAPE = CodrShape(geography_codes=6, geography_depth=2, classification_codes=(3, 3, 3), observations=4)
 
 
+#: The processes `seal_mix` seals the data products in.
+_MIX_WORKERS = 4
+
+
+def _seal_mix_product(root: str, product_id: str, tables: int) -> str:
+    """Seal one data product of the mix into the catalog at *root*, in a `seal_mix` worker process."""
+    with sc.Catalog.create(Path(root), exist_ok=True) as cat:
+        return codr_product(cat, product_id, tables=tables, shape=_MIX_SHAPE).edition_id
+
+
 def seal_mix(root: Path) -> dict[str, Path]:
     """Seal `RELEASE_MIX`, `HELD_BACK` and their three structure products in a local catalog at *root*.
+
+    The structure products seal first. The 22 data products then seal in
+    `_MIX_WORKERS` processes at once, each its own product, as concurrent
+    publishers do: a lost Inventory race re-applies the record. Sealed one
+    after another they took about 45 s.
 
     Returns:
         Each product's sealed edition directory, by product: 22 data products
         and the structure products they are cut from.
     """
     with sc.Catalog.create(root) as cat:
-        products = codr_corpus(cat, (*RELEASE_MIX, HELD_BACK), shape=_MIX_SHAPE, embargoed=0)
+        codr_structures(cat, shape=_MIX_SHAPE)
+    groups = [(group, index) for group in (*RELEASE_MIX, HELD_BACK) for index in range(group.products)]
+    products = [corpus_product_id(group, index) for group, index in groups]
+    tables = [group.tables for group, _ in groups]
+    spawn = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=_MIX_WORKERS, mp_context=spawn) as pool:
+        list(pool.map(_seal_mix_product, [str(root)] * len(products), products, tables))
     with sc.Catalog.open(root) as cat:
         editions = {name: cat.product(name).editions()[0] for name in (*STRUCTURE_PRODUCTS, *products)}
     return {name: root / "products" / name / edition.edition_id for name, edition in editions.items()}
