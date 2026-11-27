@@ -82,28 +82,41 @@ fmt:
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
+# pytest-xdist settings for the gate's tiers (GH-166). `loadfile` keeps each
+# file on one worker, so a module-scoped fixture (a sealed catalog, a BM25
+# index) is built once, where `load` rebuilds it on every worker that runs one
+# of its tests. Set `XDIST_WORKERS=0` to run a tier in one process.
+xdist_workers := env("XDIST_WORKERS", "auto")
+xdist := "-n " + xdist_workers + " --dist loadfile"
+
+# Each stores worker starts its own Azurite container. One test takes about
+# 85 s, so more than four workers make the tier no faster.
+stores_workers := env("XDIST_STORES_WORKERS", "4")
+
 # Run unit tests
 [group('test')]
 test:
-    uv run pytest -m unit
+    uv run pytest -m unit {{xdist}}
 
 # Run the gate's tests with coverage (unit + integration, as `just ci` selects).
-# Fails under the `fail_under` floor in pyproject.toml.
+# Fails under the `fail_under` floor in pyproject.toml. pytest-cov combines the
+# workers' data.
 [group('test')]
 coverage:
-    uv run pytest -m "unit or integration" --cov --cov-report=term-missing --cov-report=xml --cov-report=html
+    uv run pytest -m "unit or integration" {{xdist}} --cov --cov-report=term-missing --cov-report=xml --cov-report=html
     @echo "HTML report: htmlcov/index.html"
 
 # Run integration tests (in-process DuckDB + sdmxlib, no network)
 [group('test')]
 test-integration:
-    uv run pytest -m integration
+    uv run pytest -m integration {{xdist}}
 
-# Run the object-store tier against Azurite in a container. No container
-# runtime fails the tier and names the fix: the pre-push hook is the only gate.
+# Run the object-store tier against Azurite in containers, one per worker. No
+# container runtime fails the tier and names the fix: the pre-push hook is the
+# only gate.
 [group('test')]
 test-stores:
-    uv run pytest tests/stores -m stores -rs
+    uv run pytest tests/stores -m stores -rs -n {{stores_workers}} --dist loadfile
 
 # Run live tests against real SDMX REST endpoints (requires network)
 [group('test')]
